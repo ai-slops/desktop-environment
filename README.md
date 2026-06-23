@@ -8,6 +8,11 @@ Rust workspace scaffold for desktop-environment tooling that targets:
 
 This repository is intentionally set up without concrete crates yet. The goal is to provide conventions, shared linting, and a folder layout that scales well when adding multiple GUI apps, platform adapters, window-management helpers, overlays, and capture/output utilities.
 
+Concrete utilities now included:
+
+- `display-relay`: mirror one Windows display into a local control window
+- `audio-output-router`: clone the audio of one Windows output device into another output device
+
 ## Environment setup
 
 This repo is configured for [`mise`](https://mise.jdx.dev/) so the Rust toolchain can be installed and used consistently across Windows, macOS, and Linux.
