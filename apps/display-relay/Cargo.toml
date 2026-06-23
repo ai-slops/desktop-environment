@@ -1,0 +1,21 @@
+[package]
+name = "display-relay"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+display-relay-core = { path = "../../libs/display-relay-core" }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+windows-desktop-duplication = { path = "../../platforms/windows-desktop-duplication" }
+windows-input = { path = "../../platforms/windows-input" }
+winit = "0.30"
+softbuffer = "0.4"
+raw-window-handle = "0.6"
