@@ -10,6 +10,7 @@ pub struct RelayConfig {
     pub target: CaptureTarget,
     pub mirror_fullscreen: bool,
     pub capture_timeout_ms: u32,
+    pub target_fps: u32,
 }
 
 impl Default for RelayConfig {
@@ -18,6 +19,7 @@ impl Default for RelayConfig {
             target: CaptureTarget { display_name: String::new() },
             mirror_fullscreen: false,
             capture_timeout_ms: 16,
+            target_fps: 60,
         }
     }
 }

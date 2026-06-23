@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use display_relay_core::RelayConfig;
 use std::ffi::c_void;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tracing::error;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
@@ -25,8 +26,8 @@ use windows_desktop_duplication::{DesktopDuplicator, enumerate_displays};
 use windows_input::RemoteInputController;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::event::{ElementState, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
@@ -80,7 +81,7 @@ impl Command {
         let mut args = std::env::args().skip(1);
         let Some(first) = args.next() else {
             bail!(
-                "Usage: display-relay list | mirror <DISPLAY_NAME> [--fullscreen] [--timeout-ms N]"
+                "Usage: display-relay list | mirror <DISPLAY_NAME> [--fullscreen] [--timeout-ms N] [--fps N]"
             )
         };
 
@@ -99,6 +100,13 @@ impl Command {
                         "--timeout-ms" => {
                             let value = args.next().context("--timeout-ms expects a number")?;
                             config.capture_timeout_ms = value.parse()?;
+                        }
+                        "--fps" => {
+                            let value = args.next().context("--fps expects a number")?;
+                            config.target_fps = value.parse()?;
+                            if config.target_fps == 0 {
+                                bail!("--fps must be greater than 0");
+                            }
                         }
                         other => bail!("Unknown argument: {other}"),
                     }
@@ -119,12 +127,15 @@ struct RelayApp {
     window_id: Option<WindowId>,
     renderer: Option<FastRenderer>,
     last_window_size: Option<PhysicalSize<u32>>,
+    frame_interval: Duration,
+    next_frame_deadline: Instant,
 }
 
 impl RelayApp {
     fn new(config: RelayConfig) -> Result<Self> {
         let duplicator = DesktopDuplicator::new(&config.target.display_name)?;
         let input = RemoteInputController::new(duplicator.display_info().virtual_desktop);
+        let frame_interval = Duration::from_secs_f64(1.0 / f64::from(config.target_fps.max(1)));
 
         Ok(Self {
             config,
@@ -134,6 +145,8 @@ impl RelayApp {
             window_id: None,
             renderer: None,
             last_window_size: None,
+            frame_interval,
+            next_frame_deadline: Instant::now(),
         })
     }
 
@@ -158,13 +171,19 @@ impl RelayApp {
 
     fn redraw(&mut self) -> Result<()> {
         let cursor_overlay = self.cursor_overlay()?;
+        let capture_timeout_ms = self.effective_capture_timeout_ms();
         let renderer = self.renderer.as_mut().context("renderer not ready")?;
-        let updated = self
-            .duplicator
-            .copy_latest_frame_to(renderer.capture_texture(), self.config.capture_timeout_ms)?;
+        let updated =
+            self.duplicator.copy_latest_frame_to(renderer.capture_texture(), capture_timeout_ms)?;
 
         renderer.render(cursor_overlay, updated)?;
         Ok(())
+    }
+
+    fn effective_capture_timeout_ms(&self) -> u32 {
+        let frame_interval_ms =
+            self.frame_interval.as_millis().clamp(1, u128::from(u32::MAX)) as u32;
+        self.config.capture_timeout_ms.min(frame_interval_ms).max(1)
     }
 
     fn cursor_overlay(&self) -> Result<CursorOverlay> {
@@ -186,6 +205,16 @@ impl RelayApp {
 }
 
 impl ApplicationHandler for RelayApp {
+    fn new_events(&mut self, _: &ActiveEventLoop, cause: StartCause) {
+        if !matches!(cause, StartCause::Init | StartCause::ResumeTimeReached { .. }) {
+            return;
+        }
+
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let display = self.duplicator.display_info();
         let (resize_step_width, resize_step_height) =
@@ -228,6 +257,7 @@ impl ApplicationHandler for RelayApp {
         self.last_window_size = Some(window.inner_size());
         self.renderer = Some(renderer);
         self.window = Some(window);
+        self.next_frame_deadline = Instant::now();
     }
 
     fn window_event(
@@ -267,6 +297,7 @@ impl ApplicationHandler for RelayApp {
                 }
             }
             WindowEvent::RedrawRequested => {
+                self.next_frame_deadline = Instant::now() + self.frame_interval;
                 if let Err(error) = self.redraw() {
                     error!("Relay redraw failed: {error:#}");
                     event_loop.exit();
@@ -276,10 +307,8 @@ impl ApplicationHandler for RelayApp {
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
-        }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
     }
 }
 
