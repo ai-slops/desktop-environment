@@ -6,9 +6,10 @@ use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
-    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+    D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
+    ID3D11Resource, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY, DXGI_SAMPLE_DESC,
@@ -119,6 +120,54 @@ impl DesktopDuplicator {
         &self.display
     }
 
+    #[must_use]
+    pub fn device(&self) -> ID3D11Device {
+        self.device.clone()
+    }
+
+    #[must_use]
+    pub fn context(&self) -> ID3D11DeviceContext {
+        self.context.clone()
+    }
+
+    pub fn create_gpu_texture(&self) -> Result<ID3D11Texture2D> {
+        create_shader_texture(&self.device, self.display.area.width, self.display.area.height)
+    }
+
+    pub fn copy_latest_frame_to(
+        &mut self,
+        target_texture: &ID3D11Texture2D,
+        timeout_ms: u32,
+    ) -> Result<bool> {
+        let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+        let mut resource = None::<IDXGIResource>;
+
+        let acquire_result = unsafe {
+            self.duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
+        };
+
+        match acquire_result {
+            Ok(()) => {}
+            Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+            Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
+                bail!("Desktop duplication access was lost; recreate the relay session")
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        let resource = resource.context("Desktop duplication returned no frame resource")?;
+        let texture: ID3D11Texture2D = resource.cast()?;
+        let texture_resource: ID3D11Resource = texture.cast()?;
+        let target_resource: ID3D11Resource = target_texture.cast()?;
+
+        unsafe {
+            self.context.CopyResource(&target_resource, &texture_resource);
+            self.duplication.ReleaseFrame()?;
+        }
+
+        Ok(true)
+    }
+
     pub fn capture_frame<'a>(&'a mut self, timeout_ms: u32) -> Result<CaptureFrameView<'a>> {
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None::<IDXGIResource>;
@@ -160,14 +209,18 @@ impl DesktopDuplicator {
 
         unsafe {
             let src = mapped.pData.cast::<u8>();
-            for row in 0..height {
-                let src_row = src.add(row * row_pitch);
-                let dst_offset = row * bytes_per_row;
-                std::ptr::copy_nonoverlapping(
-                    src_row,
-                    self.frame_buffer[dst_offset..].as_mut_ptr(),
-                    bytes_per_row,
-                );
+            if row_pitch == bytes_per_row {
+                std::ptr::copy_nonoverlapping(src, self.frame_buffer.as_mut_ptr(), total_bytes);
+            } else {
+                for row in 0..height {
+                    let src_row = src.add(row * row_pitch);
+                    let dst_offset = row * bytes_per_row;
+                    std::ptr::copy_nonoverlapping(
+                        src_row,
+                        self.frame_buffer[dst_offset..].as_mut_ptr(),
+                        bytes_per_row,
+                    );
+                }
             }
             self.context.Unmap(&self.staging_texture, 0);
             self.duplication.ReleaseFrame()?;
@@ -241,6 +294,31 @@ fn create_staging_texture(
         device.CreateTexture2D(&description, None, Some(&mut texture))?;
     }
     texture.context("CreateTexture2D returned no staging texture")
+}
+
+fn create_shader_texture(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> Result<ID3D11Texture2D> {
+    let description = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+
+    let mut texture = None;
+    unsafe {
+        device.CreateTexture2D(&description, None, Some(&mut texture))?;
+    }
+    texture.context("CreateTexture2D returned no shader texture")
 }
 
 fn map_texture(

@@ -31,6 +31,10 @@ mod unsupported {
             Self
         }
 
+        pub fn cursor_position(&self) -> Result<(i32, i32)> {
+            bail!("Input injection is only supported on Windows")
+        }
+
         pub fn move_mouse(&self, _: i32, _: i32) -> Result<()> {
             bail!("Input injection is only supported on Windows")
         }

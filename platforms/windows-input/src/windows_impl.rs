@@ -1,11 +1,13 @@
 use anyhow::{Result, anyhow, bail};
 use display_relay_core::VirtualDesktop;
+use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
+use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
 #[derive(Debug, Clone, Copy)]
 pub enum MouseButton {
@@ -28,6 +30,12 @@ impl RemoteInputController {
     #[must_use]
     pub fn new(desktop: VirtualDesktop) -> Self {
         Self { desktop }
+    }
+
+    pub fn cursor_position(&self) -> Result<(i32, i32)> {
+        let mut point = POINT::default();
+        unsafe { GetCursorPos(&mut point) }?;
+        Ok((point.x, point.y))
     }
 
     pub fn move_mouse(&self, x: i32, y: i32) -> Result<()> {
