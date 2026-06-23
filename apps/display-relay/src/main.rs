@@ -5,7 +5,7 @@ use tracing::{error, warn};
 use windows_desktop_duplication::{CaptureFrameView, DesktopDuplicator, enumerate_displays};
 use windows_input::{InjectedKeyEvent, MouseButton, RemoteInputController};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, KeyEvent, MouseButton as WinitMouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -99,6 +99,7 @@ struct RelayApp {
     window_id: Option<WindowId>,
     renderer: Option<GpuRenderer>,
     last_pointer_position: Option<(f32, f32)>,
+    last_window_size: Option<PhysicalSize<u32>>,
 }
 
 impl RelayApp {
@@ -114,7 +115,29 @@ impl RelayApp {
             window_id: None,
             renderer: None,
             last_pointer_position: None,
+            last_window_size: None,
         })
+    }
+
+    fn constrained_window_size(&self, requested: PhysicalSize<u32>) -> PhysicalSize<u32> {
+        let source_area = self.duplicator.display_info().area;
+        let aspect_ratio = f64::from(source_area.width) / f64::from(source_area.height);
+
+        let requested_width = requested.width.max(1);
+        let requested_height = requested.height.max(1);
+        let height_from_width = ((f64::from(requested_width) / aspect_ratio).round() as u32).max(1);
+        let width_from_height =
+            ((f64::from(requested_height) * aspect_ratio).round() as u32).max(1);
+
+        let previous = self.last_window_size.unwrap_or(requested);
+        let width_delta = requested_width.abs_diff(previous.width);
+        let height_delta = requested_height.abs_diff(previous.height);
+
+        if width_delta >= height_delta {
+            PhysicalSize::new(requested_width, height_from_width)
+        } else {
+            PhysicalSize::new(width_from_height, requested_height)
+        }
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -199,11 +222,17 @@ impl RelayApp {
 impl ApplicationHandler for RelayApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let display = self.duplicator.display_info();
+        let (resize_step_width, resize_step_height) =
+            reduce_ratio(display.area.width.max(1), display.area.height.max(1));
         let mut attributes = WindowAttributes::default()
             .with_title(format!("Relay {}", display.name))
             .with_inner_size(LogicalSize::new(
                 f64::from(display.area.width),
                 f64::from(display.area.height),
+            ))
+            .with_resize_increments(LogicalSize::new(
+                f64::from(resize_step_width),
+                f64::from(resize_step_height),
             ));
 
         if self.config.mirror_fullscreen {
@@ -240,6 +269,7 @@ impl ApplicationHandler for RelayApp {
         }
 
         self.window_id = Some(window.id());
+        self.last_window_size = Some(window.inner_size());
         self.renderer = Some(renderer);
         self.window = Some(window);
     }
@@ -257,6 +287,15 @@ impl ApplicationHandler for RelayApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
+                let constrained = self.constrained_window_size(size);
+                if constrained != size {
+                    if let Some(window) = self.window.as_ref() {
+                        let _ = window.request_inner_size(constrained);
+                    }
+                    return;
+                }
+
+                self.last_window_size = Some(size);
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.resize(size.width, size.height) {
                         error!("Failed to resize relay surface: {error:#}");
@@ -593,6 +632,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     return textureSample(relay_texture, relay_sampler, in.uv);
 }
 "#;
+
+fn reduce_ratio(width: u32, height: u32) -> (u32, u32) {
+    let divisor = gcd(width.max(1), height.max(1));
+    (width / divisor, height / divisor)
+}
+
+fn gcd(mut a: u32, mut b: u32) -> u32 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+
+    a.max(1)
+}
 
 fn keycode_to_set1_scancode(code: KeyCode) -> Option<u16> {
     Some(match code {
