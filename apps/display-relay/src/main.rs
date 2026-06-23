@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::error;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DBlob};
 use windows::Win32::Graphics::Direct3D11::{
@@ -21,7 +21,13 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
     IDXGISwapChain1,
 };
-use windows::core::{Interface, PCSTR};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetClientRect, GetPropW, GetWindowRect,
+    RemovePropW, SetPropW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_ENTERSIZEMOVE,
+    WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZING, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT,
+    WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+};
+use windows::core::{Interface, PCSTR, w};
 use windows_desktop_duplication::{DesktopDuplicator, enumerate_displays};
 use windows_input::RemoteInputController;
 use winit::application::ApplicationHandler;
@@ -131,6 +137,18 @@ struct RelayApp {
     next_frame_deadline: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeAxis {
+    Width,
+    Height,
+}
+
+struct AspectRatioHook {
+    aspect_width: u32,
+    aspect_height: u32,
+    old_wndproc: isize,
+}
+
 impl RelayApp {
     fn new(config: RelayConfig) -> Result<Self> {
         let duplicator = DesktopDuplicator::new(&config.target.display_name)?;
@@ -148,33 +166,6 @@ impl RelayApp {
             frame_interval,
             next_frame_deadline: Instant::now(),
         })
-    }
-
-    fn constrained_window_size(&self, requested: PhysicalSize<u32>) -> PhysicalSize<u32> {
-        let source_area = self.duplicator.display_info().area;
-        let aspect_ratio = f64::from(source_area.width) / f64::from(source_area.height);
-        let requested_width = requested.width.max(1);
-        let requested_height = requested.height.max(1);
-        let height_from_width = ((f64::from(requested_width) / aspect_ratio).round() as u32).max(1);
-        let width_from_height =
-            ((f64::from(requested_height) * aspect_ratio).round() as u32).max(1);
-        let previous = self.last_window_size.unwrap_or(requested);
-        let width_delta = requested_width.abs_diff(previous.width);
-        let height_delta = requested_height.abs_diff(previous.height);
-
-        if width_delta >= height_delta {
-            PhysicalSize::new(requested_width, height_from_width)
-        } else {
-            PhysicalSize::new(width_from_height, requested_height)
-        }
-    }
-
-    fn should_preserve_window_aspect(&self) -> bool {
-        let Some(window) = self.window.as_ref() else {
-            return true;
-        };
-
-        window.fullscreen().is_none() && !window.is_maximized()
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -252,6 +243,15 @@ impl ApplicationHandler for RelayApp {
         };
 
         let window = Arc::new(window);
+        if let Err(error) = install_aspect_ratio_hook(
+            &window,
+            display.area.width.max(1),
+            display.area.height.max(1),
+        ) {
+            error!("Failed to install aspect ratio hook: {error:#}");
+            event_loop.exit();
+            return;
+        }
         let renderer = match FastRenderer::new(Arc::clone(&window), &self.duplicator) {
             Ok(renderer) => renderer,
             Err(error) => {
@@ -281,16 +281,6 @@ impl ApplicationHandler for RelayApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if self.should_preserve_window_aspect() {
-                    let constrained = self.constrained_window_size(size);
-                    if constrained != size {
-                        if let Some(window) = self.window.as_ref() {
-                            let _ = window.request_inner_size(constrained);
-                        }
-                        return;
-                    }
-                }
-
                 self.last_window_size = Some(size);
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.resize(size.width, size.height) {
@@ -319,6 +309,12 @@ impl ApplicationHandler for RelayApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
+    }
+
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        if let Some(window) = self.window.as_ref() {
+            let _ = uninstall_aspect_ratio_hook(window);
+        }
     }
 }
 
@@ -438,6 +434,213 @@ fn hwnd_from_window(window: &Window) -> Result<HWND> {
         RawWindowHandle::Win32(win32) => Ok(HWND(win32.hwnd.get() as *mut c_void)),
         _ => bail!("display-relay requires a Win32 window handle"),
     }
+}
+
+fn install_aspect_ratio_hook(window: &Window, aspect_width: u32, aspect_height: u32) -> Result<()> {
+    let hwnd = hwnd_from_window(window)?;
+    let hook = Box::new(AspectRatioHook { aspect_width, aspect_height, old_wndproc: 0 });
+    let hook_ptr = Box::into_raw(hook);
+
+    unsafe {
+        SetPropW(
+            hwnd,
+            w!("DisplayRelayAspectHook"),
+            Some(windows::Win32::Foundation::HANDLE(hook_ptr.cast::<core::ffi::c_void>())),
+        )?;
+        let old_wndproc = SetWindowLongPtrW(
+            hwnd,
+            WINDOW_LONG_PTR_INDEX(GWLP_WNDPROC.0),
+            aspect_ratio_wndproc as *const () as usize as isize,
+        );
+        (*hook_ptr).old_wndproc = old_wndproc;
+    }
+
+    Ok(())
+}
+
+fn uninstall_aspect_ratio_hook(window: &Window) -> Result<()> {
+    let hwnd = hwnd_from_window(window)?;
+    unsafe {
+        let handle = RemovePropW(hwnd, w!("DisplayRelayAspectHook"))?;
+        let hook_ptr = handle.0 as *mut AspectRatioHook;
+        if !hook_ptr.is_null() {
+            let old_wndproc = (*hook_ptr).old_wndproc;
+            SetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_WNDPROC.0), old_wndproc);
+            drop(Box::from_raw(hook_ptr));
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn aspect_ratio_wndproc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let hook_handle = unsafe { GetPropW(hwnd, w!("DisplayRelayAspectHook")) };
+    if hook_handle.0.is_null() {
+        return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+    }
+
+    let hook = unsafe { &mut *(hook_handle.0 as *mut AspectRatioHook) };
+
+    match message {
+        WM_ENTERSIZEMOVE | WM_EXITSIZEMOVE => {}
+        WM_SIZING => {
+            let rect_ptr = lparam.0 as *mut RECT;
+            if !rect_ptr.is_null() {
+                unsafe { apply_aspect_ratio_to_sizing_rect(hwnd, hook, wparam, &mut *rect_ptr) };
+                return LRESULT(1);
+            }
+        }
+        WM_NCDESTROY => {
+            let old_wndproc = hook.old_wndproc;
+            let hook_ptr = hook as *mut AspectRatioHook;
+            unsafe {
+                let _ = RemovePropW(hwnd, w!("DisplayRelayAspectHook"));
+                SetWindowLongPtrW(hwnd, WINDOW_LONG_PTR_INDEX(GWLP_WNDPROC.0), old_wndproc);
+            }
+            let result = call_original_wndproc(old_wndproc, hwnd, message, wparam, lparam);
+            unsafe {
+                drop(Box::from_raw(hook_ptr));
+            }
+            return result;
+        }
+        _ => {}
+    }
+
+    call_original_wndproc(hook.old_wndproc, hwnd, message, wparam, lparam)
+}
+
+unsafe fn apply_aspect_ratio_to_sizing_rect(
+    hwnd: HWND,
+    hook: &mut AspectRatioHook,
+    edge: WPARAM,
+    rect: &mut RECT,
+) {
+    let mut current_window_rect = RECT::default();
+    let mut current_client_rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut current_window_rect) }.is_err()
+        || unsafe { GetClientRect(hwnd, &mut current_client_rect) }.is_err()
+    {
+        return;
+    }
+
+    let current_client_width = rect_width(&current_client_rect).max(1);
+    let current_client_height = rect_height(&current_client_rect).max(1);
+    let frame_width = (rect_width(&current_window_rect) - current_client_width).max(0);
+    let frame_height = (rect_height(&current_window_rect) - current_client_height).max(0);
+
+    let requested_client_width = (rect_width(rect) - frame_width).max(1);
+    let requested_client_height = (rect_height(rect) - frame_height).max(1);
+    let axis = choose_resize_axis(
+        edge,
+        requested_client_width,
+        requested_client_height,
+        hook.aspect_width,
+        hook.aspect_height,
+    );
+
+    let target_client_width;
+    let target_client_height;
+    match axis {
+        ResizeAxis::Width => {
+            target_client_width = requested_client_width.max(1);
+            target_client_height = ((i64::from(target_client_width)
+                * i64::from(hook.aspect_height))
+                / i64::from(hook.aspect_width))
+            .max(1) as i32;
+        }
+        ResizeAxis::Height => {
+            target_client_height = requested_client_height.max(1);
+            target_client_width = ((i64::from(target_client_height) * i64::from(hook.aspect_width))
+                / i64::from(hook.aspect_height))
+            .max(1) as i32;
+        }
+    }
+
+    let target_outer_width = target_client_width + frame_width;
+    let target_outer_height = target_client_height + frame_height;
+    apply_target_outer_size(rect, edge, target_outer_width, target_outer_height);
+}
+
+fn apply_target_outer_size(rect: &mut RECT, edge: WPARAM, width: i32, height: i32) {
+    match edge.0 as u32 {
+        WMSZ_LEFT => rect.left = rect.right - width,
+        WMSZ_RIGHT => rect.right = rect.left + width,
+        WMSZ_TOP => rect.top = rect.bottom - height,
+        WMSZ_BOTTOM => rect.bottom = rect.top + height,
+        WMSZ_TOPLEFT => {
+            rect.left = rect.right - width;
+            rect.top = rect.bottom - height;
+        }
+        WMSZ_TOPRIGHT => {
+            rect.right = rect.left + width;
+            rect.top = rect.bottom - height;
+        }
+        WMSZ_BOTTOMLEFT => {
+            rect.left = rect.right - width;
+            rect.bottom = rect.top + height;
+        }
+        WMSZ_BOTTOMRIGHT => {
+            rect.right = rect.left + width;
+            rect.bottom = rect.top + height;
+        }
+        _ => {}
+    }
+}
+
+fn is_horizontal_edge_only(edge: WPARAM) -> bool {
+    matches!(edge.0 as u32, WMSZ_LEFT | WMSZ_RIGHT)
+}
+
+fn is_vertical_edge_only(edge: WPARAM) -> bool {
+    matches!(edge.0 as u32, WMSZ_TOP | WMSZ_BOTTOM)
+}
+
+fn choose_resize_axis(
+    edge: WPARAM,
+    requested_width: i32,
+    requested_height: i32,
+    aspect_width: u32,
+    aspect_height: u32,
+) -> ResizeAxis {
+    if is_vertical_edge_only(edge) {
+        return ResizeAxis::Height;
+    }
+    if is_horizontal_edge_only(edge) {
+        return ResizeAxis::Width;
+    }
+
+    let width_scale = i64::from(requested_width.max(1)) * i64::from(aspect_height.max(1));
+    let height_scale = i64::from(requested_height.max(1)) * i64::from(aspect_width.max(1));
+
+    if width_scale <= height_scale { ResizeAxis::Width } else { ResizeAxis::Height }
+}
+
+fn rect_width(rect: &RECT) -> i32 {
+    rect.right - rect.left
+}
+
+fn rect_height(rect: &RECT) -> i32 {
+    rect.bottom - rect.top
+}
+
+fn call_original_wndproc(
+    old_wndproc: isize,
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let proc = unsafe {
+        std::mem::transmute::<
+            isize,
+            Option<unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>,
+        >(old_wndproc)
+    };
+    unsafe { CallWindowProcW(proc, hwnd, message, wparam, lparam) }
 }
 
 fn create_swap_chain(
