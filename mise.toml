@@ -1,0 +1,34 @@
+[tools]
+rust = "stable"
+
+[env]
+CARGO_TERM_COLOR = "always"
+RUST_BACKTRACE = "1"
+
+[tasks.setup]
+description = "Install the workspace toolchain declared in mise.toml"
+run = "mise install"
+
+[tasks.fmt]
+description = "Format the entire workspace"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check formatting without writing changes"
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+description = "Run clippy with workspace-wide strict warnings"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.check]
+description = "Typecheck all workspace crates and targets"
+run = "cargo check --workspace --all-targets --all-features"
+
+[tasks.test]
+description = "Run the full Rust test suite"
+run = "cargo test --workspace --all-targets --all-features"
+
+[tasks.verify]
+description = "Run the standard local verification sequence"
+depends = ["fmt-check", "lint", "check", "test"]

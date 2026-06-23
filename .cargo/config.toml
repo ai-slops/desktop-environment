@@ -1,0 +1,12 @@
+[build]
+target-dir = "target"
+
+[alias]
+xtask = "run -p xtask --"
+lint = "clippy --workspace --all-targets --all-features -- -D warnings"
+fmt-check = "fmt --all -- --check"
+check-all = "check --workspace --all-targets --all-features"
+test-all = "test --workspace --all-targets --all-features"
+
+[env]
+RUST_BACKTRACE = "1"
