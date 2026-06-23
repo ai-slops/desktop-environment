@@ -52,11 +52,11 @@ cargo run -p display-relay -- mirror \\.\DISPLAY3 --fullscreen
 - The target output still needs to exist as a Windows desktop display. Many HDMI dummy plugs and capture devices do this well; pure EDID-less sinks do not.
 - Desktop Duplication can lose access when the GPU topology changes, the display sleeps, or the session is disconnected. Recreate the session when that happens.
 - Keyboard forwarding currently covers common keys through scan-code mapping, not every extended key.
-- The current renderer copies the captured frame into CPU memory each frame. It is correct for an MVP, but not yet the lowest-latency path.
+- The relay now uploads BGRA frames into a GPU texture and lets the window renderer scale/present them. Capture still uses a CPU-readable staging texture because that is the Desktop Duplication handoff point in this implementation.
 
 ## Good next steps
 
-- move rendering to a GPU-backed presenter to avoid CPU blits
+- reduce the capture-side CPU copy by sharing a DXGI/D3D texture directly with the presenter
 - add explicit output selection for the mirror window itself
 - add wheel input and more complete extended-key support
 - add optional cursor-lock / relative-input mode

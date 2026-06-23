@@ -28,11 +28,11 @@ pub struct DisplayInfo {
     pub virtual_desktop: VirtualDesktop,
 }
 
-#[derive(Debug, Clone)]
-pub struct CapturedFrame {
+#[derive(Debug, Clone, Copy)]
+pub struct CaptureFrameView<'a> {
     pub width: u32,
     pub height: u32,
-    pub pixels_bgra: Vec<u8>,
+    pub pixels_bgra: &'a [u8],
 }
 
 pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
@@ -78,6 +78,7 @@ pub struct DesktopDuplicator {
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     staging_texture: ID3D11Texture2D,
+    frame_buffer: Vec<u8>,
 }
 
 impl DesktopDuplicator {
@@ -107,7 +108,10 @@ impl DesktopDuplicator {
         let staging_texture =
             create_staging_texture(&device, display.area.width, display.area.height)?;
 
-        Ok(Self { display, device, context, duplication, staging_texture })
+        let frame_buffer =
+            vec![0_u8; display.area.width as usize * display.area.height as usize * 4];
+
+        Ok(Self { display, device, context, duplication, staging_texture, frame_buffer })
     }
 
     #[must_use]
@@ -115,7 +119,7 @@ impl DesktopDuplicator {
         &self.display
     }
 
-    pub fn capture_frame(&mut self, timeout_ms: u32) -> Result<CapturedFrame> {
+    pub fn capture_frame<'a>(&'a mut self, timeout_ms: u32) -> Result<CaptureFrameView<'a>> {
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None::<IDXGIResource>;
 
@@ -149,7 +153,10 @@ impl DesktopDuplicator {
         let row_pitch = mapped.RowPitch as usize;
         let bytes_per_row = width * 4;
         let total_bytes = bytes_per_row * height;
-        let mut pixels = vec![0_u8; total_bytes];
+
+        if self.frame_buffer.len() != total_bytes {
+            self.frame_buffer.resize(total_bytes, 0);
+        }
 
         unsafe {
             let src = mapped.pData.cast::<u8>();
@@ -158,7 +165,7 @@ impl DesktopDuplicator {
                 let dst_offset = row * bytes_per_row;
                 std::ptr::copy_nonoverlapping(
                     src_row,
-                    pixels[dst_offset..].as_mut_ptr(),
+                    self.frame_buffer[dst_offset..].as_mut_ptr(),
                     bytes_per_row,
                 );
             }
@@ -166,10 +173,10 @@ impl DesktopDuplicator {
             self.duplication.ReleaseFrame()?;
         }
 
-        Ok(CapturedFrame {
+        Ok(CaptureFrameView {
             width: self.display.area.width,
             height: self.display.area.height,
-            pixels_bgra: pixels,
+            pixels_bgra: &self.frame_buffer,
         })
     }
 }

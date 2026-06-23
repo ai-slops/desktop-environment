@@ -12,10 +12,10 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 display-relay-core = { path = "../../libs/display-relay-core" }
+pollster = "0.4"
 tracing.workspace = true
 tracing-subscriber.workspace = true
+wgpu = "24"
 windows-desktop-duplication = { path = "../../platforms/windows-desktop-duplication" }
 windows-input = { path = "../../platforms/windows-input" }
 winit = "0.30"
-softbuffer = "0.4"
-raw-window-handle = "0.6"

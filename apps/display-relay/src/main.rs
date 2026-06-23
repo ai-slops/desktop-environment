@@ -1,11 +1,8 @@
 use anyhow::{Context, Result, bail};
 use display_relay_core::{PointerSample, RelayConfig};
-use raw_window_handle::{DisplayHandle, HasDisplayHandle};
-use softbuffer::{Context as SoftbufferContext, Surface};
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use tracing::{error, warn};
-use windows_desktop_duplication::{CapturedFrame, DesktopDuplicator, enumerate_displays};
+use windows_desktop_duplication::{CaptureFrameView, DesktopDuplicator, enumerate_displays};
 use windows_input::{InjectedKeyEvent, MouseButton, RemoteInputController};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -100,8 +97,7 @@ struct RelayApp {
     input: RemoteInputController,
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
-    softbuffer_context: Option<SoftbufferContext<DisplayHandle<'static>>>,
-    surface: Option<Surface<DisplayHandle<'static>, Arc<Window>>>,
+    renderer: Option<GpuRenderer>,
     last_pointer_position: Option<(f32, f32)>,
 }
 
@@ -116,15 +112,14 @@ impl RelayApp {
             input,
             window: None,
             window_id: None,
-            softbuffer_context: None,
-            surface: None,
+            renderer: None,
             last_pointer_position: None,
         })
     }
 
     fn redraw(&mut self) -> Result<()> {
         let frame = self.duplicator.capture_frame(self.config.capture_timeout_ms);
-        let surface = self.surface.as_mut().context("surface not ready")?;
+        let renderer = self.renderer.as_mut().context("renderer not ready")?;
         let window = self.window.as_ref().context("window not ready")?;
 
         let captured = match frame {
@@ -135,7 +130,8 @@ impl RelayApp {
             Err(error) => return Err(error),
         };
 
-        render_frame(surface, window, captured)?;
+        renderer.render_frame(&captured)?;
+        window.request_redraw();
         Ok(())
     }
 
@@ -223,52 +219,28 @@ impl ApplicationHandler for RelayApp {
             }
         };
 
-        let display_handle = match event_loop.display_handle() {
-            Ok(handle) => handle,
-            Err(error) => {
-                error!("Failed to fetch display handle: {error}");
-                event_loop.exit();
-                return;
-            }
-        };
-
-        let display_handle = unsafe {
-            std::mem::transmute::<DisplayHandle<'_>, DisplayHandle<'static>>(display_handle)
-        };
-
-        let context = match SoftbufferContext::new(display_handle) {
-            Ok(context) => context,
-            Err(error) => {
-                error!("Failed to create softbuffer context: {error}");
-                event_loop.exit();
-                return;
-            }
-        };
-
         let window = Arc::new(window);
-
-        let mut surface = match Surface::new(&context, Arc::clone(&window)) {
-            Ok(surface) => surface,
+        let renderer = match pollster::block_on(GpuRenderer::new(
+            Arc::clone(&window),
+            self.duplicator.display_info().area.width,
+            self.duplicator.display_info().area.height,
+        )) {
+            Ok(renderer) => renderer,
             Err(error) => {
-                error!("Failed to create softbuffer surface: {error}");
+                error!("Failed to create GPU renderer: {error:#}");
                 event_loop.exit();
                 return;
             }
         };
 
-        let size = window.inner_size();
-        if let Err(error) = surface.resize(
-            NonZeroU32::new(size.width.max(1)).expect("non-zero width"),
-            NonZeroU32::new(size.height.max(1)).expect("non-zero height"),
-        ) {
-            error!("Failed to resize softbuffer surface: {error}");
+        if let Err(error) = renderer.configure_surface_for_current_size() {
+            error!("Failed to configure GPU surface: {error:#}");
             event_loop.exit();
             return;
         }
 
         self.window_id = Some(window.id());
-        self.softbuffer_context = Some(context);
-        self.surface = Some(surface);
+        self.renderer = Some(renderer);
         self.window = Some(window);
     }
 
@@ -285,12 +257,9 @@ impl ApplicationHandler for RelayApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(surface) = self.surface.as_mut() {
-                    if let Err(error) = surface.resize(
-                        NonZeroU32::new(size.width.max(1)).expect("non-zero width"),
-                        NonZeroU32::new(size.height.max(1)).expect("non-zero height"),
-                    ) {
-                        error!("Failed to resize relay surface: {error}");
+                if let Some(renderer) = self.renderer.as_mut() {
+                    if let Err(error) = renderer.resize(size.width, size.height) {
+                        error!("Failed to resize relay surface: {error:#}");
                         event_loop.exit();
                     }
                 }
@@ -327,37 +296,303 @@ impl ApplicationHandler for RelayApp {
     }
 }
 
-fn render_frame(
-    surface: &mut Surface<DisplayHandle<'static>, Arc<Window>>,
-    window: &Window,
-    frame: CapturedFrame,
-) -> Result<()> {
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let mut buffer = surface.buffer_mut().map_err(|error| anyhow::anyhow!("{error}"))?;
-    let output_size = window.inner_size();
-    let target_width = output_size.width as usize;
-    let target_height = output_size.height as usize;
-
-    if target_width == 0 || target_height == 0 {
-        return Ok(());
-    }
-
-    for y in 0..target_height {
-        let source_y = (y * height) / target_height;
-        for x in 0..target_width {
-            let source_x = (x * width) / target_width;
-            let source_offset = ((source_y * width) + source_x) * 4;
-            let b = frame.pixels_bgra[source_offset];
-            let g = frame.pixels_bgra[source_offset + 1];
-            let r = frame.pixels_bgra[source_offset + 2];
-            buffer[(y * target_width) + x] = u32::from_be_bytes([0, r, g, b]);
-        }
-    }
-
-    buffer.present().map_err(|error| anyhow::anyhow!("{error}"))?;
-    Ok(())
+struct GpuRenderer {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface_config: wgpu::SurfaceConfiguration,
+    capture_texture: wgpu::Texture,
+    capture_texture_size: wgpu::Extent3d,
+    bind_group: wgpu::BindGroup,
+    pipeline: wgpu::RenderPipeline,
 }
+
+impl GpuRenderer {
+    async fn new(window: Arc<Window>, capture_width: u32, capture_height: u32) -> Result<Self> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let surface = instance.create_surface(Arc::clone(&window))?;
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .context("No suitable GPU adapter found for the relay window")?;
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("display-relay-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                },
+                None,
+            )
+            .await?;
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let surface_format = surface_caps
+            .formats
+            .iter()
+            .copied()
+            .find(wgpu::TextureFormat::is_srgb)
+            .unwrap_or(surface_caps.formats[0]);
+        let present_mode = surface_caps
+            .present_modes
+            .iter()
+            .copied()
+            .find(|mode| *mode == wgpu::PresentMode::AutoNoVsync)
+            .unwrap_or(surface_caps.present_modes[0]);
+        let alpha_mode = surface_caps.alpha_modes[0];
+
+        let window_size = window.inner_size();
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: surface_format,
+            width: window_size.width.max(1),
+            height: window_size.height.max(1),
+            present_mode,
+            alpha_mode,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        let capture_texture_size = wgpu::Extent3d {
+            width: capture_width.max(1),
+            height: capture_height.max(1),
+            depth_or_array_layers: 1,
+        };
+        let capture_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("display-relay-capture-texture"),
+            size: capture_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let capture_texture_view =
+            capture_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("display-relay-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("display-relay-shader"),
+            source: wgpu::ShaderSource::Wgsl(RELAY_SHADER.into()),
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("display-relay-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("display-relay-bind-group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&capture_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("display-relay-pipeline-layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("display-relay-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        Ok(Self {
+            window,
+            surface,
+            device,
+            queue,
+            surface_config,
+            capture_texture,
+            capture_texture_size,
+            bind_group,
+            pipeline,
+        })
+    }
+
+    fn configure_surface_for_current_size(&self) -> Result<()> {
+        if self.surface_config.width == 0 || self.surface_config.height == 0 {
+            bail!("Relay window surface size is zero");
+        }
+
+        self.surface.configure(&self.device, &self.surface_config);
+        Ok(())
+    }
+
+    fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        self.configure_surface_for_current_size()
+    }
+
+    fn render_frame(&mut self, frame: &CaptureFrameView<'_>) -> Result<()> {
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.capture_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            frame.pixels_bgra,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(frame.width * 4),
+                rows_per_image: Some(frame.height),
+            },
+            self.capture_texture_size,
+        );
+
+        let output = match self.surface.get_current_texture() {
+            Ok(output) => output,
+            Err(wgpu::SurfaceError::Outdated | wgpu::SurfaceError::Lost) => {
+                self.resize(self.window.inner_size().width, self.window.inner_size().height)?;
+                return Ok(());
+            }
+            Err(wgpu::SurfaceError::Timeout) => return Ok(()),
+            Err(wgpu::SurfaceError::OutOfMemory) => bail!("GPU surface ran out of memory"),
+            Err(other) => {
+                return Err(anyhow::anyhow!("Failed to acquire surface texture: {other}"));
+            }
+        };
+
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("display-relay-encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("display-relay-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.draw(0..3, 0..1);
+        }
+
+        self.queue.submit([encoder.finish()]);
+        output.present();
+        Ok(())
+    }
+}
+
+const RELAY_SHADER: &str = r#"
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -3.0),
+        vec2<f32>(-1.0, 1.0),
+        vec2<f32>(3.0, 1.0),
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 2.0),
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(2.0, 0.0),
+    );
+    let position = positions[vertex_index];
+    var out: VertexOutput;
+    out.position = vec4<f32>(position, 0.0, 1.0);
+    out.uv = uvs[vertex_index];
+    return out;
+}
+
+@group(0) @binding(0)
+var relay_texture: texture_2d<f32>;
+
+@group(0) @binding(1)
+var relay_sampler: sampler;
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(relay_texture, relay_sampler, in.uv);
+}
+"#;
 
 fn keycode_to_set1_scancode(code: KeyCode) -> Option<u16> {
     Some(match code {
