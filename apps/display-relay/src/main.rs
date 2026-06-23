@@ -169,6 +169,14 @@ impl RelayApp {
         }
     }
 
+    fn should_preserve_window_aspect(&self) -> bool {
+        let Some(window) = self.window.as_ref() else {
+            return true;
+        };
+
+        window.fullscreen().is_none() && !window.is_maximized()
+    }
+
     fn redraw(&mut self) -> Result<()> {
         let cursor_overlay = self.cursor_overlay()?;
         let capture_timeout_ms = self.effective_capture_timeout_ms();
@@ -273,12 +281,14 @@ impl ApplicationHandler for RelayApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                let constrained = self.constrained_window_size(size);
-                if constrained != size {
-                    if let Some(window) = self.window.as_ref() {
-                        let _ = window.request_inner_size(constrained);
+                if self.should_preserve_window_aspect() {
+                    let constrained = self.constrained_window_size(size);
+                    if constrained != size {
+                        if let Some(window) = self.window.as_ref() {
+                            let _ = window.request_inner_size(constrained);
+                        }
+                        return;
                     }
-                    return;
                 }
 
                 self.last_window_size = Some(size);
@@ -323,6 +333,7 @@ struct FastRenderer {
     pixel_shader: ID3D11PixelShader,
     sampler: ID3D11SamplerState,
     cursor_buffer: ID3D11Buffer,
+    source_size: PhysicalSize<u32>,
     viewport: D3D11_VIEWPORT,
 }
 
@@ -353,7 +364,11 @@ impl FastRenderer {
         let pixel_shader = compile_pixel_shader(&device)?;
         let sampler = create_sampler(&device)?;
         let cursor_buffer = create_cursor_buffer(&device)?;
-        let viewport = viewport_from_size(window.inner_size());
+        let source_size = PhysicalSize::new(
+            duplicator.display_info().area.width,
+            duplicator.display_info().area.height,
+        );
+        let viewport = fitted_viewport(window.inner_size(), source_size);
 
         Ok(Self {
             device,
@@ -366,6 +381,7 @@ impl FastRenderer {
             pixel_shader,
             sampler,
             cursor_buffer,
+            source_size,
             viewport,
         })
     }
@@ -388,7 +404,7 @@ impl FastRenderer {
         drop(old_rtv);
         self.render_target_view =
             Some(recreate_swap_chain_target(&self.device, &self.swap_chain, width, height)?);
-        self.viewport = viewport_from_size(PhysicalSize::new(width, height));
+        self.viewport = fitted_viewport(PhysicalSize::new(width, height), self.source_size);
         Ok(())
     }
 
@@ -652,12 +668,23 @@ fn update_cursor_buffer(
     }
 }
 
-fn viewport_from_size(size: PhysicalSize<u32>) -> D3D11_VIEWPORT {
+fn fitted_viewport(
+    window_size: PhysicalSize<u32>,
+    content_size: PhysicalSize<u32>,
+) -> D3D11_VIEWPORT {
+    let window_width = window_size.width.max(1) as f32;
+    let window_height = window_size.height.max(1) as f32;
+    let content_width = content_size.width.max(1) as f32;
+    let content_height = content_size.height.max(1) as f32;
+    let scale = (window_width / content_width).min(window_height / content_height);
+    let fitted_width = (content_width * scale).max(1.0);
+    let fitted_height = (content_height * scale).max(1.0);
+
     D3D11_VIEWPORT {
-        TopLeftX: 0.0,
-        TopLeftY: 0.0,
-        Width: size.width.max(1) as f32,
-        Height: size.height.max(1) as f32,
+        TopLeftX: ((window_width - fitted_width) * 0.5).max(0.0),
+        TopLeftY: ((window_height - fitted_height) * 0.5).max(0.0),
+        Width: fitted_width,
+        Height: fitted_height,
         MinDepth: 0.0,
         MaxDepth: 1.0,
     }
