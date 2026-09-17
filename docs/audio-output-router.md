@@ -52,8 +52,8 @@ cargo run -p audio-output-router -- route "Speakers" "Headphones"
 - Selecting the same source and target is rejected to prevent feedback.
 - A name fragment must match exactly one device. For duplicate names, use interactive selection or a full device ID from `list-audio-devices`.
 - Devices whose friendly names cannot be read appear as `Unnamed output` with their IDs. A name lookup failure no longer prevents listing or selecting other devices; it does not guarantee the unnamed endpoint can be opened.
-- If a stream fails (for example after disconnecting a device), routing exits with an error. Reconnect the device and restart; automatic reconnection is not implemented.
-- `default` is resolved when routing starts. Changing the Windows default later does not switch the running source.
+- If a stream fails after routing has started (for example a device is disconnected, reconfigured, or a new device is added and Windows invalidates the audio session), the router logs a warning, waits, and re-resolves and reopens both devices automatically; it does not exit. Selector strings (including `default`) are re-resolved on each retry, so `default` can pick up a new default device after a retry. A failure to resolve or open a device on the very first start (e.g. a typo) still exits immediately.
+- `default` is resolved when routing starts (and again on each automatic retry after a device error). It does not switch the running source purely because the Windows default changed while a stream is healthy.
 
 ## Virtual cable use
 

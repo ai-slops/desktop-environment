@@ -4,7 +4,9 @@
 mod windows_impl;
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::{CaptureFrameView, DesktopDuplicator, DisplayInfo, enumerate_displays};
+pub use windows_impl::{
+    CaptureFrameView, DesktopDuplicator, DisplayInfo, DuplicationAccessLost, enumerate_displays,
+};
 
 #[cfg(not(target_os = "windows"))]
 mod unsupported {
@@ -26,6 +28,17 @@ mod unsupported {
         pub pixels_bgra: &'a [u8],
     }
 
+    #[derive(Debug)]
+    pub struct DuplicationAccessLost;
+
+    impl std::fmt::Display for DuplicationAccessLost {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Desktop duplication access was lost; recreate the relay session")
+        }
+    }
+
+    impl std::error::Error for DuplicationAccessLost {}
+
     pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
         bail!("Desktop Duplication is only supported on Windows")
     }
@@ -44,8 +57,14 @@ mod unsupported {
         pub fn capture_frame<'a>(&'a mut self, _: u32) -> Result<CaptureFrameView<'a>> {
             bail!("Desktop Duplication is only supported on Windows")
         }
+
+        pub fn recreate(&mut self) -> Result<()> {
+            bail!("Desktop Duplication is only supported on Windows")
+        }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub use unsupported::{CaptureFrameView, DesktopDuplicator, DisplayInfo, enumerate_displays};
+pub use unsupported::{
+    CaptureFrameView, DesktopDuplicator, DisplayInfo, DuplicationAccessLost, enumerate_displays,
+};

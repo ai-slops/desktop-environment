@@ -36,6 +36,19 @@ pub struct CaptureFrameView<'a> {
     pub pixels_bgra: &'a [u8],
 }
 
+/// Signals that the OS revoked desktop duplication access (e.g. a display or GPU
+/// reconfiguration). Callers should call [`DesktopDuplicator::recreate`] and retry.
+#[derive(Debug)]
+pub struct DuplicationAccessLost;
+
+impl std::fmt::Display for DuplicationAccessLost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Desktop duplication access was lost; recreate the relay session")
+    }
+}
+
+impl std::error::Error for DuplicationAccessLost {}
+
 pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
     let virtual_bounds = read_virtual_desktop_bounds();
@@ -120,6 +133,43 @@ impl DesktopDuplicator {
         &self.display
     }
 
+    /// Re-acquires desktop duplication for the same display after access was lost
+    /// (e.g. a display or GPU reconfiguration). Reuses the existing D3D11 device.
+    pub fn recreate(&mut self) -> Result<()> {
+        let display = enumerate_displays()?
+            .into_iter()
+            .find(|display| display.name.eq_ignore_ascii_case(&self.display.name))
+            .with_context(|| format!("Display '{}' is no longer available", self.display.name))?;
+
+        let dxgi_device: IDXGIDevice = self.device.cast()?;
+        let adapter = unsafe { dxgi_device.GetAdapter() }?;
+        let output = find_output(&adapter, &display.name)?
+            .ok_or_else(|| anyhow!("Display '{}' is no longer available", display.name))?;
+        let output1: IDXGIOutput1 = output.cast()?;
+        let duplication = unsafe { output1.DuplicateOutput(&self.device) }.map_err(|error| {
+            if error.code() == E_ACCESSDENIED {
+                anyhow!(
+                    "Desktop Duplication access was denied. Run from the interactive user session on the GPU that owns the target display"
+                )
+            } else {
+                anyhow!(error)
+            }
+        })?;
+
+        if display.area.width != self.display.area.width
+            || display.area.height != self.display.area.height
+        {
+            self.staging_texture =
+                create_staging_texture(&self.device, display.area.width, display.area.height)?;
+            self.frame_buffer =
+                vec![0_u8; display.area.width as usize * display.area.height as usize * 4];
+        }
+
+        self.display = display;
+        self.duplication = duplication;
+        Ok(())
+    }
+
     #[must_use]
     pub fn device(&self) -> ID3D11Device {
         self.device.clone()
@@ -150,7 +200,7 @@ impl DesktopDuplicator {
             Ok(()) => {}
             Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
             Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
-                bail!("Desktop duplication access was lost; recreate the relay session")
+                return Err(DuplicationAccessLost.into());
             }
             Err(error) => return Err(error.into()),
         }
@@ -182,7 +232,7 @@ impl DesktopDuplicator {
                 bail!("Timed out waiting for the next frame")
             }
             Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
-                bail!("Desktop duplication access was lost; recreate the relay session")
+                return Err(DuplicationAccessLost.into());
             }
             Err(error) => return Err(error.into()),
         }

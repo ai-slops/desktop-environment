@@ -41,8 +41,31 @@ pub fn list_output_devices() -> Result<Vec<AudioOutputDevice>> {
     read_output_devices(&collection, default_id.as_deref())
 }
 
+const DEVICE_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> Result<()> {
     let _com = ComGuard::new()?;
+    let mut started_once = false;
+
+    loop {
+        match run_audio_session(source_selector, target_selector, &mut started_once) {
+            Ok(()) => return Ok(()),
+            Err(error) if started_once => {
+                warn!(
+                    "Audio routing interrupted, likely due to a device change; waiting to reconnect: {error:#}"
+                );
+                thread::sleep(DEVICE_RECOVERY_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn run_audio_session(
+    source_selector: &str,
+    target_selector: &str,
+    started_once: &mut bool,
+) -> Result<()> {
     let source = select_output_device(source_selector)
         .with_context(|| format!("failed to resolve source device '{source_selector}'"))?;
     let target = select_output_device(target_selector)
@@ -69,11 +92,14 @@ pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> 
     unsafe { render_stream.client.Start() }.context("failed to start render client")?;
     unsafe { capture_stream.client.Start() }.context("failed to start capture client")?;
     debug!("Started source capture and target render streams");
+    if !*started_once {
+        *started_once = true;
+    } else {
+        info!("Audio routing resumed from {} to {}", source.friendly_name, target.friendly_name);
+    }
 
     loop {
-        pump_audio(&capture_stream, &render_stream).context(
-            "Audio routing stopped; check device connections and select the devices again",
-        )?;
+        pump_audio(&capture_stream, &render_stream)?;
         thread::sleep(Duration::from_millis(3));
     }
 }

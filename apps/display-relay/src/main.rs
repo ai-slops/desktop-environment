@@ -3,7 +3,7 @@ use display_relay_core::RelayConfig;
 use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::error;
+use tracing::{debug, error, info, warn};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DBlob};
@@ -28,7 +28,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
 };
 use windows::core::{Interface, PCSTR, w};
-use windows_desktop_duplication::{DesktopDuplicator, enumerate_displays};
+use windows_desktop_duplication::{DesktopDuplicator, DuplicationAccessLost, enumerate_displays};
 use windows_input::RemoteInputController;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -135,7 +135,10 @@ struct RelayApp {
     last_window_size: Option<PhysicalSize<u32>>,
     frame_interval: Duration,
     next_frame_deadline: Instant,
+    next_capture_recovery_attempt: Instant,
 }
+
+const CAPTURE_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ResizeAxis {
@@ -165,17 +168,56 @@ impl RelayApp {
             last_window_size: None,
             frame_interval,
             next_frame_deadline: Instant::now(),
+            next_capture_recovery_attempt: Instant::now(),
         })
     }
 
     fn redraw(&mut self) -> Result<()> {
+        if self.renderer.is_none() {
+            return self.try_recover_capture_session();
+        }
+
         let cursor_overlay = self.cursor_overlay()?;
         let capture_timeout_ms = self.effective_capture_timeout_ms();
-        let renderer = self.renderer.as_mut().context("renderer not ready")?;
-        let updated =
-            self.duplicator.copy_latest_frame_to(renderer.capture_texture(), capture_timeout_ms)?;
 
+        let capture_result = {
+            let renderer = self.renderer.as_ref().context("renderer not ready")?;
+            self.duplicator.copy_latest_frame_to(renderer.capture_texture(), capture_timeout_ms)
+        };
+
+        let updated = match capture_result {
+            Ok(updated) => updated,
+            Err(error) if error.is::<DuplicationAccessLost>() => {
+                warn!("Desktop duplication access lost; waiting to recreate the relay session");
+                self.renderer = None;
+                self.next_capture_recovery_attempt = Instant::now();
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        let renderer = self.renderer.as_mut().context("renderer not ready")?;
         renderer.render(cursor_overlay, updated)?;
+        Ok(())
+    }
+
+    fn try_recover_capture_session(&mut self) -> Result<()> {
+        if Instant::now() < self.next_capture_recovery_attempt {
+            return Ok(());
+        }
+        self.next_capture_recovery_attempt = Instant::now() + CAPTURE_RECOVERY_RETRY_INTERVAL;
+
+        let window = self.window.clone().context("window not ready")?;
+        match self.duplicator.recreate().and_then(|()| FastRenderer::new(window, &self.duplicator))
+        {
+            Ok(renderer) => {
+                info!("Relay capture session recovered");
+                self.renderer = Some(renderer);
+            }
+            Err(error) => {
+                debug!("Still waiting to recreate the relay session: {error:#}");
+            }
+        }
         Ok(())
     }
 
