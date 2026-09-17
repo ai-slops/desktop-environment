@@ -1,5 +1,6 @@
 [tools]
 rust = "stable"
+just = "latest"
 
 [env]
 CARGO_TERM_COLOR = "always"

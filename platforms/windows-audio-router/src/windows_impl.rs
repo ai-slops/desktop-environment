@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::slice;
 use std::thread;
 use std::time::Duration;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
@@ -34,10 +34,11 @@ pub struct AudioOutputDevice {
 pub fn list_output_devices() -> Result<Vec<AudioOutputDevice>> {
     let _com = ComGuard::new()?;
     let enumerator = device_enumerator()?;
-    let default_id =
-        endpoint_id(&unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }?)?;
+    let default_id = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
+        .ok()
+        .and_then(|device| endpoint_id(&device).ok());
     let collection = unsafe { enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) }?;
-    read_output_devices(&collection, &default_id)
+    read_output_devices(&collection, default_id.as_deref())
 }
 
 pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> Result<()> {
@@ -46,6 +47,9 @@ pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> 
         .with_context(|| format!("failed to resolve source device '{source_selector}'"))?;
     let target = select_output_device(target_selector)
         .with_context(|| format!("failed to resolve target device '{target_selector}'"))?;
+    if source.id == target.id {
+        bail!("Source and target must be different output devices (audio feedback prevention)");
+    }
 
     info!("Cloning audio from {} to {}", source.friendly_name, target.friendly_name);
     debug!("Source device id={}", source.id);
@@ -67,7 +71,9 @@ pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> 
     debug!("Started source capture and target render streams");
 
     loop {
-        pump_audio(&capture_stream, &render_stream)?;
+        pump_audio(&capture_stream, &render_stream).context(
+            "Audio routing stopped; check device connections and select the devices again",
+        )?;
         thread::sleep(Duration::from_millis(3));
     }
 }
@@ -83,7 +89,13 @@ fn pump_audio(capture: &AudioCaptureStream, render: &AudioRenderStream) -> Resul
         let mut frames = 0;
         let mut flags = 0;
         unsafe {
-            capture.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None)?;
+            capture.capture.GetBuffer(
+                &raw mut data,
+                &raw mut frames,
+                &raw mut flags,
+                None,
+                None,
+            )?;
         }
 
         let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
@@ -102,7 +114,7 @@ fn pump_audio(capture: &AudioCaptureStream, render: &AudioRenderStream) -> Resul
                 unsafe {
                     render
                         .render
-                        .ReleaseBuffer(frames_to_write, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)?
+                        .ReleaseBuffer(frames_to_write, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)?;
                 };
             } else {
                 let bytes = frames_to_write as usize * render.format.block_align;
@@ -185,12 +197,12 @@ struct WaveFormatOwned {
 impl WaveFormatOwned {
     fn from_mix_format(client: &IAudioClient) -> Result<Self> {
         let raw = unsafe { client.GetMixFormat() }?;
-        let format = unsafe { wave_format_from_ptr(raw) }?;
+        let format = unsafe { wave_format_from_ptr(raw) };
         unsafe { CoTaskMemFree(Some(raw.cast())) };
-        Ok(format)
+        format
     }
 
-    fn as_ptr(&self) -> *const windows::Win32::Media::Audio::WAVEFORMATEX {
+    const fn as_ptr(&self) -> *const windows::Win32::Media::Audio::WAVEFORMATEX {
         self.bytes.as_ptr().cast()
     }
 
@@ -202,8 +214,7 @@ impl WaveFormatOwned {
         let bits = u16::from_le_bytes([self.bytes[14], self.bytes[15]]);
         let extra = u16::from_le_bytes([self.bytes[16], self.bytes[17]]);
         format!(
-            "tag={} channels={} rate={} bits={} block_align={} extra={}",
-            format_tag, channels, rate, bits, block_align, extra
+            "tag={format_tag} channels={channels} rate={rate} bits={bits} block_align={block_align} extra={extra}"
         )
     }
 }
@@ -223,7 +234,19 @@ unsafe fn wave_format_from_ptr(
 }
 
 fn select_output_device(selector: &str) -> Result<AudioOutputDevice> {
-    let devices = list_output_devices()?;
+    resolve_output_device(list_output_devices()?, selector)
+}
+
+fn resolve_output_device(
+    devices: Vec<AudioOutputDevice>,
+    selector: &str,
+) -> Result<AudioOutputDevice> {
+    if selector.trim().is_empty() {
+        bail!("Device selector must not be empty");
+    }
+    if let Some(device) = devices.iter().find(|device| device.id.eq_ignore_ascii_case(selector)) {
+        return Ok(device.clone());
+    }
     if selector.eq_ignore_ascii_case("default") {
         return devices
             .into_iter()
@@ -232,14 +255,20 @@ fn select_output_device(selector: &str) -> Result<AudioOutputDevice> {
     }
 
     let selector_lower = selector.to_ascii_lowercase();
-    devices
+    let matches: Vec<_> = devices
         .into_iter()
-        .find(|device| {
-            device.id.eq_ignore_ascii_case(selector)
-                || device.friendly_name.to_ascii_lowercase().contains(&selector_lower)
+        .filter(|device| {
+            device.friendly_name.to_ascii_lowercase().contains(&selector_lower)
                 || device.id.to_ascii_lowercase().contains(&selector_lower)
         })
-        .with_context(|| format!("no audio output matched '{selector}'"))
+        .collect();
+    match matches.as_slice() {
+        [device] => Ok(device.clone()),
+        [] => bail!("no audio output matched '{selector}'"),
+        _ => bail!(
+            "Multiple outputs match '{selector}'; use a full device ID from list-audio-devices"
+        ),
+    }
 }
 
 fn output_device_by_id(id: &str) -> Result<IMMDevice> {
@@ -254,7 +283,7 @@ fn device_enumerator() -> Result<IMMDeviceEnumerator> {
 
 fn read_output_devices(
     collection: &IMMDeviceCollection,
-    default_id: &str,
+    default_id: Option<&str>,
 ) -> Result<Vec<AudioOutputDevice>> {
     let count = unsafe { collection.GetCount() }?;
     let mut devices = Vec::with_capacity(count as usize);
@@ -262,8 +291,11 @@ fn read_output_devices(
         let device = unsafe { collection.Item(index) }?;
         let id = endpoint_id(&device)?;
         devices.push(AudioOutputDevice {
-            friendly_name: device_friendly_name(&device)?,
-            is_default: id == default_id,
+            friendly_name: device_friendly_name(&device).unwrap_or_else(|error| {
+                warn!(device_id = %id, %error, "Device name unavailable; use its ID to select it");
+                format!("Unnamed output ({id})")
+            }),
+            is_default: Some(id.as_str()) == default_id,
             id,
         });
     }
@@ -272,21 +304,25 @@ fn read_output_devices(
 
 fn endpoint_id(device: &IMMDevice) -> Result<String> {
     let id = unsafe { device.GetId() }?;
-    let string = pwstr_to_string(id)?;
+    let string = pwstr_to_string(id);
     unsafe { CoTaskMemFree(Some(id.0.cast())) };
-    Ok(string)
+    string
 }
 
 fn device_friendly_name(device: &IMMDevice) -> Result<String> {
-    let store: IPropertyStore = unsafe { device.OpenPropertyStore(STGM_READ) }?;
-    let mut value = unsafe { store.GetValue(&PKEY_Device_FriendlyName as *const _) }?;
-    let text = unsafe { PropVariantToStringAlloc(&value) }?;
-    let friendly_name = pwstr_to_string(text)?;
-    unsafe {
-        CoTaskMemFree(Some(text.0.cast()));
-        PropVariantClear(&mut value)?;
-    }
-    Ok(friendly_name)
+    let store: IPropertyStore = unsafe { device.OpenPropertyStore(STGM_READ) }
+        .context("failed to open device property store")?;
+    let mut value = unsafe { store.GetValue(std::ptr::from_ref(&PKEY_Device_FriendlyName)) }
+        .context("failed to read device friendly name")?;
+    // GetValue owns the variant; clear it even when string conversion fails.
+    let text = unsafe { PropVariantToStringAlloc(&raw const value) };
+    let clear_result = unsafe { PropVariantClear(&raw mut value) };
+    let text = text?;
+    let friendly_name = pwstr_to_string(text);
+    // PropVariantToStringAlloc returns a separate COM allocation.
+    unsafe { CoTaskMemFree(Some(text.0.cast())) };
+    clear_result?;
+    friendly_name
 }
 
 fn pwstr_to_string(text: PWSTR) -> Result<String> {
@@ -319,5 +355,56 @@ impl ComGuard {
 impl Drop for ComGuard {
     fn drop(&mut self) {
         unsafe { CoUninitialize() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioOutputDevice, resolve_output_device};
+
+    fn devices() -> Vec<AudioOutputDevice> {
+        vec![
+            AudioOutputDevice {
+                id: "output-a".into(),
+                friendly_name: "Monitor audio".into(),
+                is_default: true,
+            },
+            AudioOutputDevice {
+                id: "output-b".into(),
+                friendly_name: "Monitor audio".into(),
+                is_default: false,
+            },
+            AudioOutputDevice {
+                id: "output-c".into(),
+                friendly_name: "Headphones".into(),
+                is_default: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_empty_selectors() {
+        for selector in ["Monitor", "output", "", "  ", "missing"] {
+            assert!(resolve_output_device(devices(), selector).is_err());
+        }
+    }
+
+    #[test]
+    fn resolves_id_default_and_unique_name() -> anyhow::Result<()> {
+        for (selector, id) in
+            [("OUTPUT-B", "output-b"), ("DEFAULT", "output-a"), ("head", "output-c")]
+        {
+            assert_eq!(resolve_output_device(devices(), selector)?.id, id);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn reports_missing_default() {
+        let mut outputs = devices();
+        for output in &mut outputs {
+            output.is_default = false;
+        }
+        assert!(resolve_output_device(outputs, "default").is_err());
     }
 }
