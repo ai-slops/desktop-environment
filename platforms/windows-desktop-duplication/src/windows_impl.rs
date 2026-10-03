@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use display_relay_core::{DisplayArea, VirtualDesktop};
 use std::mem::MaybeUninit;
-use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, RECT};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, LUID, RECT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0,
 };
@@ -16,8 +16,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO,
-    DXGI_OUTPUT_DESC, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput,
-    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_OUTPUT_DESC, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput1,
+    IDXGIOutputDuplication, IDXGIResource,
 };
 use windows::core::Interface;
 
@@ -50,7 +50,8 @@ impl std::fmt::Display for DuplicationAccessLost {
 impl std::error::Error for DuplicationAccessLost {}
 
 pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
     let virtual_bounds = read_virtual_desktop_bounds();
     let mut displays = Vec::new();
 
@@ -70,7 +71,8 @@ pub fn enumerate_displays() -> Result<Vec<DisplayInfo>> {
             };
             output_index += 1;
 
-            let description = unsafe { output.GetDesc() }?;
+            let description =
+                unsafe { output.GetDesc() }.context("IDXGIOutput::GetDesc failed (enumerate)")?;
             if !description.AttachedToDesktop.as_bool() {
                 continue;
             }
@@ -91,75 +93,106 @@ pub struct DesktopDuplicator {
     display: DisplayInfo,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
-    duplication: IDXGIOutputDuplication,
+    // Identifies the physical GPU `device` was created on. Desktop Duplication requires the
+    // device passed to DuplicateOutput to belong to the same adapter as the output, so a
+    // freshly re-enumerated adapter is matched back to this device by LUID rather than by
+    // creating a new device (see `recreate` for why the device must stay the same).
+    adapter_luid: LUID,
+    // `None` only ever exists transiently inside `recreate` between releasing the old
+    // duplication and acquiring the new one, and right after an access-lost error is
+    // reported from `copy_latest_frame_to`/`capture_frame`.
+    duplication: Option<IDXGIOutputDuplication>,
     staging_texture: ID3D11Texture2D,
     frame_buffer: Vec<u8>,
 }
 
-/// A freshly created D3D11 device bound to the desktop duplication output for
-/// the requested display name.
-struct ResolvedDisplay {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    display: DisplayInfo,
-    duplication: IDXGIOutputDuplication,
+/// Re-enumerates the current desktop topology from a brand-new DXGI factory — never reusing
+/// a cached adapter, which can report a stale output list after a display is unplugged and
+/// replugged — and duplicates `display_name`'s output using the given, already-created
+/// `device`. Only the freshly-enumerated adapter that matches `adapter_luid` (the physical
+/// GPU `device` belongs to) is searched, since DuplicateOutput requires the device and the
+/// output to share an adapter anyway.
+fn acquire_duplication(
+    device: &ID3D11Device,
+    adapter_luid: LUID,
+    display_name: &str,
+) -> Result<(DisplayInfo, IDXGIOutputDuplication)> {
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
+    let virtual_bounds = read_virtual_desktop_bounds();
+
+    let mut adapter_index = 0;
+    let adapter: IDXGIAdapter1 = loop {
+        let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(adapter_index) }
+            .with_context(|| format!("GPU adapter for display '{display_name}' was not found"))?;
+        adapter_index += 1;
+
+        let desc = unsafe { adapter.GetDesc1() }.context("IDXGIAdapter1::GetDesc1 failed")?;
+        if desc.AdapterLuid == adapter_luid {
+            break adapter;
+        }
+    };
+
+    let mut output_index = 0;
+    loop {
+        let output: IDXGIOutput = unsafe { adapter.EnumOutputs(output_index) }
+            .map_err(|_| anyhow!("Display '{display_name}' is no longer available"))?;
+        output_index += 1;
+
+        let description =
+            unsafe { output.GetDesc() }.context("IDXGIOutput::GetDesc failed (acquire)")?;
+        let name = utf16_to_string(&description.DeviceName);
+        if !name.eq_ignore_ascii_case(display_name) {
+            continue;
+        }
+        if !description.AttachedToDesktop.as_bool() {
+            bail!("Display '{display_name}' is no longer attached to the desktop");
+        }
+
+        let display = display_from_desc(description, virtual_bounds);
+        let output1: IDXGIOutput1 =
+            output.cast().context("failed to query the IDXGIOutput1 interface")?;
+        let duplication = unsafe { output1.DuplicateOutput(device) }.map_err(|error| {
+            if error.code() == E_ACCESSDENIED {
+                anyhow!(
+                    "Desktop Duplication access was denied. Run from the interactive user session on the GPU that owns the target display"
+                )
+            } else {
+                anyhow!(error)
+            }
+        })?;
+
+        return Ok((display, duplication));
+    }
 }
 
-/// Resolves `display_name` against the current desktop topology and binds a
-/// brand-new D3D11 device to it. Always starting from a fresh device (rather
-/// than reusing one obtained before a disconnect) matters: an existing
-/// device's adapter can keep reporting a stale output list after the display
-/// is unplugged and replugged, so retrying with it never finds the display
-/// again even though it is back. Re-resolving from scratch, keyed on the
-/// originally requested `display_name`, mirrors what a full process restart
-/// does and lets recovery actually succeed once the display returns.
-fn resolve_display(display_name: &str) -> Result<ResolvedDisplay> {
-    let (device, context) = create_device()?;
-    let display = enumerate_displays()?
-        .into_iter()
-        .find(|display| display.name.eq_ignore_ascii_case(display_name))
-        .with_context(|| format!("Display '{display_name}' was not found"))?;
-
-    let dxgi_device: IDXGIDevice = device.cast()?;
-    let adapter = unsafe { dxgi_device.GetAdapter() }?;
-    let output = find_output(&adapter, &display.name)?
-        .ok_or_else(|| anyhow!("Display '{display_name}' is no longer available"))?;
-    let output1: IDXGIOutput1 = output.cast()?;
-    let duplication = unsafe { output1.DuplicateOutput(&device) }.map_err(|error| {
-        if error.code() == E_ACCESSDENIED {
-            anyhow!(
-                "Desktop Duplication access was denied. Run from the interactive user session on the GPU that owns the target display"
-            )
-        } else {
-            anyhow!(error)
-        }
-    })?;
-
-    Ok(ResolvedDisplay { device, context, display, duplication })
+fn adapter_luid_of(device: &ID3D11Device) -> Result<LUID> {
+    let dxgi_device: IDXGIDevice =
+        device.cast().context("failed to query the IDXGIDevice interface")?;
+    let adapter = unsafe { dxgi_device.GetAdapter() }.context("IDXGIDevice::GetAdapter failed")?;
+    let adapter1: IDXGIAdapter1 =
+        adapter.cast().context("failed to query the IDXGIAdapter1 interface")?;
+    Ok(unsafe { adapter1.GetDesc1() }.context("IDXGIAdapter1::GetDesc1 failed")?.AdapterLuid)
 }
 
 impl DesktopDuplicator {
     pub fn new(display_name: &str) -> Result<Self> {
-        let resolved = resolve_display(display_name)?;
+        let (device, context) = create_device().context("failed to create the D3D11 device")?;
+        let adapter_luid = adapter_luid_of(&device)?;
+        let (display, duplication) = acquire_duplication(&device, adapter_luid, display_name)?;
 
-        let staging_texture = create_staging_texture(
-            &resolved.device,
-            resolved.display.area.width,
-            resolved.display.area.height,
-        )?;
-        let frame_buffer = vec![
-            0_u8;
-            resolved.display.area.width as usize
-                * resolved.display.area.height as usize
-                * 4
-        ];
+        let staging_texture =
+            create_staging_texture(&device, display.area.width, display.area.height)?;
+        let frame_buffer =
+            vec![0_u8; display.area.width as usize * display.area.height as usize * 4];
 
         Ok(Self {
             display_name: display_name.to_string(),
-            display: resolved.display,
-            device: resolved.device,
-            context: resolved.context,
-            duplication: resolved.duplication,
+            display,
+            device,
+            context,
+            adapter_luid,
+            duplication: Some(duplication),
             staging_texture,
             frame_buffer,
         })
@@ -170,33 +203,45 @@ impl DesktopDuplicator {
         &self.display
     }
 
-    /// Re-acquires desktop duplication for the display originally requested by
-    /// name (not whatever was last resolved) after access was lost, e.g. a
-    /// display or GPU reconfiguration. Rebuilds the D3D11 device from scratch;
-    /// see [`resolve_display`] for why that is necessary for recovery to work.
-    pub fn recreate(&mut self) -> Result<()> {
-        let resolved = resolve_display(&self.display_name)?;
+    #[must_use]
+    pub fn has_duplication(&self) -> bool {
+        self.duplication.is_some()
+    }
 
-        if resolved.display.area.width != self.display.area.width
-            || resolved.display.area.height != self.display.area.height
+    /// Re-acquires desktop duplication for the display originally requested by name (not
+    /// whatever was last resolved) after access was lost, e.g. a display reconfiguration or
+    /// the secure desktop (a UAC prompt) having been shown. This deliberately reuses the
+    /// existing `device` rather than creating a new one: a D3D11 device is not what goes
+    /// stale after a display is unplugged and replugged (a cached *adapter* is, which
+    /// `acquire_duplication` avoids by always enumerating a fresh one), and recreating the
+    /// device would require recreating the window's swap chain to match it. Windows only
+    /// allows one flip-model swap chain per window ever, and D3D11 defers destroying the old
+    /// one when it's replaced; tearing it down and immediately creating a new one for the
+    /// same window was observed to fail with E_ACCESSDENIED indefinitely, well past the
+    /// point the secure desktop was actually gone. Keeping the device (and therefore the
+    /// window's swap chain) untouched across recovery avoids that entirely.
+    pub fn recreate(&mut self) -> Result<()> {
+        // Release the old (already-inaccessible) duplication interface before requesting a
+        // new one. Desktop Duplication only permits one active duplication interface per
+        // output at a time; while the previous interface object is still alive, every
+        // subsequent DuplicateOutput call keeps failing with E_ACCESSDENIED forever, even
+        // long after whatever caused the original access loss (e.g. a UAC prompt) is gone.
+        self.duplication = None;
+
+        let (display, duplication) =
+            acquire_duplication(&self.device, self.adapter_luid, &self.display_name)?;
+
+        if display.area.width != self.display.area.width
+            || display.area.height != self.display.area.height
         {
-            self.staging_texture = create_staging_texture(
-                &resolved.device,
-                resolved.display.area.width,
-                resolved.display.area.height,
-            )?;
-            self.frame_buffer = vec![
-                0_u8;
-                resolved.display.area.width as usize
-                    * resolved.display.area.height as usize
-                    * 4
-            ];
+            self.staging_texture =
+                create_staging_texture(&self.device, display.area.width, display.area.height)?;
+            self.frame_buffer =
+                vec![0_u8; display.area.width as usize * display.area.height as usize * 4];
         }
 
-        self.display = resolved.display;
-        self.device = resolved.device;
-        self.context = resolved.context;
-        self.duplication = resolved.duplication;
+        self.display = display;
+        self.duplication = Some(duplication);
         Ok(())
     }
 
@@ -219,17 +264,21 @@ impl DesktopDuplicator {
         target_texture: &ID3D11Texture2D,
         timeout_ms: u32,
     ) -> Result<bool> {
+        let duplication =
+            self.duplication.as_ref().context("Desktop duplication session not ready")?;
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None::<IDXGIResource>;
 
-        let acquire_result = unsafe {
-            self.duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
-        };
+        let acquire_result =
+            unsafe { duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource) };
 
         match acquire_result {
             Ok(()) => {}
             Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
-            Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
+            Err(error)
+                if error.code() == DXGI_ERROR_ACCESS_LOST || error.code() == E_ACCESSDENIED =>
+            {
+                self.duplication = None;
                 return Err(DuplicationAccessLost.into());
             }
             Err(error) => return Err(error.into()),
@@ -242,26 +291,33 @@ impl DesktopDuplicator {
 
         unsafe {
             self.context.CopyResource(&target_resource, &texture_resource);
-            self.duplication.ReleaseFrame()?;
+        }
+        if let Err(error) = release_frame(duplication) {
+            self.duplication = None;
+            return Err(error);
         }
 
         Ok(true)
     }
 
     pub fn capture_frame<'a>(&'a mut self, timeout_ms: u32) -> Result<CaptureFrameView<'a>> {
+        let duplication =
+            self.duplication.as_ref().context("Desktop duplication session not ready")?;
         let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None::<IDXGIResource>;
 
-        let acquire_result = unsafe {
-            self.duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource)
-        };
+        let acquire_result =
+            unsafe { duplication.AcquireNextFrame(timeout_ms, &mut frame_info, &mut resource) };
 
         match acquire_result {
             Ok(()) => {}
             Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                 bail!("Timed out waiting for the next frame")
             }
-            Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
+            Err(error)
+                if error.code() == DXGI_ERROR_ACCESS_LOST || error.code() == E_ACCESSDENIED =>
+            {
+                self.duplication = None;
                 return Err(DuplicationAccessLost.into());
             }
             Err(error) => return Err(error.into()),
@@ -303,7 +359,10 @@ impl DesktopDuplicator {
                 }
             }
             self.context.Unmap(&self.staging_texture, 0);
-            self.duplication.ReleaseFrame()?;
+        }
+        if let Err(error) = release_frame(duplication) {
+            self.duplication = None;
+            return Err(error);
         }
 
         Ok(CaptureFrameView {
@@ -316,8 +375,9 @@ impl DesktopDuplicator {
 
 impl Drop for DesktopDuplicator {
     fn drop(&mut self) {
-        let _ = unsafe { self.duplication.ReleaseFrame() };
-        let _ = &self.device;
+        if let Some(duplication) = &self.duplication {
+            let _ = unsafe { duplication.ReleaseFrame() };
+        }
     }
 }
 
@@ -339,7 +399,8 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
             Some(&mut created_level),
             Some(&mut context),
         )
-    }?;
+    }
+    .context("D3D11CreateDevice failed")?;
 
     let device = device.context("D3D11CreateDevice returned no device")?;
     let context = context.context("D3D11CreateDevice returned no device context")?;
@@ -413,20 +474,19 @@ fn map_texture(
     }
 }
 
-fn find_output(adapter: &IDXGIAdapter, display_name: &str) -> Result<Option<IDXGIOutput>> {
-    let mut output_index = 0;
-    loop {
-        let output = match unsafe { adapter.EnumOutputs(output_index) } {
-            Ok(output) => output,
-            Err(_) => return Ok(None),
-        };
-        output_index += 1;
-
-        let description = unsafe { output.GetDesc() }?;
-        let candidate = utf16_to_string(&description.DeviceName);
-        if candidate.eq_ignore_ascii_case(display_name) {
-            return Ok(Some(output));
+/// Releases the frame acquired by `AcquireNextFrame`. The secure desktop
+/// (UAC prompts, the lock screen, Ctrl+Alt+Del) can appear between a
+/// successful acquire and this call, which then fails with
+/// `DXGI_ERROR_ACCESS_LOST` or `E_ACCESSDENIED` instead of succeeding; treat
+/// both the same as a failed acquire so the caller recovers instead of
+/// treating it as a fatal error.
+fn release_frame(duplication: &IDXGIOutputDuplication) -> Result<()> {
+    match unsafe { duplication.ReleaseFrame() } {
+        Ok(()) => Ok(()),
+        Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST || error.code() == E_ACCESSDENIED => {
+            Err(DuplicationAccessLost.into())
         }
+        Err(error) => Err(error.into()),
     }
 }
 

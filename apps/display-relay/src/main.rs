@@ -4,7 +4,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DBlob};
 use windows::Win32::Graphics::Direct3D11::{
@@ -17,9 +17,9 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_UNSPECIFIED, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
-    IDXGISwapChain1,
+    DXGI_ERROR_ACCESS_LOST, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+    IDXGIDevice, IDXGIFactory2, IDXGISwapChain1,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetClientRect, GetPropW, GetWindowRect,
@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,wgpu_core=warn".into()),
+                .unwrap_or_else(|_| "info,wgpu_core=warn,display_relay=debug".into()),
         )
         .with_target(false)
         .init();
@@ -173,52 +173,65 @@ impl RelayApp {
     }
 
     fn redraw(&mut self) -> Result<()> {
-        if self.renderer.is_none() {
-            return self.try_recover_capture_session();
+        if self.duplicator.has_duplication() {
+            let capture_timeout_ms = self.effective_capture_timeout_ms();
+            let capture_result = {
+                let renderer = self.renderer.as_ref().context("renderer not ready")?;
+                self.duplicator.copy_latest_frame_to(renderer.capture_texture(), capture_timeout_ms)
+            };
+            if let Err(error) = capture_result {
+                if error.is::<DuplicationAccessLost>() {
+                    warn!("Desktop duplication access lost; waiting to reacquire it");
+                    self.next_capture_recovery_attempt = Instant::now();
+                } else {
+                    return Err(error);
+                }
+            }
+        } else {
+            self.try_reacquire_duplication();
         }
 
-        let cursor_overlay = self.cursor_overlay()?;
-        let capture_timeout_ms = self.effective_capture_timeout_ms();
-
-        let capture_result = {
-            let renderer = self.renderer.as_ref().context("renderer not ready")?;
-            self.duplicator.copy_latest_frame_to(renderer.capture_texture(), capture_timeout_ms)
-        };
-
-        let updated = match capture_result {
-            Ok(updated) => updated,
-            Err(error) if error.is::<DuplicationAccessLost>() => {
-                warn!("Desktop duplication access lost; waiting to recreate the relay session");
-                self.renderer = None;
-                self.next_capture_recovery_attempt = Instant::now();
-                return Ok(());
-            }
-            Err(error) => return Err(error),
-        };
-
+        // Keep presenting even while duplication is down: the swap chain still holds
+        // whatever was last captured, so the window shows a frozen frame (matching how
+        // other remote-display tools behave while the secure desktop is up) instead of
+        // going unresponsive, and resumes live updates as soon as capture comes back.
+        let cursor_overlay = self.cursor_overlay();
         let renderer = self.renderer.as_mut().context("renderer not ready")?;
-        renderer.render(cursor_overlay, updated)?;
+        if let Err(error) = renderer.render(cursor_overlay, true) {
+            if error.is::<DuplicationAccessLost>() {
+                debug!(
+                    "Present skipped while the desktop was inaccessible (e.g. a UAC prompt); will retry next frame"
+                );
+            } else {
+                return Err(error);
+            }
+        }
         Ok(())
     }
 
-    fn try_recover_capture_session(&mut self) -> Result<()> {
+    /// Tries to re-acquire Desktop Duplication (not the device, swap chain, or window —
+    /// those are created once and never rebuilt; see [`DesktopDuplicator::recreate`] for
+    /// why rebuilding them for recovery doesn't work), throttled to avoid hammering it.
+    fn try_reacquire_duplication(&mut self) {
         if Instant::now() < self.next_capture_recovery_attempt {
-            return Ok(());
+            return;
         }
         self.next_capture_recovery_attempt = Instant::now() + CAPTURE_RECOVERY_RETRY_INTERVAL;
 
-        let window = self.window.clone().context("window not ready")?;
-        match self.duplicator.recreate().and_then(|()| FastRenderer::new(window, &self.duplicator))
-        {
-            Ok(renderer) => {
-                info!("Relay capture session recovered");
-                self.renderer = Some(renderer);
-            }
-            Err(error) => {
-                debug!("Still waiting to recreate the relay session: {error:#}");
+        // Windows auto-minimizes windows that look full-screen right before it shows the
+        // secure desktop for a UAC prompt, and does not restore them afterward. Undo that
+        // here: this only runs while we're actively trying to recover, so it never fights a
+        // minimize the user did on purpose while the relay was healthy.
+        if let Some(window) = self.window.as_ref() {
+            if window.is_minimized() == Some(true) {
+                window.set_minimized(false);
             }
         }
-        Ok(())
+
+        match self.duplicator.recreate() {
+            Ok(()) => info!("Desktop duplication reacquired"),
+            Err(error) => debug!("Still waiting to reacquire desktop duplication: {error:?}"),
+        }
     }
 
     fn effective_capture_timeout_ms(&self) -> u32 {
@@ -227,21 +240,27 @@ impl RelayApp {
         self.config.capture_timeout_ms.min(frame_interval_ms).max(1)
     }
 
-    fn cursor_overlay(&self) -> Result<CursorOverlay> {
+    fn cursor_overlay(&self) -> CursorOverlay {
         let display = self.duplicator.display_info().area;
-        let (cursor_x, cursor_y) = self.input.cursor_position()?;
+        // GetCursorPos fails whenever our desktop isn't the current input desktop, which is
+        // exactly what happens while the secure desktop (e.g. a UAC prompt) is showing. That
+        // is not a capture/render failure, just an unknown cursor position for this frame, so
+        // drop the overlay instead of treating it as fatal.
+        let Ok((cursor_x, cursor_y)) = self.input.cursor_position() else {
+            return CursorOverlay::hidden();
+        };
 
         if !display.contains(cursor_x, cursor_y) {
-            return Ok(CursorOverlay::hidden());
+            return CursorOverlay::hidden();
         }
 
         let x = (cursor_x - display.left) as f32 / display.width.max(1) as f32;
         let y = (cursor_y - display.top) as f32 / display.height.max(1) as f32;
-        Ok(CursorOverlay {
+        CursorOverlay {
             position: [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
             visible: 1.0,
             radius_px: 14.0,
-        })
+        }
     }
 }
 
@@ -290,14 +309,14 @@ impl ApplicationHandler for RelayApp {
             display.area.width.max(1),
             display.area.height.max(1),
         ) {
-            error!("Failed to install aspect ratio hook: {error:#}");
+            error!("Failed to install aspect ratio hook: {error:?}");
             event_loop.exit();
             return;
         }
         let renderer = match FastRenderer::new(Arc::clone(&window), &self.duplicator) {
             Ok(renderer) => renderer,
             Err(error) => {
-                error!("Failed to create fast renderer: {error:#}");
+                error!("Failed to create fast renderer: {error:?}");
                 event_loop.exit();
                 return;
             }
@@ -326,7 +345,7 @@ impl ApplicationHandler for RelayApp {
                 self.last_window_size = Some(size);
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.resize(size.width, size.height) {
-                        error!("Failed to resize relay surface: {error:#}");
+                        error!("Failed to resize relay surface: {error:?}");
                         event_loop.exit();
                     }
                 }
@@ -341,7 +360,7 @@ impl ApplicationHandler for RelayApp {
             WindowEvent::RedrawRequested => {
                 self.next_frame_deadline = Instant::now() + self.frame_interval;
                 if let Err(error) = self.redraw() {
-                    error!("Relay redraw failed: {error:#}");
+                    error!("Relay redraw failed: {error:?}");
                     event_loop.exit();
                 }
             }
@@ -465,8 +484,39 @@ impl FastRenderer {
             self.context.Draw(3, 0);
         }
 
-        unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) }.ok()?;
-        Ok(())
+        match unsafe { self.swap_chain.Present(0, DXGI_PRESENT(0)) }.ok() {
+            Ok(()) => Ok(()),
+            // Present fails the same way Desktop Duplication does when the secure desktop
+            // (e.g. a UAC prompt) owns the screen. The swap chain, device, and window are
+            // otherwise untouched by this, so reusing DuplicationAccessLost here just tells
+            // the caller to skip this frame and retry on the next one; it resolves on its
+            // own once the secure desktop is gone.
+            Err(error)
+                if error.code() == E_ACCESSDENIED || error.code() == DXGI_ERROR_ACCESS_LOST =>
+            {
+                Err(DuplicationAccessLost.into())
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl Drop for FastRenderer {
+    fn drop(&mut self) {
+        // Rust drops struct fields in declaration order, so without this, `swap_chain`
+        // would be released before `render_target_view` (a view onto the swap chain's own
+        // back buffer). DXGI requires every resource derived from a swap chain's back
+        // buffer to be released before the swap chain itself can fully tear down; leaving
+        // that view alive past the swap chain kept the window's HWND binding from being
+        // released, so the next CreateSwapChainForHwnd for the same window failed with
+        // E_ACCESSDENIED indefinitely. Unbind, flush, and drop the view explicitly first,
+        // matching what `resize` already does for the same reason.
+        unsafe {
+            self.context.OMSetRenderTargets(Some(&[]), None);
+            self.context.ClearState();
+            self.context.Flush();
+        }
+        self.render_target_view = None;
     }
 }
 
