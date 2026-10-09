@@ -22,6 +22,12 @@ cargo build --target-dir target/desktop-control --release -p desktop-control -p 
 ```
 
 Keep the three executables in the same directory when moving them elsewhere.
+Click **바탕화면 바로가기 만들기** at the bottom of the preset sidebar to create
+`Desktop Control.lnk` on your Windows desktop (including a redirected/OneDrive desktop).
+The shortcut opens this GUI executable with its current configuration file. Clicking
+the button again refreshes the same shortcut. After moving the executables, create
+the shortcut again from the new location. Save any edited settings before closing;
+creating a shortcut does not save unsaved edits or start the tools.
 Running `cargo run --target-dir target/desktop-control -p desktop-control` alone requires the other two binaries to
 have already been built in the same profile.
 

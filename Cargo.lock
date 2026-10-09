@@ -698,6 +698,7 @@ dependencies = [
  "tempfile",
  "windows-audio-router",
  "windows-desktop-duplication",
+ "windows-shortcuts",
 ]
 
 [[package]]
@@ -3480,6 +3481,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "56f42bd332cc6c8eac5af113fc0c1fd6a8fd2aa08a0119358686e5160d0586c6"
 dependencies = [
  "windows-link 0.1.3",
+]
+
+[[package]]
+name = "windows-shortcuts"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+ "windows",
 ]
 
 [[package]]

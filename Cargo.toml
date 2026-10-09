@@ -9,6 +9,7 @@ members = [
     "platforms/windows-audio-router",
     "platforms/windows-desktop-duplication",
     "platforms/windows-input",
+    "platforms/windows-shortcuts",
     "tools/xtask",
 ]
 default-members = ["apps/desktop-control", "apps/audio-output-router", "apps/display-relay", "tools/xtask"]

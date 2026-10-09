@@ -280,6 +280,13 @@ impl ControlPanel {
         self.error = result.err().map(|error| format!("{error:#}"));
     }
 
+    fn create_desktop_shortcut(&mut self) -> Result<()> {
+        let executable = std::env::current_exe()?;
+        let shortcut = windows_shortcuts::create_desktop_shortcut(&executable, &self.path)?;
+        self.notice = format!("바탕화면 바로가기를 만들었습니다: {}", shortcut.display());
+        Ok(())
+    }
+
     #[cfg(feature = "ui-smoke")]
     fn screenshot_ui(&mut self, ctx: &egui::Context) {
         let Some((path, started, requested)) = self.screenshot.as_mut() else { return };
@@ -385,6 +392,15 @@ impl ControlPanel {
         });
         ui.add_space(12.0);
         ui.weak("다음 실행 때 마지막으로 저장한 설정을 복원합니다. 자동으로 실행하지는 않습니다.");
+        ui.separator();
+        if ui
+            .button("바탕화면 바로가기 만들기")
+            .on_hover_text("현재 설정 파일을 사용하는 Desktop Control 바로가기를 만듭니다.")
+            .clicked()
+        {
+            let result = self.create_desktop_shortcut();
+            self.report(result);
+        }
     }
 
     fn device_settings_ui(&mut self, ui: &mut egui::Ui) {
