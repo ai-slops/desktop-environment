@@ -86,6 +86,7 @@ pub struct Presentation {
     pub fallbacks: BTreeMap<Id, Strategy>,
     pub overrides: BTreeMap<Id, VisitOverride>,
     pub protection: crate::Protection,
+    pub bindings: BTreeMap<Id, Binding>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -197,6 +198,20 @@ fn tab_targets(node: &Node, output: &mut BTreeMap<Id, BTreeSet<Id>>) {
             tab_targets(child, output);
         }
     }
+}
+
+fn root_bindings(node: &Node, snapshot: &Snapshot) -> BTreeMap<Id, Binding> {
+    let mut leaves = Vec::new();
+    node.placements(&mut leaves);
+    leaves
+        .into_iter()
+        .filter_map(|leaf| {
+            snapshot
+                .windows
+                .get(&leaf.window)
+                .map(|observed| (leaf.window.clone(), observed.binding.clone()))
+        })
+        .collect()
 }
 
 fn validate_binding_uniqueness(snapshot: &Snapshot) -> Result<()> {
@@ -375,6 +390,8 @@ pub fn plan(
                 runtime.presentations.get(slot).is_some_and(|active| {
                     &active.view == view
                         && &active.root == root
+                        && active.bindings
+                            == root_bindings(&config.views[view].roots[root], snapshot)
                         && resolve_slot(config, &config.slots[slot], snapshot).is_ok_and(
                             |resolved| {
                                 resolved.display == active.context_display
@@ -452,7 +469,14 @@ pub fn plan(
             fallbacks: BTreeMap::new(),
             overrides: BTreeMap::new(),
             protection: crate::Protection::default(),
+            bindings: BTreeMap::new(),
         });
+        let bindings = root_bindings(root, snapshot);
+        presentation.overrides.retain(|window, _| {
+            !presentation.bindings.contains_key(window)
+                || bindings.get(window) == presentation.bindings.get(window)
+        });
+        presentation.bindings = bindings;
         presentation.context_display.clone_from(&slot.display);
         presentation.context_area = area;
         presentation.context_dpi = snapshot.displays[&slot.display].dpi;
@@ -924,21 +948,31 @@ impl Plan {
     /// Keep external protection observations as revalidation dependencies.
     #[must_use]
     pub fn component(&self, slot: &str, runtime: &Runtime) -> Self {
+        self.scoped_subset(&BTreeSet::from([slot.into()]), runtime)
+    }
+
+    #[must_use]
+    pub fn scoped_subset(&self, scope: &BTreeSet<Id>, runtime: &Runtime) -> Self {
         let mut result = self.clone();
-        result.scope = BTreeSet::from([slot.into()]);
-        result.generations.retain(|id, _| id == slot);
-        result.presentations.retain(|id, _| id == slot);
-        result.desired.retain(|_, desired| desired.slot == slot);
+        result.scope.retain(|slot| scope.contains(slot));
+        result.generations.retain(|id, _| scope.contains(id));
+        result.presentations.retain(|id, _| scope.contains(id));
+        result.desired.retain(|_, desired| scope.contains(&desired.slot));
         result.mutations.retain(|mutation| {
             if let Some(id) = self.mutation_slots.get(&mutation.window) {
-                return id == slot;
+                return scope.contains(id);
             }
             self.desired.get(&mutation.window).map_or_else(
-                || runtime.claims.get(&mutation.window).is_some_and(|claim| claim.slot == slot),
-                |desired| desired.slot == slot,
+                || {
+                    runtime
+                        .claims
+                        .get(&mutation.window)
+                        .is_some_and(|claim| scope.contains(&claim.slot))
+                },
+                |desired| scope.contains(&desired.slot),
             )
         });
-        result.mutation_slots.retain(|_, id| id == slot);
+        result.mutation_slots.retain(|_, id| scope.contains(id));
         result
     }
 }

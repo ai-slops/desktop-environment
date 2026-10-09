@@ -389,6 +389,81 @@ fn group_mut<'a>(config: &'a mut Configuration, target: &Target) -> Result<&'a m
 }
 
 #[test]
+fn changed_native_lifetime_never_inherits_an_old_visits_preservation() -> Result<()> {
+    let (config, snapshot, target) = fixture();
+    let mut request = Request::open(&config, target.clone());
+    request.mode = TransitionMode::KeepSize;
+    request.retain.insert("preview".into());
+    let preserved = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    let mut runtime = Runtime::default();
+    preserved.commit(&mut runtime);
+    let mut changed = settled_snapshot(&preserved, &snapshot);
+    if let Some(window) = changed.windows.get_mut("preview") {
+        window.binding.generation += 1;
+    }
+    let reopened = plan(&config, &runtime, &changed, &Request::open(&config, target.clone()))?;
+    assert!(!reopened.idempotent);
+    assert!(reopened.presentations["work"].overrides.is_empty());
+    assert!(!reopened.desired["preview"].strict_size);
+    changed.windows.remove("preview");
+    let missing = plan(&config, &runtime, &changed, &Request::open(&config, target))?;
+    assert!(!missing.idempotent);
+    assert!(missing.desired.is_empty());
+    assert!(missing.mutations.is_empty());
+    Ok(())
+}
+
+#[test]
+fn composition_undo_reverses_all_successful_slots_as_one_unit() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    if let Some(slot) = config.slots.get_mut("work") {
+        slot.region[2] = 0.5;
+    }
+    let mut slot = config.slots["work"].clone();
+    slot.id = "second-slot".into();
+    slot.region[0] = 0.5;
+    config.slots.insert(slot.id.clone(), slot);
+    let mut reference = config.windows["preview"].clone();
+    reference.id = "second-window".into();
+    config.windows.insert(reference.id.clone(), reference);
+    let mut window = snapshot.windows["preview"].clone();
+    window.binding.handle = 2;
+    window.frame.x = 1200;
+    snapshot.windows.insert("second-window".into(), window);
+    if let Some(view) = config.views.get_mut(&target.view) {
+        view.roots.insert(
+            "second-root".into(),
+            Node::Placement(Placement::new("second-window".into(), "other".into())),
+        );
+    }
+    let mut target = target;
+    target.roots.insert("second-root".into(), "second-slot".into());
+    let request = Request::open(&config, target);
+    let prior = Runtime::default();
+    let transition = plan(&config, &prior, &snapshot, &request)?;
+    let observed = settled_snapshot(&transition, &snapshot);
+    let mut runtime = prior.clone();
+    for slot in &transition.scope {
+        transition.component(slot, &prior).commit(&mut runtime);
+    }
+    let record = UndoRecord::capture(
+        &transition.scoped_subset(&transition.scope, &prior),
+        &prior,
+        &observed,
+        &runtime,
+    );
+    let undo = record.reverse(&config, &runtime, &observed)?;
+    assert_eq!(undo.scope, transition.scope);
+    assert_eq!(undo.mutations.len(), 2);
+    let restored = settled_snapshot(&undo, &observed);
+    assert_eq!(restored.windows["preview"].frame, snapshot.windows["preview"].frame);
+    assert_eq!(restored.windows["second-window"].frame, snapshot.windows["second-window"].frame);
+    undo.commit(&mut runtime);
+    assert!(runtime.claims.is_empty());
+    Ok(())
+}
+
+#[test]
 fn semantic_tabs_keep_occurrences_independent_even_when_widened() -> Result<()> {
     let (mut config, snapshot, target) = fixture();
     let group = group_mut(&mut config, &target)?;
@@ -659,6 +734,7 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             fallbacks: BTreeMap::new(),
             overrides: BTreeMap::new(),
             protection: Protection::default(),
+            bindings: BTreeMap::new(),
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;

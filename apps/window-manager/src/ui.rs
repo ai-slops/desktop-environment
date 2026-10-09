@@ -367,14 +367,23 @@ impl Manager {
                         "전환 결과: {:?} · 렌더링 준비: {}",
                         result.status, result.rendering_readiness
                     );
-                    let settled = result.status == Status::Settled;
+                    let next_allowed = matches!(
+                        result.status,
+                        Status::Settled | Status::Superseded | Status::PartiallyApplied
+                    );
                     self.result = Some(result);
                     self.preview = None;
-                    if settled && !self.pending_requests.is_empty() {
+                    if next_allowed && !self.pending_requests.is_empty() {
                         let (request, apply) = self.pending_requests.remove(0);
                         self.request_preview(request, apply);
-                    } else if !settled {
-                        self.pending_requests.clear();
+                    } else if !next_allowed {
+                        self.pending_requests.retain(|(request, _)| {
+                            request.scope.is_disjoint(&self.runtime.suspended)
+                        });
+                        if !self.pending_requests.is_empty() {
+                            let (request, apply) = self.pending_requests.remove(0);
+                            self.request_preview(request, apply);
+                        }
                     }
                 }
                 Event::Shortcut(number) => {
@@ -417,6 +426,9 @@ impl Manager {
         if self.applying {
             // Keep the latest queued intent for an overlapping scope; retain disjoint work.
             self.pending_requests.retain(|(pending, _)| pending.scope.is_disjoint(&request.scope));
+            if apply {
+                self.send(Command::Supersede(request.scope.clone()));
+            }
             self.pending_requests.push((request, apply));
             return;
         }
