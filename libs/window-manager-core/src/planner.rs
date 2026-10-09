@@ -67,6 +67,8 @@ pub struct VisitOverride {
     pub client: [i32; 2],
     pub dpi: u32,
     pub display: Id,
+    pub preserve_position: bool,
+    pub preserve_size: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -406,6 +408,8 @@ pub fn plan(
                         client: observed.client,
                         dpi: observed.dpi,
                         display: observed.display.clone(),
+                        preserve_position: request.mode == TransitionMode::KeepHere,
+                        preserve_size: true,
                     },
                 );
                 result.expected.insert(retained.clone(), observed.clone());
@@ -422,10 +426,11 @@ pub fn plan(
             desired: &mut result.desired,
             diagnostics: &mut result.diagnostics,
             reservations: Vec::new(),
+            explicit_tabs: &request.selected_tabs,
         };
         // Reserve immutable geometry before allocating any siblings.
         for (window_id, exception) in &evaluator.presentation.overrides {
-            if exception.mode == TransitionMode::KeepHere {
+            if exception.preserve_position {
                 if !area.contains(exception.frame) {
                     return Err(conflict(
                         window_id,
@@ -467,7 +472,7 @@ pub fn plan(
         for (window, exception) in &presentation.overrides {
             if !result.desired.contains_key(window) {
                 let mut frame = exception.frame;
-                if exception.mode != TransitionMode::KeepHere {
+                if !exception.preserve_position {
                     frame.x = area.x;
                     frame.y = area.y;
                 }
@@ -755,6 +760,7 @@ struct Evaluator<'a> {
     desired: &'a mut BTreeMap<Id, Desired>,
     diagnostics: &'a mut Vec<String>,
     reservations: Vec<Rect>,
+    explicit_tabs: &'a BTreeMap<Id, Id>,
 }
 
 impl Evaluator<'_> {
@@ -808,12 +814,23 @@ impl Evaluator<'_> {
         }
         let gap = (gap * scale).round() as i32;
         if matches!(strategy, Strategy::SemanticTabs | Strategy::ResponsiveTabs) {
+            let focused_child = (strategy == Strategy::ResponsiveTabs
+                && !self.explicit_tabs.contains_key(&group.id))
+            .then_some(self.snapshot.focused.as_ref())
+            .flatten()
+            .and_then(|window| {
+                group.children.iter().find(|child| {
+                    let mut leaves = Vec::new();
+                    child.placements(&mut leaves);
+                    leaves.iter().any(|leaf| &leaf.window == window)
+                })
+            });
             let selected = self
                 .presentation
                 .selected_tabs
                 .get(&group.id)
                 .and_then(|id| group.children.iter().find(|child| child.id() == id));
-            let child = selected.unwrap_or(&group.children[0]);
+            let child = focused_child.or(selected).unwrap_or(&group.children[0]);
             for sibling in &group.children {
                 if sibling.id() != child.id() {
                     let mut leaves = Vec::new();
@@ -838,6 +855,63 @@ impl Evaluator<'_> {
             }
             return Ok(());
         }
+        if strategy == Strategy::Flow {
+            let available = largest_free(area, &self.reservations)?;
+            let mut x = available.x;
+            let mut y = available.y;
+            let mut row_height = 0;
+            for child in &group.children {
+                let mut leaves = Vec::new();
+                child.placements(&mut leaves);
+                let frames: Vec<_> = leaves
+                    .iter()
+                    .filter_map(|leaf| {
+                        self.presentation
+                            .overrides
+                            .get(&leaf.window)
+                            .map(|exception| exception.frame)
+                            .or_else(|| {
+                                self.snapshot
+                                    .windows
+                                    .get(&leaf.window)
+                                    .map(|observed| observed.frame)
+                            })
+                    })
+                    .collect();
+                let width = frames
+                    .iter()
+                    .map(|frame| frame.width)
+                    .max()
+                    .unwrap_or_else(|| (300.0 * scale).round() as i32);
+                let height = frames
+                    .iter()
+                    .map(|frame| frame.height)
+                    .max()
+                    .unwrap_or_else(|| (200.0 * scale).round() as i32);
+                if width > available.width || height > available.height {
+                    return Err(conflict(
+                        &group.id,
+                        "Flow child cannot fit without forbidden shrinking",
+                    ));
+                }
+                if x + width > available.x + available.width {
+                    x = available.x;
+                    y += row_height + gap;
+                    row_height = 0;
+                }
+                let allocated = Rect { x, y, width, height };
+                if !available.contains(allocated) {
+                    return Err(conflict(
+                        &group.id,
+                        "Flow rows exhaust the slot; choose a tab fallback or larger slot",
+                    ));
+                }
+                self.layout(child, allocated, variant_id, true)?;
+                x += width + gap;
+                row_height = row_height.max(height);
+            }
+            return Ok(());
+        }
         // Carve out fixed reservations first; remaining siblings share the largest free rectangle.
         let fixed: Vec<bool> = group
             .children
@@ -849,7 +923,7 @@ impl Evaluator<'_> {
                             .presentation
                             .overrides
                             .get(&placement.window)
-                            .is_some_and(|exception| exception.mode == TransitionMode::KeepHere)
+                            .is_some_and(|exception| exception.preserve_position)
                 }
                 Node::Group(_) => false,
             })
@@ -984,7 +1058,8 @@ impl Evaluator<'_> {
         }
         let exception = self.presentation.overrides.get(&placement.window);
         let locked = self.config.windows[&placement.window].protection.geometry_lock;
-        let strict_size = exception.is_some() || preserve || locked;
+        let strict_size =
+            exception.is_some_and(|exception| exception.preserve_size) || preserve || locked;
         if let Some(exception) = exception {
             if exception.dpi != self.dpi || exception.display != self.slot.display {
                 return Err(Error::new(
@@ -993,10 +1068,13 @@ impl Evaluator<'_> {
                     &placement.window,
                 ));
             }
-            frame.width = exception.frame.width;
-            frame.height = exception.frame.height;
-            if exception.mode == TransitionMode::KeepHere {
-                frame = exception.frame;
+            if exception.preserve_size {
+                frame.width = exception.frame.width;
+                frame.height = exception.frame.height;
+            }
+            if exception.preserve_position {
+                frame.x = exception.frame.x;
+                frame.y = exception.frame.y;
             }
         } else if locked {
             frame = observed.frame;
@@ -1023,7 +1101,7 @@ impl Evaluator<'_> {
         let slot_area = slot_bounds(self.slot, self.snapshot)?;
         if !slot_area.contains(frame)
             || (!locked
-                && exception.is_none_or(|exception| exception.mode != TransitionMode::KeepHere)
+                && exception.is_none_or(|exception| !exception.preserve_position)
                 && !area.contains(frame))
         {
             return Err(conflict(

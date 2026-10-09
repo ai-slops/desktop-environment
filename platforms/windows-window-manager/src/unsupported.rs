@@ -13,6 +13,10 @@ fn unsupported<T>() -> Result<T> {
         "platform",
     ))
 }
+#[must_use]
+pub const fn foreground_handle() -> u64 {
+    0
+}
 pub fn inventory() -> Result<Vec<Candidate>> {
     unsupported()
 }
@@ -57,6 +61,8 @@ pub fn process_started(_: u32) -> Result<u64> {
 #[derive(Clone, Debug)]
 pub enum NativeEvent {
     Changed(u64),
+    GestureStarted(u64),
+    GestureEnded(u64),
     Shortcut(u32),
     RegistrationError(String),
 }

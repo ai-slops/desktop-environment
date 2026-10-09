@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use window_manager_core::{
-    Binding, Configuration, Error, ErrorCode, Id, Plan, Request, Result, Runtime, Snapshot, Status,
-    TransitionResult, UndoRecord, WindowResult, atomic_write, plan,
+    Binding, Configuration, Desired, Error, ErrorCode, Id, ManualEdit, ObservedWindow, Plan,
+    Request, Result, Runtime, Snapshot, Status, TransitionResult, UndoRecord, WindowResult,
+    atomic_write, plan,
 };
 use windows_window_manager::{Candidate, Journal, NativeEvent, RecoveryEntry};
 
@@ -18,6 +19,7 @@ pub enum Command {
     Preview(Configuration, Request),
     Apply(Configuration, Plan),
     Undo(Id),
+    Promote(Id, Id, bool, bool),
     Pause(bool),
     Recover,
     Shutdown,
@@ -31,6 +33,7 @@ pub enum Event {
     Shortcut(u32),
     Error(Error),
     Notice(String),
+    ManualEdit(ManualEdit),
 }
 
 pub struct Worker {
@@ -68,6 +71,8 @@ struct State {
     events: Sender<Event>,
     undo: Vec<UndoRecord>,
     undoing: Option<Id>,
+    active_geometry: BTreeMap<Id, Desired>,
+    gestures: BTreeMap<Id, ObservedWindow>,
 }
 
 impl State {
@@ -78,6 +83,12 @@ impl State {
             self.snapshot.displays = displays;
         }
         self.snapshot.windows.clear();
+        let foreground = windows_window_manager::foreground_handle();
+        self.snapshot.focused = self
+            .bindings
+            .iter()
+            .find(|(_, binding)| binding.handle == foreground)
+            .map(|(id, _)| id.clone());
         for (id, binding) in &self.bindings {
             if let Some(reference) = self.config.windows.get(id)
                 && let Ok(observed) = windows_window_manager::observe(binding, reference.allow_hide)
@@ -94,6 +105,13 @@ impl State {
 
     #[allow(clippy::too_many_lines)] // Journal, submission, and settlement are one execution transaction.
     fn apply(&mut self, plan: &Plan) -> Result<()> {
+        if !self.gestures.is_empty() {
+            return Err(Error::new(
+                ErrorCode::PermissionDenied,
+                "A user move/size gesture is in progress; retry after it ends",
+                &plan.id,
+            ));
+        }
         self.refresh()?;
         plan.revalidate(&self.config, &self.runtime, &self.snapshot)?;
         let prior_runtime = self.runtime.clone();
@@ -176,6 +194,8 @@ impl State {
             });
             if component_settled {
                 component.commit(&mut self.runtime);
+                self.active_geometry.retain(|_, desired| &desired.slot != slot);
+                self.active_geometry.extend(component.desired.clone());
                 if self.undoing.as_ref() != Some(&plan.id) {
                     self.undo.push(UndoRecord::capture(
                         &component,
@@ -274,6 +294,8 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
         events,
         undo: Vec::new(),
         undoing: None,
+        active_geometry: BTreeMap::new(),
+        gestures: BTreeMap::new(),
     };
     if let Err(error) = state.refresh() {
         let _ = state.events.send(Event::Error(error));
@@ -287,6 +309,42 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
     loop {
         while let Ok(event) = native_events.try_recv() {
             match event {
+                NativeEvent::GestureStarted(handle) => {
+                    if let Some((id, observed)) = state
+                        .snapshot
+                        .windows
+                        .iter()
+                        .find(|(_, observed)| observed.binding.handle == handle)
+                    {
+                        state.gestures.insert(id.clone(), observed.clone());
+                    }
+                }
+                NativeEvent::GestureEnded(handle) => {
+                    let id = state
+                        .bindings
+                        .iter()
+                        .find(|(_, binding)| binding.handle == handle)
+                        .map(|(id, _)| id.clone());
+                    if let Some(id) = id
+                        && let Some(before) = state.gestures.remove(&id)
+                    {
+                        let _ = state.refresh();
+                        if let Some(desired) = state.active_geometry.get(&id)
+                            && let Some(presentation) =
+                                state.runtime.presentations.get(&desired.slot)
+                            && let Some(after) = state.snapshot.windows.get(&id)
+                            && let Some(edit) = ManualEdit::observed(
+                                presentation.view.clone(),
+                                desired,
+                                &before,
+                                after,
+                            )
+                        {
+                            let _ = state.events.send(Event::ManualEdit(edit));
+                        }
+                        state.publish();
+                    }
+                }
                 NativeEvent::Changed(handle) => {
                     if state.bindings.values().any(|binding| binding.handle == handle) {
                         dirty = true;
@@ -375,6 +433,11 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                 let _ = state.events.send(Event::Preview(Box::new(reversed)));
                 Ok(())
             }),
+            Command::Promote(slot, window, position, size) => {
+                state.runtime.promote_properties(&slot, &window, position, size);
+                state.publish();
+                Ok(())
+            }
             Command::Pause(paused) => {
                 state.runtime.paused = paused;
                 if !paused {

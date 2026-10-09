@@ -43,7 +43,7 @@ target\debug\window-manager.exe --recover --config .\my-layouts.json
 
 Native submission is asynchronous and distinct from settlement. The worker checks final geometry/visibility for up to 900ms, including exact observed client size for strict preservation. Divergence or rejected operations pause enforcement, release affected claims, and attempt visibility recovery. Applications are never restarted or terminated. There is no automatic loop fighting a rejected application rectangle.
 
-Authored state contains no HWNDs. Startup never auto-applies layouts or matches a reference solely by a title. Existing references missing a live binding are placeholders; select one and explicitly connect an inventory candidate. Geometry observed from native events is runtime evidence and never automatically saved as a manual edit. The current UI requires explicit property saving.
+Authored state contains no HWNDs. Startup never auto-applies layouts or matches a reference solely by a title. Existing references missing a live binding are placeholders; select one and explicitly connect an inventory candidate. Geometry observed from native events is runtime evidence and never automatically saved as a manual edit. Paired native user move/size-start and end events save only changed properties in the active Placement context, preserving formulas and unrelated editor drafts. Location changes alone never establish user-edit provenance. Saving promotes only the addressed Visit exception property.
 
 Configuration edits are revisioned and written through flushed temporary-file replacement. The prior valid document is saved to `.json.bak`. A corrupt/unsupported document starts the UI in read-only safe mode and is not overwritten. Restore an existing validated backup after closing the GUI:
 
@@ -51,7 +51,7 @@ Configuration edits are revisioned and written through flushed temporary-file re
 target\debug\window-manager.exe --restore-backup --config .\my-layouts.json
 ```
 
-GUI instances and configuration-writing CLI commands share an exclusive same-store lock. Structural configuration edits have a bounded 50-action undo history. **창 배치 되돌리기 미리보기** reverses a settled native transition as one scoped operation, revalidating identities, topology, generations, newer ownership, manual changes, and current protections. Focus is not restored. Failed slots are suspended independently; successful slots keep their presentations. **실패 영역 관리 재개** explicitly clears suspension. Graceful exit waits briefly for worker recovery, with the independent helper as the crash fallback. Arbitrary user-drag autosave remains work for P1.
+GUI instances and configuration-writing CLI commands share an exclusive same-store lock. Structural configuration edits have a bounded 50-action undo history. **창 배치 되돌리기 미리보기** reverses a settled native transition as one scoped operation, revalidating identities, topology, generations, newer ownership, manual changes, and current protections. Focus is not restored. Failed slots are suspended independently; successful slots keep their presentations. **실패 영역 관리 재개** explicitly clears suspension. Graceful exit waits briefly for worker recovery, with the independent helper as the crash fallback. Manual move/size gesture saving operates only for bound active Placements on a compatible display/DPI; unpaired events, carried leaves, and lifetime changes do not persist geometry.
 
 ## Formulas and packages
 
@@ -67,7 +67,7 @@ width   = min(available_width * 0.30, 600)
 
 Source length is bounded to 4096 bytes, tokens to 512, and parse/evaluation nesting to 32. There is no filesystem/network/process/credential/window/input access. Unknown symbols, invalid syntax, non-finite results, divide-by-zero, negative dimensions, and invalid grid column counts fail explicitly. Syntax/function/name validation checks all branches before saving a draft. Value/fit errors are validated using the actual layout snapshot before application.
 
-The GUI edits Group gaps/column rules. Placement width/height formulas, context geometry, variant ratios, height breakpoints, multi-root Views, and Collections can also be authored in the strict JSON model. Their native effects still go through the same planner.
+The GUI edits Group gaps/columns/ratios, width/height breakpoints and hysteresis, Placement client sizes/positions/minima/formulas, multi-root Views, and basic Collection queries with explicit inclusion/exclusion. Selector membership is calculated into a draft and explicitly saved. Removed generated members retain IDs and preferences for later return; export removes local selector sources and caches. Flow wraps observed sizes without shrinking. Responsive folding favors the currently focused descendant unless a tab was explicitly chosen; semantic tabs remain explicit alternatives.
 
 Use `--check` to inspect stable IDs. Export redacts live identities, titles, application hints, tags, and display geometry, replacing resources with role placeholders:
 
@@ -91,8 +91,8 @@ Remaining release gates / P1 work:
 
 - Real editor/browser/terminal/game/broadcaster matrix; elevated windows, Korean IME/modal interaction, mixed DPI, hotkey collision, hung-app and rapid supersession measurements, and load/performance distributions.
 - Capability-selected show-state changes, explicit off-screen rescue, robust topology fallback/reconnect restoration, and monitor identity confirmation when Windows cannot identify a monitor uniquely. Current behavior blocks unavailable/ambiguous mappings and never overwrites saved topology preferences.
-- Manual-drag provenance/autosave, independent protection lifetimes, focus-prioritized responsive folding, more flexible preserve-size fitting/wrapping, and all three Group-preservation modes. Runtime application and undo operate independently per slot; finer dependent-subtree isolation remains. Current executor uses bounded asynchronous per-window final submission; batched `DeferWindowPos` is not implemented.
-- Dynamic Collection/selector materialization and staged membership changes, richer inline property/variant/package editors, Workspace remembered-target recall, all exact-scope expansion/drag/copy/reveal commands, and public CLI transition/session/event interfaces. Collection query and independent include/exclude semantics are present in the core model; they do not currently automate Group membership.
+- Independent protection lifetimes, additional fit fallback policies, and all three Group-preservation modes. Runtime application and undo operate independently per slot; finer dependent-subtree isolation remains. Current executor uses bounded asynchronous per-window final submission; batched `DeferWindowPos` is not implemented.
+- Richer package editors, all exact-scope expansion/drag/copy/reveal commands, and public CLI transition/session/event interfaces. Workspace remembered View selection, multi-root editing, Collection selectors, staged membership, and inline property/variant editing are available.
 - Private-designated control-window placement/fallback and provider-based attention/output protection contracts. Current public designation is informational; there is no verified capture protection, broadcast integration, reliable AI task-state inference, or automatic application control.
 
 P2 linked templates, executable extensions, app-internal providers, remote APIs, and observation mirrors are not implemented. These limitations are explicit; placeholders or fixture tests do not satisfy their release gates.

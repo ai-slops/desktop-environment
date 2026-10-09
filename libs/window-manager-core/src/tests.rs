@@ -55,6 +55,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
         has_owned_dialog: false,
     };
     let snapshot = Snapshot {
+        focused: None,
         topology_revision: 1,
         displays: BTreeMap::from([(
             "monitor".into(),
@@ -633,4 +634,124 @@ fn distinct_references_cannot_claim_one_native_window() {
         plan(&config, &Runtime::default(), &snapshot, &request).err().map(|error| error.code),
         Some(ErrorCode::AmbiguousBinding)
     );
+}
+
+#[test]
+fn selector_membership_is_staged_and_restores_stable_preferences() -> Result<()> {
+    let (mut config, _, target) = fixture();
+    group_mut(&mut config, &target)?.children.clear();
+    config.collections.insert(
+        "selected".into(),
+        Collection {
+            id: "selected".into(),
+            name: "Work".into(),
+            query: Query::All,
+            include: BTreeSet::new(),
+            exclude: BTreeSet::new(),
+        },
+    );
+    group_mut(&mut config, &target)?.membership = Some(Membership {
+        collection: "selected".into(),
+        role: "local".into(),
+        generated: BTreeMap::new(),
+        retired: BTreeMap::new(),
+    });
+    let (mut staged, delta) = config.stage_memberships()?;
+    assert_eq!(delta.added.len(), 1);
+    assert!(group_mut(&mut config, &target)?.children.is_empty());
+    let id = delta.added[0].clone();
+    staged.save_properties(&target.view, &id, "context", None, Some([420.0, 260.0]))?;
+    if let Some(collection) = staged.collections.get_mut("selected") {
+        collection.exclude.insert("preview".into());
+    }
+    let (mut removed, delta) = staged.stage_memberships()?;
+    assert_eq!(delta.removed, vec![id.clone()]);
+    assert!(group_mut(&mut removed, &target)?.children.is_empty());
+    if let Some(collection) = removed.collections.get_mut("selected") {
+        collection.exclude.clear();
+    }
+    let (mut returned, delta) = removed.stage_memberships()?;
+    assert_eq!(delta.added, vec![id]);
+    let Node::Placement(placement) = &group_mut(&mut returned, &target)?.children[0] else {
+        return Err(Error::new(ErrorCode::InvalidConfiguration, "Expected selector leaf", "test"));
+    };
+    assert_eq!(placement.preferences["context"].size_override, Some([420.0, 260.0]));
+    let exported = LayoutPackage::from_view(&returned.views[&target.view]);
+    let json = serde_json::to_string(&exported)
+        .map_err(|error| Error::new(ErrorCode::StorageFailure, error.to_string(), "test"))?;
+    assert!(!json.contains("selected"));
+    assert!(!json.contains("420.0"));
+    let copied = returned.copy_view(&target.view, "copy".into())?;
+    assert_ne!(copied, target.view);
+    returned.validate()?;
+    Ok(())
+}
+
+#[test]
+fn flow_wraps_without_resize_and_responsive_tabs_follow_focus_unless_explicit() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    for (index, id) in ["second", "third"].iter().enumerate() {
+        let mut reference = config.windows["preview"].clone();
+        reference.id = (*id).into();
+        config.windows.insert((*id).into(), reference);
+        let mut observed = snapshot.windows["preview"].clone();
+        observed.binding.handle = index as u64 + 100;
+        snapshot.windows.insert((*id).into(), observed);
+        group_mut(&mut config, &target)?
+            .children
+            .push(Node::Placement(Placement::new((*id).into(), (*id).into())));
+    }
+    group_mut(&mut config, &target)?.strategy = Strategy::Flow;
+    if let Some(slot) = config.slots.get_mut("work") {
+        slot.region[2] = 0.65;
+    }
+    let flow =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(flow.desired["preview"].frame.width, 620);
+    assert!(flow.desired["third"].frame.y > flow.desired["preview"].frame.y);
+    assert!(flow.mutations.iter().all(|mutation| mutation.move_only));
+    group_mut(&mut config, &target)?.strategy = Strategy::ResponsiveTabs;
+    snapshot.focused = Some("third".into());
+    let focused =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(focused.desired.keys().cloned().collect::<Vec<_>>(), vec!["third".to_owned()]);
+    let mut request = Request::open(&config, target.clone());
+    let group = group_mut(&mut config, &target)?;
+    request.selected_tabs.insert(group.id.clone(), group.children[0].id().into());
+    let explicit = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert!(explicit.desired.contains_key("preview"));
+    Ok(())
+}
+
+#[test]
+fn manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception() -> Result<()> {
+    let (config, snapshot, target) = fixture();
+    let mut request = Request::open(&config, target.clone());
+    request.mode = TransitionMode::KeepHere;
+    request.retain.insert("preview".into());
+    let transition = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    let before = &snapshot.windows["preview"];
+    let mut moved = before.clone();
+    moved.frame.x += 12;
+    let edit =
+        ManualEdit::observed(target.view.clone(), &transition.desired["preview"], before, &moved)
+            .ok_or_else(|| {
+            Error::new(ErrorCode::InvalidConfiguration, "Expected manual edit", "test")
+        })?;
+    assert!(edit.position.is_some());
+    assert!(edit.size.is_none());
+    let mut runtime = Runtime::default();
+    transition.commit(&mut runtime);
+    runtime.promote_properties("work", "preview", true, false);
+    assert!(!runtime.presentations["work"].overrides["preview"].preserve_position);
+    assert!(runtime.presentations["work"].overrides["preview"].preserve_size);
+    runtime.promote_properties("work", "preview", false, true);
+    assert!(runtime.presentations["work"].overrides.is_empty());
+    let mut rebinding = moved;
+    rebinding.binding.generation += 1;
+    assert!(
+        ManualEdit::observed(target.view, &transition.desired["preview"], before, &rebinding)
+            .is_none()
+    );
+    Ok(())
 }

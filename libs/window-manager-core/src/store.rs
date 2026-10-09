@@ -69,6 +69,7 @@ impl Configuration {
             add(key)?;
             for root in view.roots.values() {
                 validate_node(root, &self.windows, &mut add, 0)?;
+                validate_membership_sources(root, self)?;
             }
         }
         for (key, slot) in &self.slots {
@@ -176,6 +177,11 @@ impl Configuration {
                     for child in &group.children {
                         formulas(child)?;
                     }
+                    if let Some(membership) = &group.membership {
+                        for placement in membership.retired.values() {
+                            formulas(&Node::Placement(placement.clone()))?;
+                        }
+                    }
                 }
             }
             Ok(())
@@ -253,6 +259,15 @@ fn replace_node_ids(node: &mut Node) {
             for child in &mut group.children {
                 replace_node_ids(child);
             }
+            if let Some(membership) = &mut group.membership {
+                for placement in membership.retired.values_mut() {
+                    placement.id = new_id("placement");
+                }
+                for (window, id) in &mut membership.generated {
+                    if let Some(placement) = membership.retired.get(window) { id.clone_from(&placement.id); }
+                    else if let Some(Node::Placement(placement)) = group.children.iter().find(|child| matches!(child, Node::Placement(placement) if &placement.window == window)) { id.clone_from(&placement.id); }
+                }
+            }
         }
     }
 }
@@ -316,6 +331,22 @@ fn validate_node(
             }
         }
         Node::Group(group) => {
+            if let Some(membership) = &group.membership {
+                if membership.generated.len() > 256 || membership.retired.len() > 256 {
+                    return Err(invalid(&group.id, "Membership budget exceeded"));
+                }
+                for (window, placement) in &membership.retired {
+                    if window != &placement.window
+                        || membership.generated.get(window) != Some(&placement.id)
+                    {
+                        return Err(invalid(&group.id, "Retired member identity mismatch"));
+                    }
+                    validate_node(&Node::Placement(placement.clone()), windows, add, depth + 1)?;
+                }
+                for (window, id) in &membership.generated {
+                    if !membership.retired.contains_key(window) && !group.children.iter().any(|child| matches!(child, Node::Placement(placement) if &placement.id == id && &placement.window == window)) { return Err(invalid(&group.id, "Generated member is missing")); }
+                }
+            }
             if group.children.len() > 256 {
                 return Err(invalid(&group.id, "Group child budget exceeded"));
             }
@@ -347,6 +378,20 @@ fn validate_node(
             for child in &group.children {
                 validate_node(child, windows, add, depth + 1)?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_membership_sources(node: &Node, config: &Configuration) -> Result<()> {
+    if let Node::Group(group) = node {
+        if let Some(membership) = &group.membership
+            && !config.collections.contains_key(&membership.collection)
+        {
+            return Err(invalid(&group.id, "Unknown selector Collection"));
+        }
+        for child in &group.children {
+            validate_membership_sources(child, config)?;
         }
     }
     Ok(())
@@ -394,6 +439,7 @@ impl LayoutPackage {
                 }
                 Node::Group(group) => {
                     group.name = "Group".into();
+                    group.membership = None;
                     for child in &mut group.children {
                         redact(child, roles);
                     }
@@ -446,6 +492,12 @@ impl LayoutPackage {
                     roles.insert(placement.role.clone());
                 }
                 Node::Group(group) => {
+                    if group.membership.is_some() {
+                        return Err(invalid(
+                            &group.id,
+                            "Packages must map roles explicitly; local selectors cannot be imported",
+                        ));
+                    }
                     crate::validate_formula(&group.gap)?;
                     crate::validate_formula(&group.columns)?;
                     for child in &group.children {

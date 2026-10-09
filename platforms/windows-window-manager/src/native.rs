@@ -43,6 +43,11 @@ const fn handle(value: u64) -> HWND {
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
+#[must_use]
+pub fn foreground_handle() -> u64 {
+    // SAFETY: foreground query does not change activation.
+    unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize as u64 }
+}
 fn string(value: &[u16]) -> String {
     String::from_utf16_lossy(
         &value[..value.iter().position(|unit| *unit == 0).unwrap_or(value.len())],
@@ -472,6 +477,8 @@ pub fn process_started(pid: u32) -> Result<u64> {
 #[derive(Clone, Debug)]
 pub enum NativeEvent {
     Changed(u64),
+    GestureStarted(u64),
+    GestureEnded(u64),
     Shortcut(u32),
     RegistrationError(String),
 }
@@ -490,7 +497,7 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
         thread_local! { static SENDER: RefCell<Option<mpsc::SyncSender<NativeEvent>>> = const { RefCell::new(None) }; }
         unsafe extern "system" fn callback(
             _: HWINEVENTHOOK,
-            _: u32,
+            event: u32,
             hwnd: HWND,
             object: i32,
             child: i32,
@@ -500,7 +507,17 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
             if object == 0 && child == 0 {
                 SENDER.with(|sender| {
                     if let Some(sender) = sender.borrow().as_ref() {
-                        let _ = sender.try_send(NativeEvent::Changed(hwnd.0 as usize as u64));
+                        let handle = hwnd.0 as usize as u64;
+                        let event = match event {
+                            windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_MOVESIZESTART => {
+                                NativeEvent::GestureStarted(handle)
+                            }
+                            windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_MOVESIZEEND => {
+                                NativeEvent::GestureEnded(handle)
+                            }
+                            _ => NativeEvent::Changed(handle),
+                        };
+                        let _ = sender.try_send(event);
                     }
                 });
             }
@@ -518,6 +535,23 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         };
+        // SAFETY: same bounded out-of-context callback; distinguishes user gestures from our native submission.
+        let gesture_hook = unsafe {
+            SetWinEventHook(
+                windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_MOVESIZESTART,
+                windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_MOVESIZEEND,
+                None,
+                Some(callback),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            )
+        };
+        if hook.0.is_null() || gesture_hook.0.is_null() {
+            let _ = sender.try_send(NativeEvent::RegistrationError(
+                "Window observation hook unavailable; manual autosave disabled".into(),
+            ));
+        }
         for number in &numbers {
             // SAFETY: thread-scoped hotkey; stable configured number, no HWND or input injection.
             if let Err(error) = unsafe {
@@ -546,6 +580,9 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
         }
         if !hook.0.is_null() {
             let _ = unsafe { UnhookWinEvent(hook) };
+        }
+        if !gesture_hook.0.is_null() {
+            let _ = unsafe { UnhookWinEvent(gesture_hook) };
         }
     });
     receiver

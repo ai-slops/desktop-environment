@@ -4,9 +4,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 use window_manager_core::{
-    Composition, Configuration, Desired, DisplaySlot, Group, Id, Node, ObservedWindow, Placement,
-    Plan, Protection, Request, Runtime, Shortcut, Snapshot, Status, Strategy, Tag, Target,
-    TransitionMode, TransitionResult, Variant, View, WindowRef, Workspace, new_id, slot_bounds,
+    Collection, Composition, Configuration, Desired, DisplaySlot, Group, Id, Membership, Node,
+    ObservedWindow, Placement, Plan, Protection, Query, Request, Runtime, Shortcut, Snapshot,
+    Status, Strategy, Tag, Target, TransitionMode, TransitionResult, Variant, View, WindowRef,
+    Workspace, context_key, new_id, slot_bounds,
 };
 use windows_window_manager::Candidate;
 
@@ -90,6 +91,7 @@ struct Manager {
     runtime: Runtime,
     inventory: Vec<Candidate>,
     selected_view: Id,
+    selected_root: String,
     selected_slot: Id,
     selected_group: Id,
     selected_window: Option<Id>,
@@ -170,7 +172,13 @@ impl Manager {
             .err()
             .map(|error| format!("독립 복구 도우미 오류; 창 숨김 차단: {error}"));
         let worker = Worker::start(path.clone(), config.clone());
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        let selected_root = config
+            .views
+            .get(&selected_view)
+            .and_then(|view| view.roots.keys().next())
+            .cloned()
+            .unwrap_or_default();
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
@@ -210,6 +218,51 @@ impl Manager {
     fn poll(&mut self) {
         while let Ok(event) = self.worker.receiver.try_recv() {
             match event {
+                Event::ManualEdit(edit) => {
+                    if self.safe_mode.is_some()
+                        || self.runtime.claims.get(&edit.window).is_none_or(|claim| {
+                            claim.slot != edit.slot || claim.placement != edit.placement
+                        })
+                    {
+                        continue;
+                    }
+                    let mut saved = self.config.clone();
+                    match saved.save_properties(
+                        &edit.view,
+                        &edit.placement,
+                        &edit.context,
+                        edit.position,
+                        edit.size,
+                    ) {
+                        Ok(()) => {
+                            // Merge addressed properties into the editor draft without discarding unrelated typing.
+                            let mut pending_draft = self.draft.clone();
+                            let merged = pending_draft
+                                .save_properties(
+                                    &edit.view,
+                                    &edit.placement,
+                                    &edit.context,
+                                    edit.position,
+                                    edit.size,
+                                )
+                                .is_ok();
+                            if self.commit(saved) {
+                                if merged {
+                                    pending_draft.revision = self.config.revision;
+                                    self.draft = pending_draft;
+                                }
+                                self.send(Command::Promote(
+                                    edit.slot,
+                                    edit.window,
+                                    edit.position.is_some(),
+                                    edit.size.is_some(),
+                                ));
+                                self.notice = "사용자 드래그에서 바뀐 위치·크기만 이 배치 문맥에 저장했습니다.".into();
+                            }
+                        }
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
                 Event::Inventory(inventory) => self.inventory = inventory,
                 Event::State(snapshot, runtime) => {
                     self.snapshot = snapshot;
@@ -271,7 +324,7 @@ impl Manager {
         Some(Target {
             view: view.id.clone(),
             roots: BTreeMap::from([(
-                view.roots.keys().next()?.clone(),
+                view.roots.get_key_value(&self.selected_root)?.0.clone(),
                 self.selected_slot.clone(),
             )]),
         })
@@ -322,6 +375,8 @@ impl Manager {
     }
     fn select_view(&mut self, id: Id) {
         self.selected_view = id;
+        self.selected_root =
+            self.config.views[&self.selected_view].roots.keys().next().cloned().unwrap_or_default();
         self.selected_group = self.config.views[&self.selected_view]
             .roots
             .values()
@@ -335,6 +390,11 @@ impl Manager {
         let workspaces: Vec<_> = self.config.workspaces.values().cloned().collect();
         for workspace in workspaces {
             ui.label(RichText::new(&workspace.name).color(Color32::from_rgb(140, 166, 203)));
+            if let Some(id) = &workspace.remembered_view
+                && ui.small_button("기억된 배치 선택").clicked()
+            {
+                self.select_view(id.clone());
+            }
             let views: Vec<_> = self
                 .config
                 .views
@@ -350,6 +410,22 @@ impl Manager {
             ui.add_space(10.0);
         }
         ui.separator();
+        if let Some(view) = self.config.views.get(&self.selected_view) {
+            egui::ComboBox::from_id_salt("target-root")
+                .selected_text(format!("루트: {}", self.selected_root))
+                .show_ui(ui, |ui| {
+                    for role in view.roots.keys() {
+                        ui.selectable_value(&mut self.selected_root, role.clone(), role);
+                    }
+                });
+            if ui.button("이 작업 공간의 배치로 기억").clicked() {
+                let mut draft = self.config.clone();
+                if let Some(workspace) = draft.workspaces.get_mut(&view.workspace) {
+                    workspace.remembered_view = Some(view.id.clone());
+                }
+                self.commit(draft);
+            }
+        }
         ui.text_edit_singleline(&mut self.name);
         if ui.button("+ 작업 공간").clicked() && !self.name.trim().is_empty() {
             let mut draft = self.config.clone();
@@ -715,9 +791,30 @@ impl Manager {
             });
             for (role, node) in &mut view.roots {
                 ui.label(format!("루트 역할: {role}"));
-                tree_editor(ui, node, &mut self.selected_group, &mut tab_action, 0);
+                tree_editor(
+                    ui,
+                    node,
+                    &mut self.selected_group,
+                    &mut tab_action,
+                    &self.config.slots,
+                    &self.selected_slot,
+                    0,
+                );
             }
         }
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.name);
+            if ui.button("+ 루트 역할").clicked()
+                && !self.name.trim().is_empty()
+                && let Some(view) = self.draft.views.get_mut(&self.selected_view)
+            {
+                view.roots
+                    .entry(self.name.trim().into())
+                    .or_insert_with(|| Node::Group(Group::new("새 루트".into())));
+                self.name.clear();
+            }
+        });
+        self.collections_editor(ui);
         if ui.button("배치 구조 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -746,6 +843,58 @@ impl Manager {
                     draft.shortcuts.retain(|shortcut| shortcut.number != number);
                     draft.shortcuts.push(Shortcut { number, target });
                     self.commit(draft);
+                }
+            }
+        });
+    }
+    fn collections_editor(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("컬렉션 / 동적 구성원").show(ui, |ui| {
+            ui.label("조건·포함·제외는 초안입니다. 구성원 계산 후 구조 저장, 전환 미리보기로 반영하세요.");
+            if ui.button("+ 태그 컬렉션").clicked() {
+                let id = new_id("collection");
+                self.draft.collections.insert(id.clone(), Collection { id, name: "새 컬렉션".into(), query: Query::Tag("work".into()), include: BTreeSet::new(), exclude: BTreeSet::new() });
+            }
+            for collection in self.draft.collections.values_mut() {
+                egui::CollapsingHeader::new(&collection.name).id_salt(&collection.id).show(ui, |ui| {
+                    ui.text_edit_singleline(&mut collection.name);
+                    ui.horizontal(|ui| {
+                        if ui.button("전체").clicked() { collection.query = Query::All; }
+                        if ui.button("태그").clicked() { collection.query = Query::Tag(String::new()); }
+                        if ui.button("앱 힌트").clicked() { collection.query = Query::Application(String::new()); }
+                        if ui.button("조건 부정").clicked() { collection.query = Query::Not(Box::new(collection.query.clone())); }
+                    });
+                    query_editor(ui, &mut collection.query);
+                    for window in self.config.windows.values() {
+                        ui.horizontal(|ui| {
+                            ui.label(&window.alias);
+                            let mut include = collection.include.contains(&window.id);
+                            let mut exclude = collection.exclude.contains(&window.id);
+                            if ui.checkbox(&mut include, "포함").changed() { if include { collection.include.insert(window.id.clone()); } else { collection.include.remove(&window.id); } }
+                            if ui.checkbox(&mut exclude, "제외").changed() { if exclude { collection.exclude.insert(window.id.clone()); } else { collection.exclude.remove(&window.id); } }
+                            ui.small(if collection.selects(window) { "선택됨" } else { "선택 안 됨" });
+                        });
+                    }
+                });
+            }
+            let choices: Vec<_> = self.draft.collections.values().map(|collection| (collection.id.clone(), collection.name.clone())).collect();
+            if let Some(view) = self.draft.views.get_mut(&self.selected_view)
+                && let Some(group) = view.roots.values_mut().find_map(|root| find_group_mut(root, &self.selected_group)) {
+                ui.label(format!("연결 대상: {}", group.name));
+                egui::ComboBox::from_id_salt("membership-source").selected_text(group.membership.as_ref().map_or("수동 구성원", |membership| membership.collection.as_str())).show_ui(ui, |ui| {
+                    if ui.selectable_label(group.membership.is_none(), "수동 구성원").clicked() { group.membership = None; }
+                    for (id, name) in &choices {
+                        if ui.selectable_label(group.membership.as_ref().is_some_and(|membership| &membership.collection == id), name).clicked() {
+                            if let Some(membership) = &mut group.membership { membership.collection.clone_from(id); }
+                            else { group.membership = Some(Membership { collection: id.clone(), role: "member".into(), generated: BTreeMap::new(), retired: BTreeMap::new() }); }
+                        }
+                    }
+                });
+                if let Some(membership) = &mut group.membership { ui.horizontal(|ui| { ui.label("배치 로컬 역할"); ui.text_edit_singleline(&mut membership.role); }); }
+            }
+            if ui.button("구성원 변경 계산 → 초안에 반영").clicked() {
+                match self.draft.stage_memberships() {
+                    Ok((draft, delta)) => { self.draft = draft; self.notice = format!("구성원 초안: 추가 {} / 제외 {}. 구조 저장 후 전환 미리보기로 확인하세요.", delta.added.len(), delta.removed.len()); }
+                    Err(error) => self.error = Some(error.to_string()),
                 }
             }
         });
@@ -868,7 +1017,14 @@ impl Manager {
             (!position).then_some(size),
         ) {
             Ok(()) => {
-                self.commit(draft);
+                if self.commit(draft) {
+                    self.send(Command::Promote(
+                        desired.slot.clone(),
+                        desired.window.clone(),
+                        position,
+                        !position,
+                    ));
+                }
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -974,6 +1130,63 @@ const fn mode_label(mode: TransitionMode) -> &'static str {
         TransitionMode::Restore => "저장된 배치로 복원",
     }
 }
+fn optional_pair(ui: &mut egui::Ui, label: &str, value: &mut Option<[f64; 2]>, default: [f64; 2]) {
+    ui.horizontal(|ui| {
+        let mut enabled = value.is_some();
+        if ui.checkbox(&mut enabled, label).changed() {
+            *value = enabled.then_some(default);
+        }
+        if let Some(pair) = value {
+            for axis in pair {
+                ui.add(egui::DragValue::new(axis).speed(1.0));
+            }
+        }
+    });
+}
+fn optional_number(ui: &mut egui::Ui, label: &str, value: &mut Option<f64>, default: f64) {
+    ui.horizontal(|ui| {
+        let mut enabled = value.is_some();
+        if ui.checkbox(&mut enabled, label).changed() {
+            *value = enabled.then_some(default);
+        }
+        if let Some(number) = value {
+            ui.add(egui::DragValue::new(number).range(1.0..=65_536.0));
+        }
+    });
+}
+fn optional_formula(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) {
+    ui.horizontal(|ui| {
+        let mut enabled = value.is_some();
+        if ui.checkbox(&mut enabled, label).changed() {
+            *value = enabled.then(|| "available_width".into());
+        }
+        if let Some(formula) = value {
+            ui.text_edit_singleline(formula);
+        }
+    });
+}
+fn query_editor(ui: &mut egui::Ui, query: &mut Query) {
+    match query {
+        Query::Tag(value) | Query::Application(value) => {
+            ui.text_edit_singleline(value);
+        }
+        Query::Not(inner) => {
+            ui.label("NOT (unknown은 그대로 unknown)");
+            query_editor(ui, inner);
+        }
+        Query::And(queries) | Query::Or(queries) => {
+            for query in queries {
+                query_editor(ui, query);
+            }
+        }
+        Query::All => {
+            ui.label("등록된 모든 창");
+        }
+        Query::Private => {
+            ui.label("공급자 증거 없음: unknown");
+        }
+    }
+}
 fn find_group_mut<'a>(node: &'a mut Node, id: &str) -> Option<&'a mut Group> {
     match node {
         Node::Placement(_) => None,
@@ -992,6 +1205,8 @@ fn tree_editor(
     node: &mut Node,
     selected: &mut Id,
     tab_action: &mut Option<(Id, Id)>,
+    slots: &BTreeMap<Id, DisplaySlot>,
+    selected_slot: &str,
     depth: usize,
 ) {
     match node {
@@ -1001,6 +1216,39 @@ fn tree_editor(
                 ui.text_edit_singleline(&mut placement.role);
                 ui.small(&placement.window);
             });
+            if let Some(slot) = slots.get(selected_slot) {
+                let keys: Vec<_> = std::iter::once(context_key(slot, "base"))
+                    .chain(placement.preferences.keys().cloned())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect();
+                for key in keys {
+                    egui::CollapsingHeader::new(format!("크기·위치 규칙 {key}"))
+                        .id_salt((&placement.id, &key))
+                        .show(ui, |ui| {
+                            let preference = placement.preferences.entry(key).or_default();
+                            optional_pair(
+                                ui,
+                                "클라이언트 크기",
+                                &mut preference.client_size,
+                                [600.0, 400.0],
+                            );
+                            optional_pair(ui, "그룹 내 위치", &mut preference.position, [0.0, 0.0]);
+                            optional_formula(ui, "너비 수식", &mut preference.width_formula);
+                            optional_formula(ui, "높이 수식", &mut preference.height_formula);
+                            optional_pair(
+                                ui,
+                                "최소 크기",
+                                &mut placement.minimum_client,
+                                [100.0, 80.0],
+                            );
+                            if ui.button("이 문맥의 수동 덮어쓰기 해제").clicked() {
+                                preference.position_override = None;
+                                preference.size_override = None;
+                            }
+                        });
+                }
+            }
         }
         Node::Group(group) => {
             egui::CollapsingHeader::new(&group.name)
@@ -1021,6 +1269,7 @@ fn tree_editor(
                                 Strategy::Horizontal,
                                 Strategy::Vertical,
                                 Strategy::Grid,
+                                Strategy::Flow,
                                 Strategy::Free,
                                 Strategy::SemanticTabs,
                                 Strategy::ResponsiveTabs,
@@ -1055,6 +1304,50 @@ fn tree_editor(
                             ratios: Vec::new(),
                         });
                     }
+                    let mut remove_variant = None;
+                    for (index, variant) in group.variants.iter_mut().enumerate() {
+                        ui.push_id((&group.id, &variant.id), |ui| {
+                            ui.label(format!("반응형 문맥: {}", variant.id));
+                            optional_number(ui, "너비 미만", &mut variant.below_width, 720.0);
+                            optional_number(ui, "높이 미만", &mut variant.below_height, 500.0);
+                            ui.horizontal(|ui| {
+                                ui.label("복귀 여유");
+                                ui.add(
+                                    egui::DragValue::new(&mut variant.hysteresis)
+                                        .range(0.0..=4096.0),
+                                );
+                                for strategy in [
+                                    Strategy::ResponsiveTabs,
+                                    Strategy::Flow,
+                                    Strategy::Grid,
+                                    Strategy::Horizontal,
+                                    Strategy::Vertical,
+                                ] {
+                                    ui.selectable_value(
+                                        &mut variant.strategy,
+                                        strategy,
+                                        format!("{strategy:?}"),
+                                    );
+                                }
+                                if ui.button("문맥 삭제").clicked() {
+                                    remove_variant = Some(index);
+                                }
+                            });
+                        });
+                    }
+                    if let Some(index) = remove_variant {
+                        group.variants.remove(index);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("분할 비율 편집").clicked()
+                            && group.ratios.len() != group.children.len()
+                        {
+                            group.ratios.resize(group.children.len(), 1.0);
+                        }
+                        for ratio in &mut group.ratios {
+                            ui.add(egui::DragValue::new(ratio).speed(0.1).range(0.01..=1000.0));
+                        }
+                    });
                     let mut remove = None;
                     let mut reorder = None;
                     let mut unwrap = None;
@@ -1080,12 +1373,23 @@ fn tree_editor(
                                     *tab_action = Some((group.id.clone(), child.id().into()));
                                 }
                             });
-                            tree_editor(ui, child, selected, tab_action, depth + 1);
+                            tree_editor(
+                                ui,
+                                child,
+                                selected,
+                                tab_action,
+                                slots,
+                                selected_slot,
+                                depth + 1,
+                            );
                         });
                         ui.separator();
                     }
                     if let Some(index) = remove {
-                        group.children.remove(index);
+                        let removed = group.children.remove(index);
+                        if let Some(membership) = &mut group.membership {
+                            membership.generated.retain(|_, id| id != removed.id());
+                        }
                     } else if let Some(index) = unwrap {
                         if let Node::Group(child) = group.children.remove(index) {
                             group.children.splice(index..index, child.children);

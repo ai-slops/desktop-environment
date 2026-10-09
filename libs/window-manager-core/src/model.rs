@@ -262,6 +262,7 @@ pub enum Strategy {
     Horizontal,
     Vertical,
     Grid,
+    Flow,
     #[default]
     Free,
     SemanticTabs,
@@ -291,6 +292,8 @@ pub struct Group {
     pub columns: String,
     pub variants: Vec<Variant>,
     pub preserve_child_sizes: bool,
+    #[serde(default)]
+    pub membership: Option<Membership>,
 }
 
 impl Group {
@@ -306,8 +309,20 @@ impl Group {
             columns: "max(1, floor(count ^ 0.5))".into(),
             variants: Vec::new(),
             preserve_child_sizes: false,
+            membership: None,
         }
     }
+}
+
+/// Selector-generated leaves keep their identities/preferences when temporarily excluded.
+/// Membership is reconciled in a draft and explicitly accepted, never during native callbacks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Membership {
+    pub collection: Id,
+    pub role: String,
+    pub generated: BTreeMap<Id, Id>,
+    pub retired: BTreeMap<Id, Placement>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -489,6 +504,7 @@ pub struct Snapshot {
     pub topology_revision: u64,
     pub displays: BTreeMap<Id, Display>,
     pub windows: BTreeMap<Id, ObservedWindow>,
+    pub focused: Option<Id>,
 }
 
 #[must_use]
