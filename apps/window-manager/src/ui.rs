@@ -116,6 +116,8 @@ struct Manager {
     size_context: String,
     size_destinations: BTreeSet<Id>,
     transient_filter: Option<Query>,
+    expansion_node: Id,
+    expansion_slots: BTreeSet<Id>,
     monitor_epoch: Id,
     monitor_inventory: Vec<windows_window_manager::MonitorIdentity>,
     monitor_alias: Id,
@@ -189,6 +191,8 @@ impl Manager {
             .unwrap_or_default();
         Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
+            expansion_node: String::new(),
+            expansion_slots: BTreeSet::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
         }
@@ -995,6 +999,8 @@ impl Manager {
                             selected_tabs: BTreeMap::new(),
                             focus: None,
                             filter: None,
+                            expansion: None,
+                            release: BTreeSet::new(),
                         },
                         false,
                     );
@@ -1059,6 +1065,7 @@ impl Manager {
         });
         self.collections_editor(ui);
         self.structural_tools(ui);
+        self.expansion_tools(ui);
         if ui.button("배치 구조 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -1089,6 +1096,39 @@ impl Manager {
                     self.commit(draft);
                 }
             }
+        });
+    }
+
+    fn expansion_tools(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("현재 방문에서 확장·축소").show(ui, |ui| {
+            let mut nodes = Vec::new();
+            if let Some(root) = self.config.views.get(&self.selected_view).and_then(|view| view.roots.get(&self.selected_root)) {
+                collect_nodes(root, &self.selected_view, &self.selected_root, &mut nodes);
+            }
+            egui::ComboBox::from_id_salt("expansion-node").selected_text(nodes.iter().find(|(address, _, _)| address.node == self.expansion_node).map_or("확장할 항목 선택", |(_, path, _)| path.as_str())).show_ui(ui, |ui| {
+                for (address, path, _) in &nodes { ui.selectable_value(&mut self.expansion_node, address.node.clone(), path); }
+            });
+            ui.label("상위 그룹·현재 영역은 다른 영역을 빌리지 않습니다. 모니터·여러 영역은 아래에서 빌릴 영역을 직접 선택하세요.");
+            for slot in self.config.slots.values().filter(|slot| slot.id != self.selected_slot) {
+                let mut selected = self.expansion_slots.contains(&slot.id);
+                if ui.checkbox(&mut selected, &slot.name).changed() { if selected { self.expansion_slots.insert(slot.id.clone()); } else { self.expansion_slots.remove(&slot.id); } }
+            }
+            ui.horizontal_wrapped(|ui| {
+                for (label, area) in [("상위 그룹으로 확장", window_manager_core::ExpansionArea::Group), ("현재 영역으로 확장", window_manager_core::ExpansionArea::Slot), ("모니터로 확장", window_manager_core::ExpansionArea::Monitor), ("선택한 여러 영역으로 확장", window_manager_core::ExpansionArea::Slots)] {
+                    if ui.add_enabled(!self.expansion_node.is_empty(), egui::Button::new(label)).clicked() && let Some(target) = self.target() {
+                        let borrow_slots = if matches!(area, window_manager_core::ExpansionArea::Group | window_manager_core::ExpansionArea::Slot) { BTreeSet::new() } else { self.expansion_slots.clone() };
+                        let mut request = Request::open(&self.config, target);
+                        request.scope.extend(borrow_slots.iter().cloned());
+                        request.expansion = Some(window_manager_core::Expansion { node: self.expansion_node.clone(), area, borrow_slots });
+                        request.filter.clone_from(&self.transient_filter);
+                        self.request_preview(request, false);
+                    }
+                }
+                if ui.add_enabled(self.runtime.presentations.get(&self.selected_slot).is_some_and(|active| active.expansion.is_some()), egui::Button::new("축소·빌린 영역 복원 미리보기")).clicked() {
+                    match self.runtime.collapse_request(&self.config, &self.selected_slot) { Ok(request) => self.request_preview(request, false), Err(error) => self.error = Some(error.to_string()) }
+                }
+            });
+            ui.label("확장은 저장된 구조를 바꾸지 않습니다. 미리보기의 범위와 숨김 영향을 확인한 뒤 적용하세요.");
         });
     }
 

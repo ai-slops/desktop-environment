@@ -44,6 +44,9 @@ enum SessionCommand {
     Preview {
         request: Request,
     },
+    Collapse {
+        slot: Id,
+    },
     WindowAction {
         action: WindowAction,
     },
@@ -245,6 +248,11 @@ impl Session {
                 self.preview(Command::WindowAction(self.config.clone(), action))
             }
             SessionCommand::Undo { id } => self.preview(Command::Undo(id)),
+            SessionCommand::Collapse { slot } => {
+                self.exchange(Command::Refresh(self.config.clone()))?;
+                let request = self.runtime.collapse_request(&self.config, &slot)?;
+                self.preview(Command::Preview(self.config.clone(), request))
+            }
             SessionCommand::Apply { plan } => {
                 let plan = self.plans.remove(&plan).ok_or_else(|| {
                     Error::new(ErrorCode::TargetMissing, "Preview token missing or consumed", plan)

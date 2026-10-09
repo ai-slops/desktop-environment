@@ -113,6 +113,8 @@ pub struct PublicPresentation {
     pub selected_tabs: BTreeMap<Id, Id>,
     pub variants: BTreeMap<Id, Id>,
     pub filter: Option<crate::Query>,
+    pub expansion: Option<crate::Expansion>,
+    pub area: crate::Rect,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -185,6 +187,8 @@ impl PublicSnapshot {
                             selected_tabs: presentation.selected_tabs.clone(),
                             variants: presentation.variants.clone(),
                             filter: presentation.filter.clone(),
+                            expansion: presentation.expansion.clone(),
+                            area: presentation.context_area,
                         },
                     )
                 })

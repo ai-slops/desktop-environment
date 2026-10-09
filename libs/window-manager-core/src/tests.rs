@@ -96,6 +96,193 @@ fn settled_snapshot(plan: &Plan, snapshot: &Snapshot) -> Snapshot {
 }
 
 #[test]
+fn group_expansion_leaves_other_groups_untouched_and_collapse_restores() -> Result<()> {
+    let (mut config, mut snapshot, target) = two_window_fixture()?;
+    let mut third = config.windows["second"].clone();
+    third.id = "third".into();
+    config.windows.insert(third.id.clone(), third);
+    let mut observed = snapshot.windows["second"].clone();
+    observed.binding.handle = 30;
+    snapshot.windows.insert("third".into(), observed);
+    let root = group_mut(&mut config, &target)?;
+    let mut nested = Group::new("nested".into());
+    nested.strategy = Strategy::Horizontal;
+    nested.children = std::mem::take(&mut root.children);
+    for child in &mut nested.children {
+        if let Node::Placement(placement) = child {
+            placement.preferences.clear();
+        }
+    }
+    let child = nested.children[0].id().to_owned();
+    root.strategy = Strategy::Horizontal;
+    root.children =
+        vec![Node::Group(nested), Node::Placement(Placement::new("third".into(), "third".into()))];
+    let authored = serde_json::to_value(&config).map_err(|error| {
+        Error::new(ErrorCode::InvalidConfiguration, error.to_string(), "fixture")
+    })?;
+    let mut runtime = Runtime::default();
+    let initial = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    snapshot = settled_snapshot(&initial, &snapshot);
+    initial.commit(&mut runtime);
+    let mut request = Request::open(&config, target);
+    request.expansion =
+        Some(Expansion { node: child, area: ExpansionArea::Group, borrow_slots: BTreeSet::new() });
+    let expanded = plan(&config, &runtime, &snapshot, &request)?;
+    assert_eq!(expanded.desired["third"].frame, snapshot.windows["third"].frame);
+    assert!(!expanded.mutations.iter().any(|mutation| mutation.window == "third"));
+    assert!(
+        expanded
+            .mutations
+            .iter()
+            .any(|mutation| mutation.window == "second" && mutation.visible == Some(false))
+    );
+    assert_ne!(expanded.desired["preview"].context, initial.desired["preview"].context);
+    snapshot = settled_snapshot(&expanded, &snapshot);
+    expanded.commit(&mut runtime);
+    assert!(plan(&config, &runtime, &snapshot, &request)?.idempotent);
+    let collapsed =
+        plan(&config, &runtime, &snapshot, &runtime.collapse_request(&config, "work")?)?;
+    for window in ["preview", "second", "third"] {
+        assert_eq!(collapsed.desired[window].frame, initial.desired[window].frame);
+    }
+    assert_eq!(
+        serde_json::to_value(&config).map_err(|error| Error::new(
+            ErrorCode::InvalidConfiguration,
+            error.to_string(),
+            "fixture"
+        ))?,
+        authored
+    );
+    Ok(())
+}
+
+#[test]
+fn borrowed_expansion_requires_exact_authority_and_restores_empty_slots() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    config
+        .slots
+        .get_mut("work")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .region = [0.0, 0.0, 0.5, 1.0];
+    let mut borrowed = config.slots["work"].clone();
+    borrowed.id = "borrowed".into();
+    borrowed.region = [0.5, 0.0, 0.5, 1.0];
+    config.slots.insert(borrowed.id.clone(), borrowed);
+    let child = group_mut(&mut config, &target)?.children[0].id().to_owned();
+    let mut request = Request::open(&config, target);
+    request.expansion = Some(Expansion {
+        node: child,
+        area: ExpansionArea::Monitor,
+        borrow_slots: BTreeSet::new(),
+    });
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).err().map(|error| error.code),
+        Some(ErrorCode::OutOfScope)
+    );
+    request
+        .expansion
+        .as_mut()
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .borrow_slots
+        .insert("borrowed".into());
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).err().map(|error| error.code),
+        Some(ErrorCode::OutOfScope)
+    );
+    request.scope.insert("borrowed".into());
+    let mut runtime = Runtime::default();
+    let expanded = plan_independent(&config, &runtime, &snapshot, &request)?;
+    assert_eq!(expanded.domains, vec![request.scope.clone()]);
+    assert_eq!(expanded.desired["preview"].frame, snapshot.displays["monitor"].work_area);
+    snapshot = settled_snapshot(&expanded, &snapshot);
+    expanded.commit(&mut runtime);
+    let collapse = runtime.collapse_request(&config, "work")?;
+    assert!(collapse.release.contains("borrowed"));
+    let collapsed = plan_independent(&config, &runtime, &snapshot, &collapse)?;
+    collapsed.commit(&mut runtime);
+    assert!(!runtime.presentations.contains_key("borrowed"));
+    assert!(runtime.presentations["work"].expansion.is_none());
+    config
+        .slots
+        .get_mut("borrowed")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .designated_public = true;
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).err().map(|error| error.code),
+        Some(ErrorCode::PermissionDenied)
+    );
+    Ok(())
+}
+
+#[test]
+fn borrowing_active_slots_restores_targets_and_respects_protection() -> Result<()> {
+    let (mut config, mut snapshot, mut target) = two_window_fixture()?;
+    config
+        .slots
+        .get_mut("work")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .region = [0.0, 0.0, 0.5, 1.0];
+    let mut borrowed = config.slots["work"].clone();
+    borrowed.id = "borrowed".into();
+    borrowed.region = [0.5, 0.0, 0.5, 1.0];
+    config.slots.insert(borrowed.id.clone(), borrowed);
+    let second = group_mut(&mut config, &target)?
+        .children
+        .pop()
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?;
+    config
+        .views
+        .get_mut(&target.view)
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .roots
+        .insert("other".into(), second);
+    target.roots.insert("other".into(), "borrowed".into());
+    let mut runtime = Runtime::default();
+    let initial = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    snapshot = settled_snapshot(&initial, &snapshot);
+    initial.commit(&mut runtime);
+    target.roots.remove("other");
+    let child = group_mut(&mut config, &target)?.children[0].id().to_owned();
+    let mut request = Request::open(&config, target);
+    request.scope.insert("borrowed".into());
+    request.expansion = Some(Expansion {
+        node: child,
+        area: ExpansionArea::Slots,
+        borrow_slots: BTreeSet::from(["borrowed".into()]),
+    });
+    config
+        .windows
+        .get_mut("second")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .protection
+        .maintain_visible = true;
+    assert_eq!(
+        plan(&config, &runtime, &snapshot, &request).err().map(|error| error.code),
+        Some(ErrorCode::UnsatisfiableConstraints)
+    );
+    config
+        .windows
+        .get_mut("second")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .protection
+        .maintain_visible = false;
+    let expanded = plan(&config, &runtime, &snapshot, &request)?;
+    snapshot = settled_snapshot(&expanded, &snapshot);
+    expanded.commit(&mut runtime);
+    let collapsed =
+        plan(&config, &runtime, &snapshot, &runtime.collapse_request(&config, "work")?)?;
+    assert_eq!(collapsed.desired["second"].slot, "borrowed");
+    assert_eq!(collapsed.desired["second"].frame, initial.desired["second"].frame);
+    config
+        .slots
+        .get_mut("borrowed")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
+        .region = [0.75, 0.0, 0.25, 1.0];
+    assert!(plan(&config, &Runtime::default(), &snapshot, &request).is_err());
+    Ok(())
+}
+
+#[test]
 fn native_undo_is_scoped_and_revalidates_new_owners_and_manual_changes() -> Result<()> {
     let (config, snapshot, target) = fixture();
     let prior = Runtime::default();
@@ -945,6 +1132,8 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             bindings: BTreeMap::new(),
             filter: None,
             before_filter: None,
+            expansion: None,
+            before_expansion: None,
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;

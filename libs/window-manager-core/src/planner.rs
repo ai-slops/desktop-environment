@@ -39,6 +39,10 @@ pub struct Request {
     pub focus: Option<Id>,
     #[serde(default)]
     pub filter: Option<crate::Query>,
+    #[serde(default)]
+    pub expansion: Option<crate::Expansion>,
+    #[serde(default)]
+    pub release: BTreeSet<Id>,
 }
 
 impl Request {
@@ -54,6 +58,8 @@ impl Request {
             selected_tabs: BTreeMap::new(),
             focus: None,
             filter: None,
+            expansion: None,
+            release: BTreeSet::new(),
         }
     }
 }
@@ -92,6 +98,8 @@ pub struct Presentation {
     pub bindings: BTreeMap<Id, Binding>,
     pub filter: Option<crate::Query>,
     pub before_filter: Option<FilterMemory>,
+    pub expansion: Option<crate::Expansion>,
+    pub before_expansion: Option<Box<crate::ExpansionMemory>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,13 +355,36 @@ pub fn plan(
             }
         }
     }
-    if request.scope.is_empty() || mapped.keys().cloned().collect::<BTreeSet<_>>() != request.scope
-    {
-        return Err(Error::new(
-            ErrorCode::OutOfScope,
-            "Target mappings must exactly match the explicit switching scope",
-            &request.id,
-        ));
+    crate::validate_expansion_scope(config, request, &mapped.keys().cloned().collect())?;
+    for slot in &request.scope {
+        if let Some(active) = runtime.presentations.get(slot)
+            && let Some(expansion) = &active.expansion
+            && !expansion.borrow_slots.is_subset(&request.scope)
+        {
+            return Err(Error::new(
+                ErrorCode::OutOfScope,
+                "Leaving an expansion must explicitly address every borrowed slot; use collapse",
+                slot,
+            ));
+        }
+    }
+    if request.scope.is_empty() {
+        return Err(Error::new(ErrorCode::OutOfScope, "Empty scope", &request.id));
+    }
+    let mut expanded = BTreeMap::new();
+    for (slot, (view, root)) in &mapped {
+        let resolved = resolve_slot(config, &config.slots[slot], snapshot)?;
+        if let Some(layout) = crate::expansion_layout(
+            config,
+            runtime,
+            snapshot,
+            request,
+            slot,
+            &config.views[view].roots[root],
+            slot_bounds(&resolved, snapshot)?,
+        )? {
+            expanded.insert(slot.clone(), layout);
+        }
     }
     let mut tab_choices = BTreeMap::new();
     for (view, root) in mapped.values() {
@@ -404,11 +435,16 @@ pub fn plan(
     if runtime.completed.contains(&request.id)
         || (request.mode == TransitionMode::Open
             && request.focus.is_none()
+            && request.release.iter().all(|slot| {
+                !runtime.presentations.contains_key(slot)
+                    && !runtime.claims.values().any(|claim| &claim.slot == slot)
+            })
             && mapped.iter().all(|(slot, (view, root))| {
                 runtime.presentations.get(slot).is_some_and(|active| {
                     &active.view == view
                         && &active.root == root
                         && active.filter == request.filter
+                        && active.expansion == request.expansion
                         && active.bindings
                             == root_bindings(&config.views[view].roots[root], snapshot)
                         && resolve_slot(config, &config.slots[slot], snapshot).is_ok_and(
@@ -416,8 +452,10 @@ pub fn plan(
                                 resolved.display == active.context_display
                                     && snapshot.displays[&resolved.display].dpi
                                         == active.context_dpi
-                                    && slot_bounds(&resolved, snapshot)
-                                        .is_ok_and(|bounds| bounds == active.context_area)
+                                    && slot_bounds(&resolved, snapshot).is_ok_and(|bounds| {
+                                        expanded.get(slot).map_or(bounds, |layout| layout.area)
+                                            == active.context_area
+                                    })
                             },
                         )
                         && request
@@ -438,7 +476,18 @@ pub fn plan(
         if request.scope.contains(id) || runtime.presentations.contains_key(id) {
             match resolve_slot(config, slot, snapshot) {
                 Ok(resolved) => {
-                    bounds.insert(id.clone(), slot_bounds(&resolved, snapshot)?);
+                    let area = if request.scope.contains(id) {
+                        expanded
+                            .get(id)
+                            .map_or(slot_bounds(&resolved, snapshot)?, |layout| layout.area)
+                    } else {
+                        runtime
+                            .presentations
+                            .get(id)
+                            .filter(|active| active.expansion.is_some())
+                            .map_or(slot_bounds(&resolved, snapshot)?, |active| active.context_area)
+                    };
+                    bounds.insert(id.clone(), area);
                     resolved_slots.insert(id.clone(), resolved);
                 }
                 Err(error) if request.scope.contains(id) => return Err(error),
@@ -448,7 +497,16 @@ pub fn plan(
             }
         }
     }
-    let bound_entries: Vec<_> = bounds.iter().collect();
+    let bound_entries: Vec<_> = bounds
+        .iter()
+        .filter(|(id, _)| {
+            !request.release.contains(*id)
+                && request
+                    .expansion
+                    .as_ref()
+                    .is_none_or(|expansion| !expansion.borrow_slots.contains(*id))
+        })
+        .collect();
     for (index, (id, rect)) in bound_entries.iter().enumerate() {
         for (other, other_rect) in &bound_entries[..index] {
             if rect.overlaps(**other_rect) {
@@ -469,7 +527,8 @@ pub fn plan(
             ));
         }
         let view = &config.views[view_id];
-        let root = &view.roots[root_role];
+        let authored_root = &view.roots[root_role];
+        let root = expanded.get(slot_id).map_or(authored_root, |layout| layout.node);
         let area = bounds[slot_id];
         let prior = runtime
             .presentations
@@ -491,7 +550,20 @@ pub fn plan(
             bindings: BTreeMap::new(),
             filter: None,
             before_filter: None,
+            expansion: None,
+            before_expansion: None,
         });
+        if presentation.expansion.is_some() && request.expansion.is_none() {
+            if let Some(memory) = presentation.before_expansion.take() {
+                presentation.selected_tabs = memory.selected_tabs;
+                presentation.variants = memory.variants;
+            }
+        } else if presentation.expansion.is_none()
+            && let Some(layout) = expanded.get(slot_id)
+        {
+            presentation.before_expansion = Some(Box::new(layout.memory.clone()));
+        }
+        presentation.expansion.clone_from(&request.expansion);
         if presentation.filter.is_none() && request.filter.is_some() {
             presentation.before_filter = Some(FilterMemory {
                 selected_tabs: presentation.selected_tabs.clone(),
@@ -505,7 +577,7 @@ pub fn plan(
             presentation.variants = memory.variants;
         }
         presentation.filter.clone_from(&request.filter);
-        let bindings = root_bindings(root, snapshot);
+        let bindings = root_bindings(authored_root, snapshot);
         presentation.overrides.retain(|window, _| {
             !presentation.bindings.contains_key(window)
                 || bindings.get(window) == presentation.bindings.get(window)
@@ -573,6 +645,9 @@ pub fn plan(
         };
         // Reserve immutable geometry before allocating any siblings.
         for (window_id, exception) in &evaluator.presentation.overrides {
+            if expanded.get(slot_id).is_some_and(|layout| layout.immutable.contains(window_id)) {
+                continue;
+            }
             if exception.preserve_position
                 && crate::filter_allows(request.filter.as_ref(), &config.windows[window_id])
             {
@@ -631,8 +706,38 @@ pub fn plan(
         } else {
             evaluator.layout(root, area, "base", false)?;
         }
+        if let Some(layout) = expanded.get(slot_id) {
+            for window in &layout.immutable {
+                let claim = &runtime.claims[window];
+                let observed = snapshot.windows.get(window).ok_or_else(|| {
+                    Error::new(ErrorCode::StaleBinding, "Unchanged sibling binding missing", window)
+                })?;
+                let previous = runtime.geometry.get(window).ok_or_else(|| {
+                    conflict(window, "Unchanged sibling geometry metadata missing")
+                })?;
+                result.desired.insert(
+                    window.clone(),
+                    Desired {
+                        window: window.clone(),
+                        placement: claim.placement.clone(),
+                        slot: slot_id.clone(),
+                        frame: observed.frame,
+                        context: previous.context.clone(),
+                        allocated: previous.allocated,
+                        strict_size: true,
+                        carried: previous.carried,
+                    },
+                );
+            }
+        }
         // A carried window is a Visit-local occurrence, never saved membership.
         for (window, exception) in &presentation.overrides {
+            if request.expansion.is_some()
+                && !leaves.iter().any(|leaf| &leaf.window == window)
+                && !expanded.get(slot_id).is_some_and(|layout| layout.immutable.contains(window))
+            {
+                continue;
+            }
             if !crate::filter_allows(request.filter.as_ref(), &config.windows[window]) {
                 continue;
             }
@@ -798,7 +903,17 @@ pub fn plan(
         .collect();
     for (slot, (view, root)) in &mapped {
         let mut leaves = Vec::new();
-        config.views[view].roots[root].placements(&mut leaves);
+        let authored_root = &config.views[view].roots[root];
+        let root = if request
+            .expansion
+            .as_ref()
+            .is_some_and(|expansion| expansion.area == crate::ExpansionArea::Group)
+        {
+            expanded.get(slot).map_or(authored_root, |layout| layout.node)
+        } else {
+            authored_root
+        };
+        root.placements(&mut leaves);
         for leaf in leaves {
             if runtime
                 .claims
@@ -851,6 +966,15 @@ pub fn plan(
                     show_state: None,
                 });
             } else {
+                if request.expansion.is_some()
+                    && result.desired.values().any(|desired| desired.frame.overlaps(observed.frame))
+                {
+                    return Err(Error::new(
+                        ErrorCode::UnsupportedOperation,
+                        "Expansion cannot cover a window that cannot be safely hidden",
+                        window,
+                    ));
+                }
                 result
                     .diagnostics
                     .push(format!("{window}: left reachable; hiding unsupported or not opted in"));
@@ -1047,6 +1171,24 @@ struct Evaluator<'a> {
 }
 
 impl Evaluator<'_> {
+    fn context(&self, variant: &str) -> String {
+        self.presentation.expansion.as_ref().map_or_else(
+            || context_key(self.slot, variant),
+            |expansion| {
+                context_key(
+                    self.slot,
+                    &serde_json::json!([
+                        variant,
+                        "expansion",
+                        expansion.node,
+                        expansion.area,
+                        expansion.borrow_slots
+                    ])
+                    .to_string(),
+                )
+            },
+        )
+    }
     fn layout(
         &mut self,
         node: &Node,
@@ -1210,7 +1352,7 @@ impl Evaluator<'_> {
                     slot: self.slot.id.clone(),
                     frame,
                     allocated: area,
-                    context: context_key(self.slot, variant),
+                    context: self.context(variant),
                     strict_size: true,
                     carried: false,
                 },
@@ -1541,11 +1683,11 @@ impl Evaluator<'_> {
                 &placement.window,
             ));
         }
-        let key = context_key(self.slot, variant);
+        let key = self.context(variant);
         let preference = placement
             .preferences
             .get(&key)
-            .or_else(|| placement.preferences.get(&context_key(self.slot, "base")))
+            .or_else(|| placement.preferences.get(&self.context("base")))
             .cloned()
             .unwrap_or_default();
         let Some(observed) = self.snapshot.windows.get(&placement.window) else {
@@ -1661,7 +1803,11 @@ impl Evaluator<'_> {
                 &placement.id,
             ));
         }
-        let slot_area = slot_bounds(self.slot, self.snapshot)?;
+        let slot_area = if self.presentation.expansion.is_some() {
+            self.presentation.context_area
+        } else {
+            slot_bounds(self.slot, self.snapshot)?
+        };
         if !slot_area.contains(frame)
             || (!locked
                 && exception.is_none_or(|exception| !exception.preserve_position)

@@ -39,14 +39,16 @@ fn domains(
             tab_groups.insert(slot.clone(), local_groups);
         }
     }
-    if resources.keys().cloned().collect::<BTreeSet<_>>() != request.scope
-        || request.scope.len() > 128
-    {
+    crate::validate_expansion_scope(config, request, &resources.keys().cloned().collect())?;
+    if request.scope.len() > 128 {
         return Err(Error::new(
             ErrorCode::OutOfScope,
             "Scope must exactly match targets and contain at most 128 slots",
             &request.id,
         ));
+    }
+    for slot in &request.scope {
+        resources.entry(slot.clone()).or_default();
     }
     for (window, claim) in &runtime.claims {
         if let Some(resources) = resources.get_mut(&claim.slot) {
@@ -68,7 +70,13 @@ fn domains(
         return Err(Error::new(ErrorCode::OutOfScope, "Tab outside requested scope", &request.id));
     }
     // A retain operation can carry a resource between roots: conservatively keep it atomic.
-    if !request.retain.is_empty() {
+    if !request.retain.is_empty()
+        || request.expansion.is_some()
+        || runtime
+            .presentations
+            .iter()
+            .any(|(slot, active)| request.scope.contains(slot) && active.expansion.is_some())
+    {
         return Ok(vec![request.scope.clone()]);
     }
     let areas: BTreeMap<_, _> = request
@@ -160,6 +168,7 @@ pub fn plan_independent(
     for domain in connected {
         let mut component = request.clone();
         component.scope.clone_from(&domain);
+        component.release.retain(|slot| domain.contains(slot));
         component.targets = request
             .targets
             .iter()
