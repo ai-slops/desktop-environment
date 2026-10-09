@@ -351,7 +351,7 @@ pub struct Group {
     pub variants: Vec<Variant>,
     pub preserve_child_sizes: bool,
     #[serde(default)]
-    pub membership: Option<Membership>,
+    pub membership: Option<Box<Membership>>,
     #[serde(default)]
     pub protection: Protection,
     #[serde(default)]
@@ -393,6 +393,12 @@ pub struct Membership {
     pub role: String,
     pub generated: BTreeMap<Id, Id>,
     pub retired: BTreeMap<Id, Placement>,
+    #[serde(default)]
+    pub include: BTreeSet<Id>,
+    #[serde(default)]
+    pub exclude: BTreeSet<Id>,
+    #[serde(default)]
+    pub weights: BTreeMap<Id, crate::ChildWeights>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -403,6 +409,29 @@ pub enum Node {
 }
 
 impl Node {
+    #[must_use]
+    pub fn find(&self, id: &str) -> Option<&Self> {
+        if self.id() == id {
+            return Some(self);
+        }
+        match self {
+            Self::Placement(_) => None,
+            Self::Group(group) => group.children.iter().find_map(|child| child.find(id)),
+        }
+    }
+
+    pub fn group_mut(&mut self, id: &str) -> Option<&mut Group> {
+        match self {
+            Self::Placement(_) => None,
+            Self::Group(group) => {
+                if group.id == id {
+                    Some(group)
+                } else {
+                    group.children.iter_mut().find_map(|child| child.group_mut(id))
+                }
+            }
+        }
+    }
     #[must_use]
     pub fn id(&self) -> &str {
         match self {

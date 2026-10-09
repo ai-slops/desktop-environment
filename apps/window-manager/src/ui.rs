@@ -112,6 +112,9 @@ struct Manager {
     apply_when_previewed: bool,
     pending_requests: Vec<(Request, bool)>,
     applying: bool,
+    structure_source: Option<window_manager_core::NodeAddress>,
+    size_context: String,
+    size_destinations: BTreeSet<Id>,
     error: Option<String>,
     notice: String,
     result: Option<TransitionResult>,
@@ -180,7 +183,7 @@ impl Manager {
             .and_then(|view| view.roots.keys().next())
             .cloned()
             .unwrap_or_default();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
@@ -1015,6 +1018,7 @@ impl Manager {
             }
         });
         self.collections_editor(ui);
+        self.structural_tools(ui);
         if ui.button("배치 구조 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -1043,6 +1047,122 @@ impl Manager {
                     draft.shortcuts.retain(|shortcut| shortcut.number != number);
                     draft.shortcuts.push(Shortcut { number, target });
                     self.commit(draft);
+                }
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_lines)] // Source selection and addressed draft operations share one inspectable editor panel.
+    fn structural_tools(&mut self, ui: &mut egui::Ui) {
+        let mut nodes = Vec::new();
+        for view in self.draft.views.values() {
+            for (role, root) in &view.roots {
+                collect_nodes(root, &view.id, &format!("{} / {role}", view.name), &mut nodes);
+            }
+        }
+        egui::CollapsingHeader::new("하위 트리 이동·독립 복사 / 크기 복사").show(ui, |ui| {
+            egui::ComboBox::from_id_salt("structure-source")
+                .selected_text(
+                    self.structure_source
+                        .as_ref()
+                        .and_then(|source| {
+                            nodes.iter().find(|(address, _, _)| address.node == source.node)
+                        })
+                        .map_or("원본 선택", |(_, label, _)| label.as_str()),
+                )
+                .show_ui(ui, |ui| {
+                    for (address, label, _) in &nodes {
+                        if ui
+                            .selectable_label(
+                                self.structure_source
+                                    .as_ref()
+                                    .is_some_and(|source| source.node == address.node),
+                                label,
+                            )
+                            .clicked()
+                        {
+                            self.structure_source = Some(address.clone());
+                            self.size_context.clear();
+                        }
+                    }
+                });
+            ui.label(format!("삽입 대상: 현재 배치의 선택한 그룹 {}", self.selected_group));
+            let mut action = None;
+            if let Some(source) = self.structure_source.clone() {
+                let destination = window_manager_core::NodeDestination {
+                    view: self.selected_view.clone(),
+                    group: self.selected_group.clone(),
+                    index: None,
+                };
+                ui.horizontal(|ui| {
+                    if ui.button("하위 트리 이동 → 초안").clicked() {
+                        action = Some(window_manager_core::StructureAction::Move {
+                            source: source.clone(),
+                            destination: destination.clone(),
+                        });
+                    }
+                    if ui.button("하위 트리 독립 복사 → 초안").clicked() {
+                        action = Some(window_manager_core::StructureAction::Copy {
+                            source: source.clone(),
+                            destination,
+                        });
+                    }
+                });
+                if let Ok(Node::Placement(placement)) = self.draft.node(&source) {
+                    egui::ComboBox::from_id_salt("size-source-context")
+                        .selected_text(if self.size_context.is_empty() {
+                            "크기 원본 문맥"
+                        } else {
+                            &self.size_context
+                        })
+                        .show_ui(ui, |ui| {
+                            for key in placement.preferences.keys() {
+                                ui.selectable_value(&mut self.size_context, key.clone(), key);
+                            }
+                        });
+                    for (address, label, is_placement) in &nodes {
+                        if *is_placement {
+                            let mut selected = self.size_destinations.contains(&address.node);
+                            if ui.checkbox(&mut selected, label).changed() {
+                                if selected {
+                                    self.size_destinations.insert(address.node.clone());
+                                } else {
+                                    self.size_destinations.remove(&address.node);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(slot) = self.config.slots.get(&self.selected_slot) {
+                        let context = context_key(slot, "base");
+                        ui.small(format!("크기만 복사할 대상 문맥: {context}. 수식은 유지됩니다."));
+                        if ui.button("선택한 배치들에 크기 복사 → 초안").clicked() {
+                            action = Some(window_manager_core::StructureAction::CopySize {
+                                source,
+                                source_context: self.size_context.clone(),
+                                destinations: nodes
+                                    .iter()
+                                    .filter(|(address, _, is_placement)| {
+                                        *is_placement
+                                            && self.size_destinations.contains(&address.node)
+                                    })
+                                    .map(|(address, _, _)| (address.clone(), context.clone()))
+                                    .collect(),
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(action) = action {
+                match self.draft.edit_structure(&window_manager_core::StructureEdit {
+                    expected_revision: self.draft.revision,
+                    action,
+                }) {
+                    Ok(draft) => {
+                        self.draft = draft;
+                        self.notice =
+                            "구조 초안에 반영했습니다. 구조 저장 후 전환을 미리보세요.".into();
+                    }
+                    Err(error) => self.error = Some(error.to_string()),
                 }
             }
         });
@@ -1085,11 +1205,20 @@ impl Manager {
                     for (id, name) in &choices {
                         if ui.selectable_label(group.membership.as_ref().is_some_and(|membership| &membership.collection == id), name).clicked() {
                             if let Some(membership) = &mut group.membership { membership.collection.clone_from(id); }
-                            else { group.membership = Some(Membership { collection: id.clone(), role: "member".into(), generated: BTreeMap::new(), retired: BTreeMap::new() }); }
+                            else { group.membership = Some(Box::new(Membership { collection: id.clone(), role: "member".into(), generated: BTreeMap::new(), retired: BTreeMap::new(), weights: BTreeMap::new(), include: BTreeSet::new(), exclude: BTreeSet::new() })); }
                         }
                     }
                 });
-                if let Some(membership) = &mut group.membership { ui.horizontal(|ui| { ui.label("배치 로컬 역할"); ui.text_edit_singleline(&mut membership.role); }); }
+                if let Some(membership) = &mut group.membership {
+                    ui.horizontal(|ui| { ui.label("배치 로컬 역할"); ui.text_edit_singleline(&mut membership.role); });
+                    for window in self.draft.windows.values() { ui.horizontal(|ui| {
+                        ui.label(&window.alias);
+                        let mut include = membership.include.contains(&window.id); let mut exclude = membership.exclude.contains(&window.id);
+                        if ui.checkbox(&mut include, "이 그룹에 포함").changed() { if include { membership.include.insert(window.id.clone()); } else { membership.include.remove(&window.id); } }
+                        if ui.checkbox(&mut exclude, "이 그룹에서 제외").changed() { if exclude { membership.exclude.insert(window.id.clone()); } else { membership.exclude.remove(&window.id); } }
+                        if exclude { ui.small("로컬 제외가 우선 · 해제 후 구성원 계산으로 복원"); }
+                    }); }
+                }
             }
             if ui.button("구성원 변경 계산 → 초안에 반영").clicked() {
                 match self.draft.stage_memberships() {
@@ -1644,13 +1773,23 @@ fn tree_editor(
                         ui.separator();
                     }
                     if let Some(index) = remove {
-                        let removed = group.children.remove(index);
+                        let (removed, _) = group.take_child(index);
                         if let Some(membership) = &mut group.membership {
                             membership.generated.retain(|_, id| id != removed.id());
+                            if let Node::Placement(placement) = removed {
+                                membership.retired.remove(&placement.window);
+                                membership.weights.remove(&placement.window);
+                                membership.include.remove(&placement.window);
+                                membership.exclude.insert(placement.window);
+                            }
                         }
                     } else if let Some(index) = unwrap {
-                        if let Node::Group(child) = group.children.remove(index) {
-                            group.children.splice(index..index, child.children);
+                        let (child, weights) = group.take_child(index);
+                        if let Node::Group(child) = child {
+                            let weights = weights.divided(child.children.len());
+                            for (offset, node) in child.children.into_iter().enumerate() {
+                                group.insert_child(index + offset, node, &weights);
+                            }
                         }
                     } else if let Some(index) = reorder {
                         group.children.swap(index, index - 1);
@@ -1714,5 +1853,28 @@ fn draw_preview(ui: &mut egui::Ui, plan: &Plan, config: &Configuration, snapshot
             egui::FontId::proportional(12.0),
             Color32::WHITE,
         );
+    }
+}
+
+fn collect_nodes(
+    node: &Node,
+    view: &str,
+    prefix: &str,
+    output: &mut Vec<(window_manager_core::NodeAddress, String, bool)>,
+) {
+    let (name, placement) = match node {
+        Node::Group(group) => (&group.name, false),
+        Node::Placement(placement) => (&placement.role, true),
+    };
+    let label = format!("{prefix} / {name}");
+    output.push((
+        window_manager_core::NodeAddress { view: view.into(), node: node.id().into() },
+        label.clone(),
+        placement,
+    ));
+    if let Node::Group(group) = node {
+        for child in &group.children {
+            collect_nodes(child, view, &label, output);
+        }
     }
 }

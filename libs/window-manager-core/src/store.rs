@@ -240,7 +240,7 @@ impl Configuration {
     }
 }
 
-fn replace_node_ids(node: &mut Node) {
+pub fn replace_node_ids(node: &mut Node) {
     match node {
         Node::Placement(placement) => placement.id = new_id("placement"),
         Node::Group(group) => {
@@ -280,6 +280,7 @@ fn validate_query(query: &Query, depth: usize) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // Recursive validation includes member caches in the same global identity budget.
 fn validate_node(
     node: &Node,
     windows: &std::collections::BTreeMap<Id, WindowRef>,
@@ -333,6 +334,21 @@ fn validate_node(
                 ));
             }
             if let Some(membership) = &group.membership {
+                if membership.weights.len() > 256
+                    || membership.weights.iter().any(|(window, weights)| {
+                        !membership.retired.contains_key(window) || !weights.valid()
+                    })
+                {
+                    return Err(invalid(&group.id, "Invalid retired child weights"));
+                }
+                if membership
+                    .include
+                    .iter()
+                    .chain(&membership.exclude)
+                    .any(|id| !windows.contains_key(id))
+                {
+                    return Err(invalid(&group.id, "Unknown local membership override"));
+                }
                 if membership.generated.len() > 256 || membership.retired.len() > 256 {
                     return Err(invalid(&group.id, "Membership budget exceeded"));
                 }

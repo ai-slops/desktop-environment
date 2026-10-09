@@ -518,6 +518,160 @@ fn independent_planning_isolates_fit_failures_but_never_splits_shared_resources(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One transaction checks source state, moved weights, copied IDs and independent size edits.
+fn subtree_moves_copies_and_size_copies_are_atomic_local_and_independent() -> Result<()> {
+    let (mut config, _, target) = fixture();
+    let source_node = group_mut(&mut config, &target)?.children[0].id().to_owned();
+    let destination = Group::new("destination".into());
+    let destination_id = destination.id.clone();
+    let parent = group_mut(&mut config, &target)?;
+    let parent_id = parent.id.clone();
+    parent.children.push(Node::Group(destination));
+    parent.ratios = vec![3.0, 7.0];
+    let source = NodeAddress { view: target.view.clone(), node: source_node.clone() };
+    let moved = config.edit_structure(&StructureEdit {
+        expected_revision: config.revision,
+        action: StructureAction::Move {
+            source: source.clone(),
+            destination: NodeDestination {
+                view: target.view.clone(),
+                group: destination_id.clone(),
+                index: None,
+            },
+        },
+    })?;
+    assert_eq!(moved.node(&source)?.id(), source_node);
+    let Node::Group(parent) =
+        moved.node(&NodeAddress { view: target.view.clone(), node: parent_id.clone() })?
+    else {
+        return Err(Error::new(ErrorCode::TargetMissing, "parent", "test"));
+    };
+    assert_eq!(parent.ratios, vec![7.0]);
+    let Node::Group(destination) =
+        moved.node(&NodeAddress { view: target.view.clone(), node: destination_id.clone() })?
+    else {
+        return Err(Error::new(ErrorCode::TargetMissing, "destination", "test"));
+    };
+    assert_eq!(destination.ratios, vec![3.0]);
+    assert!(
+        moved
+            .edit_structure(&StructureEdit {
+                expected_revision: moved.revision,
+                action: StructureAction::Move {
+                    source: NodeAddress { view: target.view.clone(), node: parent_id.clone() },
+                    destination: NodeDestination {
+                        view: target.view.clone(),
+                        group: destination_id,
+                        index: None
+                    }
+                }
+            })
+            .is_err()
+    );
+    let mut copied = moved;
+    let mut addresses = Vec::new();
+    for _ in 0..3 {
+        copied = copied.edit_structure(&StructureEdit {
+            expected_revision: copied.revision,
+            action: StructureAction::Copy {
+                source: source.clone(),
+                destination: NodeDestination {
+                    view: target.view.clone(),
+                    group: parent_id.clone(),
+                    index: None,
+                },
+            },
+        })?;
+        let Node::Group(parent) =
+            copied.node(&NodeAddress { view: target.view.clone(), node: parent_id.clone() })?
+        else {
+            return Err(Error::new(ErrorCode::TargetMissing, "parent", "test"));
+        };
+        addresses.push(NodeAddress {
+            view: target.view.clone(),
+            node: parent.children.last().map_or("", Node::id).into(),
+        });
+    }
+    assert!(addresses.iter().all(|address| address.node != source.node));
+    let context = context_key(&config.slots["work"], "base");
+    copied = copied.edit_structure(&StructureEdit {
+        expected_revision: copied.revision,
+        action: StructureAction::CopySize {
+            source: source.clone(),
+            source_context: context.clone(),
+            destinations: addresses
+                .iter()
+                .cloned()
+                .map(|address| (address, context.clone()))
+                .collect(),
+        },
+    })?;
+    copied.save_properties(
+        &target.view,
+        &addresses[0].node,
+        &context,
+        None,
+        Some([600.0, 400.0]),
+    )?;
+    for address in &addresses[1..] {
+        let Node::Placement(placement) = copied.node(address)? else {
+            return Err(Error::new(ErrorCode::TargetMissing, "placement", "test"));
+        };
+        assert_eq!(placement.preferences[&context].size_override, Some([800.0, 500.0]));
+    }
+    let Node::Placement(original) = copied.node(&source)? else {
+        return Err(Error::new(ErrorCode::TargetMissing, "source", "test"));
+    };
+    assert_eq!(original.preferences[&context].size_override, None);
+    assert_eq!(config.node(&source)?.id(), source_node);
+    Ok(())
+}
+
+#[test]
+fn local_membership_exclusions_preserve_ids_weights_and_source_queries() -> Result<()> {
+    let (mut config, _, target) = fixture();
+    config.collections.insert(
+        "all".into(),
+        Collection {
+            id: "all".into(),
+            name: "source".into(),
+            query: Query::All,
+            include: BTreeSet::new(),
+            exclude: BTreeSet::new(),
+        },
+    );
+    let group = group_mut(&mut config, &target)?;
+    group.children.clear();
+    group.membership = Some(Box::new(Membership {
+        collection: "all".into(),
+        role: "local".into(),
+        generated: BTreeMap::new(),
+        retired: BTreeMap::new(),
+        weights: BTreeMap::new(),
+        include: BTreeSet::new(),
+        exclude: BTreeSet::new(),
+    }));
+    let (mut staged, _) = config.stage_memberships()?;
+    let group = group_mut(&mut staged, &target)?;
+    let id = group.children[0].id().to_owned();
+    group.ratios = vec![4.0];
+    if let Some(membership) = &mut group.membership {
+        membership.exclude.insert("preview".into());
+    }
+    let (mut excluded, _) = staged.stage_memberships()?;
+    assert!(group_mut(&mut excluded, &target)?.children.is_empty());
+    assert!(excluded.collections["all"].exclude.is_empty());
+    if let Some(membership) = &mut group_mut(&mut excluded, &target)?.membership {
+        membership.exclude.clear();
+    }
+    let (mut restored, _) = excluded.stage_memberships()?;
+    let group = group_mut(&mut restored, &target)?;
+    assert_eq!(group.children[0].id(), id);
+    assert_eq!(group.ratios, vec![4.0]);
+    Ok(())
+}
+
+#[test]
 fn semantic_tabs_keep_occurrences_independent_even_when_widened() -> Result<()> {
     let (mut config, snapshot, target) = fixture();
     let group = group_mut(&mut config, &target)?;
@@ -850,12 +1004,15 @@ fn selector_membership_is_staged_and_restores_stable_preferences() -> Result<()>
             exclude: BTreeSet::new(),
         },
     );
-    group_mut(&mut config, &target)?.membership = Some(Membership {
+    group_mut(&mut config, &target)?.membership = Some(Box::new(Membership {
         collection: "selected".into(),
         role: "local".into(),
         generated: BTreeMap::new(),
         retired: BTreeMap::new(),
-    });
+        weights: BTreeMap::new(),
+        include: BTreeSet::new(),
+        exclude: BTreeSet::new(),
+    }));
     let (mut staged, delta) = config.stage_memberships()?;
     assert_eq!(delta.added.len(), 1);
     assert!(group_mut(&mut config, &target)?.children.is_empty());

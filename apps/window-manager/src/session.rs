@@ -51,6 +51,12 @@ enum SessionCommand {
         paused: bool,
     },
     Recover {},
+    Structure {
+        edit: window_manager_core::StructureEdit,
+    },
+    ConfigurationUndo {
+        expected_revision: u64,
+    },
     ProviderRegister {
         provider: Id,
         session: Id,
@@ -100,6 +106,8 @@ struct Session {
     candidates: BTreeMap<Id, Candidate>,
     control: bool,
     providers: bool,
+    path: std::path::PathBuf,
+    history: Vec<Configuration>,
 }
 
 impl Drop for Session {
@@ -253,6 +261,34 @@ impl Session {
                 self.log.push(DomainEvent::ProviderChanged { provider });
                 Ok(self.public_snapshot())
             }
+            SessionCommand::Structure { edit } => {
+                let draft = self.config.edit_structure(&edit)?;
+                self.save_configuration(draft)?;
+                Ok(self.public_snapshot())
+            }
+            SessionCommand::ConfigurationUndo { expected_revision } => {
+                if expected_revision != self.config.revision {
+                    return Err(Error::new(
+                        ErrorCode::StaleRevision,
+                        "Configuration revision changed",
+                        "configuration",
+                    ));
+                }
+                let mut draft = self.history.last().cloned().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::TargetMissing,
+                        "No configuration edit to undo",
+                        "configuration",
+                    )
+                })?;
+                draft.revision = self.config.revision + 1;
+                draft.save(&self.path)?;
+                self.config = draft;
+                self.history.pop();
+                self.plans.clear();
+                self.exchange(Command::Refresh(self.config.clone()))?;
+                Ok(self.public_snapshot())
+            }
             SessionCommand::ProviderPublish { message } => {
                 let provider = message.provider.clone();
                 self.exchange(Command::Provider(ProviderCommand::Publish(message)))?;
@@ -268,11 +304,6 @@ impl Session {
     }
 
     fn preview(&mut self, command: Command) -> Result<Value> {
-        let replies = self.exchange(command)?;
-        let plan = replies
-            .into_iter()
-            .find_map(|event| if let Event::Preview(plan) = event { Some(*plan) } else { None })
-            .ok_or_else(unavailable)?;
         if self.plans.len() >= 32 {
             return Err(Error::new(
                 ErrorCode::PermissionDenied,
@@ -280,11 +311,28 @@ impl Session {
                 "session",
             ));
         }
+        let replies = self.exchange(command)?;
+        let plan = replies
+            .into_iter()
+            .find_map(|event| if let Event::Preview(plan) = event { Some(*plan) } else { None })
+            .ok_or_else(unavailable)?;
         let token = new_id("preview");
         // Serialize authored domain data only. Plan.expected and mutations contain native bindings.
         let response = json!({"plan":token,"request":plan.id,"revision":plan.config_revision,"topology_revision":plan.topology_revision,"scope":plan.scope,"domains":plan.domains,"blocked":plan.blocked,"desired":plan.desired,"diagnostics":plan.diagnostics,"impact":plan.impact,"idempotent":plan.idempotent});
         self.plans.insert(token, plan);
         Ok(response)
+    }
+
+    fn save_configuration(&mut self, draft: Configuration) -> Result<()> {
+        draft.save(&self.path)?;
+        self.history.push(self.config.clone());
+        if self.history.len() > 50 {
+            self.history.remove(0);
+        }
+        self.config = draft;
+        self.plans.clear();
+        self.exchange(Command::Refresh(self.config.clone()))?;
+        Ok(())
     }
 }
 
@@ -306,6 +354,8 @@ pub fn run(path: &Path, control: bool, providers: bool) -> anyhow::Result<()> {
         candidates: BTreeMap::new(),
         control,
         providers,
+        path: path.to_owned(),
+        history: Vec::new(),
     };
     session.exchange(Command::Refresh(session.config.clone()))?;
     let input = std::io::stdin();

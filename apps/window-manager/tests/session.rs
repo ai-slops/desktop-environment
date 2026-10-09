@@ -63,3 +63,61 @@ fn oversized_command_ends_the_session_without_applying_control()
     assert!(output.stdout.is_empty());
     Ok(())
 }
+
+#[test]
+fn structural_session_edits_require_revision_and_can_be_undone_without_native_effects()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("config.json");
+    let mut config = Configuration::default();
+    let view = config.views.values_mut().next().ok_or("View missing")?;
+    let window_manager_core::Node::Group(root) =
+        view.roots.values_mut().next().ok_or("root missing")?
+    else {
+        return Err("Group missing".into());
+    };
+    let source = window_manager_core::Group::new("source".into());
+    let destination = window_manager_core::Group::new("destination".into());
+    let source_id = source.id.clone();
+    let destination_id = destination.id.clone();
+    let view_id = view.id.clone();
+    root.children.extend([
+        window_manager_core::Node::Group(source),
+        window_manager_core::Node::Group(destination),
+    ]);
+    config.save(&path)?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_window-manager"))
+        .args(["--session", "--allow-control", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut input = child.stdin.take().ok_or("stdin missing")?;
+    let action = serde_json::json!({"kind":"copy","source":{"view":view_id,"node":source_id},"destination":{"view":view_id,"group":destination_id,"index":null}});
+    for command in [
+        serde_json::json!({"kind":"structure","edit":{"expected_revision":4,"action":action}}),
+        serde_json::json!({"kind":"structure","edit":{"expected_revision":0,"action":action}}),
+        serde_json::json!({"kind":"configuration_undo","expected_revision":0}),
+        serde_json::json!({"kind":"configuration_undo","expected_revision":1}),
+    ] {
+        serde_json::to_writer(&mut input, &serde_json::json!({"id":"edit","command":command}))?;
+        input.write_all(b"\n")?;
+    }
+    drop(input);
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let replies: Vec<serde_json::Value> = String::from_utf8(output.stdout)?
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(replies[0]["error"]["code"], "STALE_REVISION");
+    assert_eq!(replies[1]["result"]["revision"], 1);
+    assert_eq!(replies[2]["error"]["code"], "STALE_REVISION");
+    assert_eq!(replies[3]["result"]["revision"], 2);
+    config.revision = 2;
+    assert_eq!(serde_json::to_value(config)?, serde_json::to_value(Configuration::load(&path)?)?);
+    let journal = windows_window_manager::Journal::load(&path.with_extension("recovery.json"))?;
+    assert!(journal.entries.is_empty());
+    Ok(())
+}

@@ -11,6 +11,7 @@ mod protection;
 mod protocol;
 mod providers;
 mod store;
+mod structure;
 mod undo;
 
 pub use actions::*;
@@ -24,6 +25,7 @@ pub use protection::*;
 pub use protocol::*;
 pub use providers::*;
 pub use store::*;
+pub use structure::*;
 pub use undo::*;
 
 #[cfg(test)]

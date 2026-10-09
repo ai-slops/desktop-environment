@@ -28,7 +28,7 @@ fn reconcile(node: &mut Node, config: &Configuration, delta: &mut MembershipDelt
     let Node::Group(group) = node else {
         return Ok(());
     };
-    if let Some(membership) = &mut group.membership {
+    if let Some(mut membership) = group.membership.take() {
         let collection = config.collections.get(&membership.collection).ok_or_else(|| {
             Error::new(
                 ErrorCode::TargetMissing,
@@ -39,22 +39,29 @@ fn reconcile(node: &mut Node, config: &Configuration, delta: &mut MembershipDelt
         let selected: BTreeSet<_> = config
             .windows
             .values()
-            .filter(|window| collection.selects(window))
+            .filter(|window| {
+                !membership.exclude.contains(&window.id)
+                    && (membership.include.contains(&window.id) || collection.selects(window))
+            })
             .map(|window| window.id.clone())
             .collect();
-        let mut keep = Vec::new();
-        for child in std::mem::take(&mut group.children) {
+        let mut index = 0;
+        while index < group.children.len() {
+            let child = &group.children[index];
             if let Node::Placement(placement) = &child
                 && membership.generated.get(&placement.window) == Some(&placement.id)
                 && !selected.contains(&placement.window)
             {
                 delta.removed.push(placement.id.clone());
-                membership.retired.insert(placement.window.clone(), placement.clone());
+                let (child, weights) = group.take_child(index);
+                if let Node::Placement(placement) = child {
+                    membership.weights.insert(placement.window.clone(), weights);
+                    membership.retired.insert(placement.window.clone(), placement);
+                }
                 continue;
             }
-            keep.push(child);
+            index += 1;
         }
-        group.children = keep;
         for window in selected {
             // Manual occurrences remain independent; don't create a duplicate immediate occurrence.
             if group.children.iter().any(
@@ -66,10 +73,12 @@ fn reconcile(node: &mut Node, config: &Configuration, delta: &mut MembershipDelt
                 .retired
                 .remove(&window)
                 .unwrap_or_else(|| Placement::new(window.clone(), membership.role.clone()));
+            let weights = membership.weights.remove(&window).unwrap_or_default();
             membership.generated.insert(window, placement.id.clone());
             delta.added.push(placement.id.clone());
-            group.children.push(Node::Placement(placement));
+            group.insert_child(group.children.len(), Node::Placement(placement), &weights);
         }
+        group.membership = Some(membership);
     }
     for child in &mut group.children {
         reconcile(child, config, delta)?;
