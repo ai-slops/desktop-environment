@@ -61,6 +61,26 @@ For a separate layout file:
 cargo run -p display-relay -- mirror \\.\DISPLAY3 --window-state-file .\relay-windows.json
 ```
 
+The mirror's video area uses physical pixels, so moving between displays with
+different Windows Display Scale values (for example 100% and 200%) preserves its
+pixel width and height. Initial sizing and resize increments also use pixels.
+Title bars and borders still follow Windows DPI; fullscreen and maximized windows
+continue to fit their monitor. Saved placements include the normal client pixel
+size, and reopening on a different scale accounts for the new border sizes after
+the startup DPI events finish. Older placement files remain readable and gain this
+size information the next time a windowed mirror saves its placement.
+
+To test moving an owned mirror window across the connected monitors and reopening
+it without changing Windows settings:
+
+```powershell
+./tools/smoke-display-dpi.ps1
+```
+
+The check uses a temporary file under `target`, closes only its own processes, and
+reports which DPI values were actually exercised. If all connected monitors use
+the same DPI, it reports that a cross-DPI transition was not verified.
+
 ## Important constraints
 
 - The target output still needs to exist as a Windows desktop display. Many HDMI dummy plugs and capture devices do this well; pure EDID-less sinks do not.

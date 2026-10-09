@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use desktop_presets::{WindowStateFile, default_store_path, window_state_path};
+use desktop_presets::{WindowPlacement, WindowStateFile, default_store_path, window_state_path};
 use display_relay_core::RelayConfig;
 use std::ffi::{OsString, c_void};
 use std::path::PathBuf;
@@ -33,7 +33,7 @@ use windows::core::{Interface, PCSTR, w};
 use windows_desktop_duplication::{DesktopDuplicator, DuplicationAccessLost, enumerate_displays};
 use windows_input::RemoteInputController;
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::PhysicalSize;
 use winit::event::{ElementState, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -153,6 +153,7 @@ struct RelayApp {
     next_frame_deadline: Instant,
     next_capture_recovery_attempt: Instant,
     window_state: Option<WindowStateFile>,
+    pending_placement: Option<WindowPlacement>,
 }
 
 const CAPTURE_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -194,10 +195,14 @@ impl RelayApp {
             next_frame_deadline: Instant::now(),
             next_capture_recovery_attempt: Instant::now(),
             window_state,
+            pending_placement: None,
         })
     }
 
     fn remember_window_placement(&mut self) {
+        if self.pending_placement.is_some() {
+            return;
+        }
         let (Some(window), Some(state)) = (self.window.as_ref(), self.window_state.as_mut()) else {
             return;
         };
@@ -206,7 +211,9 @@ impl RelayApp {
             return;
         }
         let result = (|| -> Result<()> {
-            if let Some(placement) = windows_window_placement::capture(window.window_handle()?)? {
+            if let Some(placement) =
+                windows_window_placement::capture_physical_client(window.window_handle()?)?
+            {
                 state.remember(&self.config.target.display_name, placement)?;
             }
             Ok(())
@@ -325,14 +332,8 @@ impl ApplicationHandler for RelayApp {
             reduce_ratio(display.area.width.max(1), display.area.height.max(1));
         let attributes = WindowAttributes::default()
             .with_title(format!("Relay {} (view only)", display.name))
-            .with_inner_size(LogicalSize::new(
-                f64::from(display.area.width),
-                f64::from(display.area.height),
-            ))
-            .with_resize_increments(LogicalSize::new(
-                f64::from(resize_step_width),
-                f64::from(resize_step_height),
-            ));
+            .with_inner_size(PhysicalSize::new(display.area.width, display.area.height))
+            .with_resize_increments(PhysicalSize::new(resize_step_width, resize_step_height));
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
@@ -347,6 +348,9 @@ impl ApplicationHandler for RelayApp {
         if let Some(placement) =
             self.window_state.as_ref().and_then(|state| state.get(&self.config.target.display_name))
         {
+            if !self.config.mirror_fullscreen && placement.normal_client_size.is_some() {
+                self.pending_placement = Some(placement);
+            }
             let result = (|| -> Result<()> {
                 windows_window_placement::restore(window.window_handle()?, placement)
             })();
@@ -395,9 +399,28 @@ impl ApplicationHandler for RelayApp {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Moved(_) => self.remember_window_placement(),
+            WindowEvent::ScaleFactorChanged { mut inner_size_writer, .. } => {
+                if let Some(window) = self.window.as_ref()
+                    && window.fullscreen().is_none()
+                    && !window.is_maximized()
+                    && window.is_minimized() != Some(true)
+                {
+                    // The mirror is pixel content. Keep its physical client size while
+                    // Windows updates DPI-dependent title bars and borders.
+                    if let Some(size) = self.last_window_size
+                        && size.width > 0
+                        && size.height > 0
+                        && let Err(error) = inner_size_writer.request_inner_size(size)
+                    {
+                        warn!("Could not preserve mirror size during DPI change: {error}");
+                    }
+                }
+            }
             WindowEvent::Resized(size) => {
                 self.remember_window_placement();
-                self.last_window_size = Some(size);
+                if size.width > 0 && size.height > 0 {
+                    self.last_window_size = Some(size);
+                }
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.resize(size.width, size.height) {
                         error!("Failed to resize relay surface: {error:?}");
@@ -424,6 +447,22 @@ impl ApplicationHandler for RelayApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(placement) = self.pending_placement.take()
+            && let Some(window) = self.window.as_ref()
+        {
+            // Creation/monitor moves queue DPI events while resumed holds the app.
+            // Restore client pixels after those events update winit's decoration DPI.
+            let result = (|| -> Result<()> {
+                windows_window_placement::restore_physical_client(
+                    window.window_handle()?,
+                    placement,
+                )
+            })();
+            if let Err(error) = result {
+                warn!("Could not finish DPI-aware placement restore: {error:#}");
+            }
+            self.last_window_size = Some(window.inner_size());
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_deadline));
     }
 

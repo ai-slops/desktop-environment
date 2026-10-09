@@ -65,6 +65,9 @@ mirror rows; use **현재 설정 저장** to retain any edits across panel launc
 The control panel automatically remembers its window size, position, and maximized
 state. Each mirror row remembers its own last placement for each source display.
 Move or resize the windows normally; no extra save button is needed for geometry.
+Mirror video areas keep their physical pixel size when moving between different
+Windows Display Scale values; DPI-scaled title bars and borders may change size.
+Saved mirror client pixels are also restored after reopening on another scale.
 Minimizing a window does not overwrite its normal bounds, and fullscreen mirroring
 keeps the previous windowed placement. Windows moves a restored window back onto
 an available screen if its saved bounds would be completely off-screen.
