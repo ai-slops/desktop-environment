@@ -140,6 +140,8 @@ Groups expose existing-position-first (default), entry/request reflow, and expli
 
 Four alternating variant choices within two seconds freeze the affected Group's last valid owned arrangement and report a diagnostic; incompatible bounds still reject safely. Explicit Restore or a new configuration revision resets that bounded history. Provider updates/disconnects arriving during application are processed before settlement authority is committed.
 
+Overlapping inferred memberships resolve explicit interactive assignment first, then higher Group rule priority, then stable Group/Placement ID. Candidate suppression occurs only on evaluated copies with associated ratios retained; source selectors and saved trees remain unchanged. The preview identifies the winner and reason. Unconditionally interactive candidates are arbitrated before fitting; potentially folded/semantic branches participate only when evaluated. Re-evaluation is limited to four passes and unstable branch/arbitration interactions reject while keeping the previous owned arrangement. Two explicit interactive assignments, repeated presentation of the same occurrence, and an existing valid owner outside the requested scope remain conflicts.
+
 Remaining release gates / P1 work:
 
 - Real editor/browser/terminal/game/broadcaster matrix; elevated windows, Korean IME/modal interaction, mixed DPI, hotkey collision, hung-app and rapid supersession measurements, and load/performance distributions.

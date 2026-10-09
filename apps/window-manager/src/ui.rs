@@ -2323,6 +2323,7 @@ fn tree_editor(
                         for (policy, label) in [(window_manager_core::ReflowPolicy::ExistingPositionFirst, "기존 위치 우선 (기본)"), (window_manager_core::ReflowPolicy::OnEntryOrRequest, "진입·명시 요청 시 재배치"), (window_manager_core::ReflowPolicy::ContinuousRule, "연속 규칙 · 감지된 상호작용 중 보류")] { ui.selectable_value(&mut group.reflow, policy, label); }
                     });
                     ui.small("구성원 계산·저장은 별도 단계입니다. 연속 규칙은 공개/확장/보호 영역과 전경 관리 창·드래그·모달 중 보류합니다. 앱 내부 입력 상태는 완전히 감지할 수 없습니다.");
+                    ui.horizontal(|ui| { ui.label("자동 선택 규칙 우선순위 (큰 값 우선)"); ui.add(egui::DragValue::new(&mut group.rule_priority).range(-1_000_000..=1_000_000)); });
                     ui.horizontal(|ui| {
                         ui.label("간격 수식");
                         ui.text_edit_singleline(&mut group.gap);

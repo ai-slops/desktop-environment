@@ -275,6 +275,9 @@ fn validate_node(
             }
         }
         Node::Group(group) => {
+            if !(-1_000_000..=1_000_000).contains(&group.rule_priority) {
+                return Err(invalid(&group.id, "Rule priority exceeds bounds"));
+            }
             if group.allowed_fallbacks.len() > 3
                 || group.allowed_fallbacks.iter().any(|strategy| {
                     !matches!(strategy, crate::Strategy::Flow | crate::Strategy::ResponsiveTabs)

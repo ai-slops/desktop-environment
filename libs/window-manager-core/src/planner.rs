@@ -334,13 +334,80 @@ pub fn resolve_slot(
     ))
 }
 
-/// Computes a final diff without native side effects or changes to authored state.
-#[allow(clippy::too_many_lines)]
+/// Re-evaluate inferred overlap on copies; explicit simultaneous assignments remain conflicts.
 pub fn plan(
     config: &Configuration,
     runtime: &Runtime,
     snapshot: &Snapshot,
     request: &Request,
+) -> Result<Plan> {
+    config.validate()?;
+    let origins = crate::assignment_origins(config, request);
+    let mut suppressed = BTreeSet::new();
+    let mut certain = BTreeMap::<Id, Id>::new();
+    for (placement, origin) in &origins {
+        if origin.certain
+            && crate::filter_allows(request.filter.as_ref(), &config.windows[&origin.window])
+        {
+            if let Some(prior) = certain.get(&origin.window) {
+                if crate::assignment_wins(origin, placement, &origins[prior], prior)? {
+                    suppressed.insert(prior.clone());
+                    certain.insert(origin.window.clone(), placement.clone());
+                } else {
+                    suppressed.insert(placement.clone());
+                }
+            } else {
+                certain.insert(origin.window.clone(), placement.clone());
+            }
+        }
+    }
+    for _ in 0..4 {
+        let previous = suppressed.clone();
+        let mut result = plan_pass(config, runtime, snapshot, request, &origins, &mut suppressed)?;
+        if result.idempotent {
+            return Ok(result);
+        }
+        if suppressed == previous {
+            for loser in &suppressed {
+                let origin = &origins[loser];
+                let Some(winner) = result.desired.get(&origin.window) else {
+                    return Err(conflict(
+                        loser,
+                        "Membership arbitration changed interactive branches; choose explicit assignments",
+                    ));
+                };
+                if !crate::assignment_wins(
+                    &origins[&winner.placement],
+                    &winner.placement,
+                    origin,
+                    loser,
+                )? {
+                    return Err(conflict(
+                        loser,
+                        "Membership arbitration did not stabilize; last owned arrangement retained",
+                    ));
+                }
+                result.diagnostics.push(format!("Membership {}: winner {} (Group {}, {} priority {}); suppressed {} (Group {}, priority {})",origin.window,winner.placement,origins[&winner.placement].group,if origins[&winner.placement].inferred {"inferred"} else {"explicit"},origins[&winner.placement].priority,loser,origin.group,origin.priority));
+            }
+            return Ok(result);
+        }
+    }
+    Err(Error::new(
+        ErrorCode::FormulaBudgetExceeded,
+        "Membership/variant arbitration did not stabilize within four passes; last arrangement retained",
+        &request.id,
+    ))
+}
+
+/// Computes a final diff without native side effects or changes to authored state.
+#[allow(clippy::too_many_lines)]
+fn plan_pass(
+    config: &Configuration,
+    runtime: &Runtime,
+    snapshot: &Snapshot,
+    request: &Request,
+    origins: &BTreeMap<Id, crate::AssignmentOrigin>,
+    suppressed: &mut BTreeSet<Id>,
 ) -> Result<Plan> {
     config.validate()?;
     if let Some(filter) = &request.filter {
@@ -742,6 +809,8 @@ pub fn plan(
             explicit_tabs: &request.selected_tabs,
             parameters,
             automatic: request.mode == TransitionMode::Reflow,
+            origins,
+            suppressed,
         };
         // Reserve immutable geometry before allocating any siblings.
         for (window_id, exception) in &evaluator.presentation.overrides {
@@ -798,13 +867,16 @@ pub fn plan(
                 }
             }
         }
-        if let Some(filter) = &request.filter {
-            if let Some(filtered) = crate::filter_tree(root, filter, config) {
-                evaluator.layout(&filtered, area, "base", false)?;
+        let evaluated = crate::suppress_assignments(root, evaluator.suppressed);
+        if let Some(evaluated) = evaluated {
+            if let Some(filter) = &request.filter {
+                if let Some(filtered) = crate::filter_tree(&evaluated, filter, config) {
+                    evaluator.layout(&filtered, area, "base", false)?;
+                }
+                result.diagnostics.push("Temporary filter: authored membership and preferences unchanged; unknown results are excluded".into());
+            } else {
+                evaluator.layout(&evaluated, area, "base", false)?;
             }
-            result.diagnostics.push("Temporary filter: authored membership and preferences unchanged; unknown results are excluded".into());
-        } else {
-            evaluator.layout(root, area, "base", false)?;
         }
         if let Some(layout) = expanded.get(slot_id) {
             for window in &layout.immutable {
@@ -1402,6 +1474,8 @@ struct Evaluator<'a> {
     explicit_tabs: &'a BTreeMap<Id, Id>,
     parameters: BTreeMap<String, f64>,
     automatic: bool,
+    origins: &'a BTreeMap<Id, crate::AssignmentOrigin>,
+    suppressed: &'a mut BTreeSet<Id>,
 }
 
 impl Evaluator<'_> {
@@ -2072,12 +2146,18 @@ impl Evaluator<'_> {
         variant: &str,
         preserve: bool,
     ) -> Result<()> {
-        if self.desired.contains_key(&placement.window) {
-            return Err(Error::new(
-                ErrorCode::ClaimConflict,
-                "Two visible occurrences claim the same real window",
-                &placement.window,
-            ));
+        if let Some(prior) = self.desired.get(&placement.window) {
+            if !crate::assignment_wins(
+                &self.origins[&placement.id],
+                &placement.id,
+                &self.origins[&prior.placement],
+                &prior.placement,
+            )? {
+                self.suppressed.insert(placement.id.clone());
+                return Ok(());
+            }
+            self.suppressed.insert(prior.placement.clone());
+            self.desired.remove(&placement.window);
         }
         let key = self.context(variant);
         let preference = placement

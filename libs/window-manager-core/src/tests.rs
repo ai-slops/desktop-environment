@@ -2351,3 +2351,72 @@ fn variant_oscillation_freezes_last_good_arrangement_and_explicit_restore_resets
     assert_eq!(next.presentations["work"].variants[&group_id], "threshold");
     Ok(())
 }
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture membership groups.
+fn inferred_overlap_uses_explicit_then_priority_then_stable_identity_without_saved_drift()
+-> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    let root = group_mut(&mut config, &target)?;
+    let original = root.children.remove(0);
+    root.strategy = Strategy::Horizontal;
+    let mut automatic = Group::new("Automatic".into());
+    automatic.id = "automatic-a".into();
+    automatic.rule_priority = 10;
+    let Node::Placement(mut member) = original.clone() else { unreachable!() };
+    member.id = "inferred-a".into();
+    automatic.children.push(Node::Placement(member.clone()));
+    automatic.membership = Some(Box::new(Membership {
+        collection: "all".into(),
+        role: "member".into(),
+        generated: BTreeMap::from([("preview".into(), member.id)]),
+        retired: BTreeMap::new(),
+        include: BTreeSet::new(),
+        exclude: BTreeSet::new(),
+        weights: BTreeMap::new(),
+    }));
+    let mut competitor = automatic.clone();
+    competitor.id = "automatic-b".into();
+    competitor.rule_priority = 20;
+    if let Node::Placement(placement) = &mut competitor.children[0] {
+        placement.id = "inferred-b".into();
+        competitor
+            .membership
+            .as_mut()
+            .unwrap()
+            .generated
+            .insert("preview".into(), placement.id.clone());
+    }
+    root.children = vec![Node::Group(automatic), Node::Group(competitor)];
+    config.collections.insert(
+        "all".into(),
+        Collection {
+            id: "all".into(),
+            name: "All".into(),
+            query: Query::All,
+            include: BTreeSet::new(),
+            exclude: BTreeSet::new(),
+        },
+    );
+    let before = serde_json::to_value(&config).unwrap();
+    let winner =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(winner.desired["preview"].placement, "inferred-b");
+    assert_eq!(winner.mutations.len(), 1);
+    assert!(winner.diagnostics.iter().any(|message| message.contains("winner inferred-b") && message.contains("priority 20")));
+    assert_eq!(serde_json::to_value(&config).unwrap(), before);
+    let group = group_mut(&mut config, &target)?;
+    if let Node::Group(second) = &mut group.children[1] {
+        second.rule_priority = 10;
+    }
+    group.children.reverse();
+    let tie =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(tie.desired["preview"].placement, "inferred-a");
+    group_mut(&mut config, &target)?.children.push(original);
+    let explicit = plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target))?;
+    assert_ne!(explicit.desired["preview"].placement, "inferred-a");
+    assert_ne!(explicit.desired["preview"].placement, "inferred-b");
+    assert_eq!(explicit.mutations.len(), 1);
+    Ok(())
+}

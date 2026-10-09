@@ -407,6 +407,8 @@ pub struct Group {
     pub sort_formula: Option<String>,
     #[serde(default)]
     pub reflow: ReflowPolicy,
+    #[serde(default)]
+    pub rule_priority: i32,
 }
 
 impl Group {
@@ -430,6 +432,7 @@ impl Group {
             parameters: BTreeMap::new(),
             sort_formula: None,
             reflow: ReflowPolicy::default(),
+            rule_priority: 0,
         }
     }
 }
