@@ -15,6 +15,11 @@ pub struct EventCursor {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DomainEvent {
+    ConfigurationChanged { revision: u64 },
+    BindingChanged { window: Id, available: bool },
+    MembershipChanged { groups: BTreeSet<Id> },
+    AttentionChanged { provider: Id, window: Id },
+    Recovery { windows: BTreeSet<Id> },
     StateChanged { revision: u64, slots: BTreeSet<Id> },
     TopologyChanged { revision: u64 },
     Transition { result: TransitionResult },
@@ -33,11 +38,19 @@ pub struct EventEnvelope {
 pub struct EventLog {
     epoch: Id,
     sequence: u64,
-    events: VecDeque<EventEnvelope>,
+    events: VecDeque<(EventEnvelope, usize)>,
+    bytes: usize,
+    dropped_through: u64,
 }
 impl Default for EventLog {
     fn default() -> Self {
-        Self { epoch: new_id("events"), sequence: 0, events: VecDeque::new() }
+        Self {
+            epoch: new_id("events"),
+            sequence: 0,
+            events: VecDeque::new(),
+            bytes: 0,
+            dropped_through: 0,
+        }
     }
 }
 
@@ -51,20 +64,24 @@ impl EventLog {
             self.epoch = new_id("events");
             self.sequence = 0;
             self.events.clear();
+            self.bytes = 0;
+            self.dropped_through = 0;
         }
         self.sequence += 1;
-        self.events.push_back(EventEnvelope { cursor: self.cursor(), event });
-        if self.events.len() > 256 {
-            self.events.pop_front();
+        let envelope = EventEnvelope { cursor: self.cursor(), event };
+        let bytes = serde_json::to_vec(&envelope).map_or(2 * 1024 * 1024 + 1, |bytes| bytes.len());
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.events.push_back((envelope, bytes));
+        while self.events.len() > 256 || self.bytes > 2 * 1024 * 1024 {
+            if let Some((event, bytes)) = self.events.pop_front() {
+                self.bytes = self.bytes.saturating_sub(bytes);
+                self.dropped_through = event.cursor.sequence;
+            }
         }
     }
     pub fn since(&self, cursor: &EventCursor) -> Result<Vec<EventEnvelope>> {
         if cursor.epoch != self.epoch
-            || cursor.sequence > self.sequence
-            || self
-                .events
-                .front()
-                .is_some_and(|first| cursor.sequence.saturating_add(1) < first.cursor.sequence)
+            || !(self.dropped_through..=self.sequence).contains(&cursor.sequence)
         {
             return Err(Error::new(
                 ErrorCode::StaleRevision,
@@ -75,8 +92,8 @@ impl EventLog {
         Ok(self
             .events
             .iter()
-            .filter(|event| event.cursor.sequence > cursor.sequence)
-            .cloned()
+            .filter(|(event, _)| event.cursor.sequence > cursor.sequence)
+            .map(|(event, _)| event.clone())
             .collect())
     }
 }
@@ -95,6 +112,7 @@ pub struct PublicWindow {
     pub capabilities: PublicCapabilities,
     pub owned_dialog: bool,
     pub output: OutputState,
+    pub rendering_readiness: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -164,12 +182,22 @@ impl PublicSnapshot {
                             slot: claim.map(|claim| claim.slot.clone()),
                             placement: claim.map(|claim| claim.placement.clone()),
                             capabilities: PublicCapabilities {
-                                move_supported: window.is_some_and(|window| window.can_move),
-                                resize_supported: window.is_some_and(|window| window.can_resize),
-                                hide_supported: window.is_some_and(|window| window.can_hide),
+                                move_supported: window.is_some_and(|window| {
+                                    window.can_move && config.windows[id].capabilities.allow_move
+                                }),
+                                resize_supported: window.is_some_and(|window| {
+                                    window.can_resize
+                                        && config.windows[id].capabilities.allow_resize
+                                }),
+                                hide_supported: window.is_some_and(|window| {
+                                    window.can_hide
+                                        && config.windows[id].allow_hide
+                                        && !window.has_owned_dialog
+                                }),
                             },
                             owned_dialog: window.is_some_and(|window| window.has_owned_dialog),
                             output: runtime.providers.output(id, snapshot.now_ms),
+                            rendering_readiness: "unknown".into(),
                         },
                     )
                 })
@@ -226,6 +254,23 @@ mod tests {
         assert!(log.since(&cursor).is_ok_and(|events| events.len() == 256));
         assert!(log.since(&EventCursor { epoch: initial.epoch, sequence: 258 }).is_err());
         assert!(EventLog::default().since(&log.cursor()).is_err());
+        assert!(log.since(&log.cursor()).is_ok_and(|events| events.is_empty()));
+    }
+
+    #[test]
+    fn oversized_event_requires_resynchronization_even_if_nothing_is_retained() {
+        let mut log = EventLog::default();
+        let initial = log.cursor();
+        log.push(DomainEvent::OperationFailed {
+            error: Error::new(
+                ErrorCode::InvalidConfiguration,
+                "x".repeat(2 * 1024 * 1024),
+                "fixture",
+            ),
+        });
+        assert!(log.events.is_empty());
+        assert_eq!(log.bytes, 0);
+        assert!(log.since(&initial).is_err());
         assert!(log.since(&log.cursor()).is_ok_and(|events| events.is_empty()));
     }
 

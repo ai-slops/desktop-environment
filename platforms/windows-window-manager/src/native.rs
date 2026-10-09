@@ -518,6 +518,7 @@ fn observe_internal(
         show_state,
         can_move: show_state == ShowState::Normal,
         can_resize: style & WS_THICKFRAME.0 != 0 && show_state == ShowState::Normal,
+        normal_resize_supported: style & WS_THICKFRAME.0 != 0,
         can_hide: allow_hide,
         has_owned_dialog: has_owned_dialog(hwnd),
     };

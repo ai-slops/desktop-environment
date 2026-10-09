@@ -626,6 +626,9 @@ pub struct ObservedWindow {
     pub show_state: ShowState,
     pub can_move: bool,
     pub can_resize: bool,
+    /// Style capability remains observable even when minimized/maximized.
+    #[serde(default)]
+    pub normal_resize_supported: bool,
     pub can_hide: bool,
     pub has_owned_dialog: bool,
 }

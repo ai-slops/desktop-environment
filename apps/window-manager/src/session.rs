@@ -1,6 +1,6 @@
 //! Local JSON Lines transport over inherited pipes. Capabilities come only from startup flags.
 use crate::service::{Command, Event, ProviderCommand, Worker};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, Read, Write};
@@ -21,7 +21,7 @@ struct Envelope {
     command: SessionCommand,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum SessionCommand {
     Snapshot {},
@@ -85,6 +85,17 @@ enum SessionCommand {
 }
 
 impl SessionCommand {
+    const fn cacheable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Snapshot {}
+                | Self::Configuration {}
+                | Self::Inventory {}
+                | Self::MonitorInventory {}
+                | Self::Events { .. }
+                | Self::Simulate { .. }
+        )
+    }
     fn authorize(&self, control: bool, providers: bool) -> Result<()> {
         let permitted = match self {
             Self::Snapshot {}
@@ -124,6 +135,7 @@ struct Session {
     history: Vec<Configuration>,
     monitor_epoch: Id,
     monitors: Vec<windows_window_manager::MonitorIdentity>,
+    replay: crate::replay::ReplayCache,
 }
 
 impl Drop for Session {
@@ -133,6 +145,32 @@ impl Drop for Session {
 }
 
 impl Session {
+    fn receive(&mut self, envelope: Envelope) -> Value {
+        let cacheable = envelope.command.cacheable();
+        let fingerprint = match serde_json::to_vec(&envelope.command) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return json!({"id":envelope.id,"error":Error::new(ErrorCode::InvalidConfiguration,error.to_string(),"session"),"cursor":self.log.cursor()});
+            }
+        };
+        if cacheable {
+            match self.replay.lookup(&envelope.id, &fingerprint) {
+                Ok(Some(response)) => return response,
+                Err(error) => {
+                    return json!({"id":envelope.id,"error":error,"cursor":self.log.cursor()});
+                }
+                Ok(None) => {}
+            }
+        }
+        let response = match self.execute(envelope.command) {
+            Ok(result) => json!({"id":envelope.id,"result":result,"cursor":self.log.cursor()}),
+            Err(error) => json!({"id":envelope.id,"error":error,"cursor":self.log.cursor()}),
+        };
+        if cacheable {
+            self.replay.insert(envelope.id, fingerprint, &response);
+        }
+        response
+    }
     fn exchange(&mut self, command: Command) -> Result<Vec<Event>> {
         let barrier = new_id("barrier");
         self.worker.sender.send(command).map_err(|_| unavailable())?;
@@ -149,6 +187,21 @@ impl Session {
             match &event {
                 Event::Barrier(id) if id == &barrier => break,
                 Event::State(snapshot, runtime) => {
+                    for window in self.snapshot.windows.keys().chain(
+                        snapshot
+                            .windows
+                            .keys()
+                            .filter(|window| !self.snapshot.windows.contains_key(*window)),
+                    ) {
+                        if self.snapshot.windows.get(window).map(|window| &window.binding)
+                            != snapshot.windows.get(window).map(|window| &window.binding)
+                        {
+                            self.log.push(DomainEvent::BindingChanged {
+                                window: window.clone(),
+                                available: snapshot.windows.contains_key(window),
+                            });
+                        }
+                    }
                     if self.snapshot.topology_revision != snapshot.topology_revision {
                         self.log.push(DomainEvent::TopologyChanged {
                             revision: snapshot.topology_revision,
@@ -277,7 +330,9 @@ impl Session {
                 Ok(self.public_snapshot())
             }
             SessionCommand::Recover {} => {
+                let windows = self.runtime.claims.keys().cloned().collect();
                 self.exchange(Command::Recover)?;
+                self.log.push(DomainEvent::Recovery { windows });
                 self.plans.clear();
                 Ok(self.public_snapshot())
             }
@@ -301,6 +356,28 @@ impl Session {
             SessionCommand::Structure { edit } => {
                 let draft = self.config.edit_structure(&edit)?;
                 self.save_configuration(draft)?;
+                self.log.push(DomainEvent::MembershipChanged {
+                    groups: self
+                        .config
+                        .views
+                        .values()
+                        .flat_map(|view| {
+                            view.roots
+                                .iter()
+                                .filter(|(role, node)| {
+                                    self.history
+                                        .last()
+                                        .and_then(|before| before.views.get(&view.id))
+                                        .and_then(|before| before.roots.get(*role))
+                                        .is_none_or(|before| {
+                                            serde_json::to_value(before).ok()
+                                                != serde_json::to_value(node).ok()
+                                        })
+                                })
+                                .map(|(_, node)| node.id().to_owned())
+                        })
+                        .collect(),
+                });
                 Ok(self.public_snapshot())
             }
             SessionCommand::ConfigurationUndo { expected_revision } => {
@@ -327,9 +404,13 @@ impl Session {
                 Ok(self.public_snapshot())
             }
             SessionCommand::ProviderPublish { message } => {
+                let attention = message.attention.map(|_| message.window.clone());
                 let provider = message.provider.clone();
                 self.exchange(Command::Provider(ProviderCommand::Publish(message)))?;
-                self.log.push(DomainEvent::ProviderChanged { provider });
+                self.log.push(DomainEvent::ProviderChanged { provider: provider.clone() });
+                if let Some(window) = attention {
+                    self.log.push(DomainEvent::AttentionChanged { provider, window });
+                }
                 Ok(self.public_snapshot())
             }
             SessionCommand::ProviderDisconnect { provider } => {
@@ -367,6 +448,7 @@ impl Session {
             self.history.remove(0);
         }
         self.config = draft;
+        self.log.push(DomainEvent::ConfigurationChanged { revision: self.config.revision });
         self.plans.clear();
         self.exchange(Command::Refresh(self.config.clone()))?;
         Ok(())
@@ -395,6 +477,7 @@ pub fn run(path: &Path, control: bool, providers: bool) -> anyhow::Result<()> {
         history: Vec::new(),
         monitor_epoch: String::new(),
         monitors: Vec::new(),
+        replay: crate::replay::ReplayCache::default(),
     };
     session.exchange(Command::Refresh(session.config.clone()))?;
     let input = std::io::stdin();
@@ -412,14 +495,7 @@ pub fn run(path: &Path, control: bool, providers: bool) -> anyhow::Result<()> {
         }
         let response = match serde_json::from_slice::<Envelope>(&line) {
             Ok(envelope) if !envelope.id.is_empty() && envelope.id.len() <= 200 => {
-                match session.execute(envelope.command) {
-                    Ok(result) => {
-                        json!({"id":envelope.id,"result":result,"cursor":session.log.cursor()})
-                    }
-                    Err(error) => {
-                        json!({"id":envelope.id,"error":error,"cursor":session.log.cursor()})
-                    }
-                }
+                session.receive(envelope)
             }
             _ => {
                 json!({"id":null,"error":Error::new(ErrorCode::InvalidConfiguration,"Malformed or unsupported session command","session"),"cursor":session.log.cursor()})

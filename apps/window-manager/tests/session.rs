@@ -157,13 +157,27 @@ fn structural_session_edits_require_revision_and_can_be_undone_without_native_ef
         .spawn()?;
     let mut input = child.stdin.take().ok_or("stdin missing")?;
     let action = serde_json::json!({"kind":"copy","source":{"view":view_id,"node":source_id},"destination":{"view":view_id,"group":destination_id,"index":null}});
-    for command in [
-        serde_json::json!({"kind":"structure","edit":{"expected_revision":4,"action":action}}),
-        serde_json::json!({"kind":"structure","edit":{"expected_revision":0,"action":action}}),
-        serde_json::json!({"kind":"configuration_undo","expected_revision":0}),
-        serde_json::json!({"kind":"configuration_undo","expected_revision":1}),
+    for (id, command) in [
+        (
+            "stale",
+            serde_json::json!({"kind":"structure","edit":{"expected_revision":4,"action":action}}),
+        ),
+        (
+            "copy",
+            serde_json::json!({"kind":"structure","edit":{"expected_revision":0,"action":action}}),
+        ),
+        (
+            "copy",
+            serde_json::json!({"kind":"structure","edit":{"expected_revision":0,"action":action}}),
+        ),
+        (
+            "copy",
+            serde_json::json!({"kind":"structure","edit":{"expected_revision":1,"action":action}}),
+        ),
+        ("undo-stale", serde_json::json!({"kind":"configuration_undo","expected_revision":0})),
+        ("undo", serde_json::json!({"kind":"configuration_undo","expected_revision":1})),
     ] {
-        serde_json::to_writer(&mut input, &serde_json::json!({"id":"edit","command":command}))?;
+        serde_json::to_writer(&mut input, &serde_json::json!({"id":id,"command":command}))?;
         input.write_all(b"\n")?;
     }
     drop(input);
@@ -175,8 +189,10 @@ fn structural_session_edits_require_revision_and_can_be_undone_without_native_ef
         .collect::<std::result::Result<_, _>>()?;
     assert_eq!(replies[0]["error"]["code"], "STALE_REVISION");
     assert_eq!(replies[1]["result"]["revision"], 1);
-    assert_eq!(replies[2]["error"]["code"], "STALE_REVISION");
-    assert_eq!(replies[3]["result"]["revision"], 2);
+    assert_eq!(replies[2], replies[1]);
+    assert_eq!(replies[3]["error"]["code"], "INVALID_CONFIGURATION");
+    assert_eq!(replies[4]["error"]["code"], "STALE_REVISION");
+    assert_eq!(replies[5]["result"]["revision"], 2);
     config.revision = 2;
     assert_eq!(serde_json::to_value(config)?, serde_json::to_value(Configuration::load(&path)?)?);
     let journal = windows_window_manager::Journal::load(&path.with_extension("recovery.json"))?;

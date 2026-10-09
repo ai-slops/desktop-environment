@@ -54,6 +54,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
         show_state: ShowState::Normal,
         can_move: true,
         can_resize: true,
+        normal_resize_supported: true,
         can_hide: true,
         has_owned_dialog: false,
     };
@@ -153,6 +154,36 @@ fn scoped_parameters_conditions_and_sorting_are_bounded_and_keep_authored_order(
             &BTreeSet::new()
         )
         .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn dpi_transfer_verifies_requested_client_size_instead_of_only_frame() -> Result<()> {
+    let (config, mut snapshot, target) = fixture();
+    snapshot
+        .displays
+        .get_mut("monitor")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "monitor"))?
+        .dpi = 192;
+    let request = Request::open(&config, target);
+    let result = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    let desired = &result.desired["preview"];
+    assert_eq!(desired.client_target, [Some(1600), Some(1000)]);
+    assert_eq!([desired.frame.width, desired.frame.height], [1640, 1080]);
+    let mut actual = snapshot.windows["preview"].clone();
+    actual.frame = desired.frame;
+    assert!(!desired.geometry_matches(&actual));
+    actual.dpi = 192;
+    assert!(!desired.geometry_matches(&actual));
+    actual.client = [1600, 1000];
+    assert!(desired.geometry_matches(&actual));
+    let mut keep = request;
+    keep.mode = TransitionMode::KeepSize;
+    keep.retain.insert("preview".into());
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &keep).err().map(|error| error.code),
+        Some(ErrorCode::UnsupportedOperation)
     );
     Ok(())
 }
@@ -1226,6 +1257,7 @@ fn generated_layouts_have_one_final_mutation_per_window_and_no_saved_state_drift
                     show_state: ShowState::Normal,
                     can_move: true,
                     can_resize: true,
+                    normal_resize_supported: true,
                     can_hide: true,
                     has_owned_dialog: false,
                 };
@@ -1951,5 +1983,99 @@ fn private_fallback_rejects_public_intersection_and_unrelated_missing_monitor_do
     request.id = "next".into();
     assert!(plan(&config, &runtime, &snapshot, &request).is_ok());
     assert!(runtime.presentations.contains_key("missing"));
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Fixture resources are constructed immediately above.
+fn settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects()
+-> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    let mut runtime = Runtime::default();
+    let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    let mut after = settled_snapshot(&transition, &snapshot);
+    assert!(transition.settled_scope(&transition.scope, &config, &runtime, &after).is_ok());
+    after.windows.get_mut("preview").unwrap().has_owned_dialog = true;
+    assert_eq!(
+        transition
+            .settled_scope(&transition.scope, &config, &runtime, &after)
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::StaleBinding)
+    );
+    after = settled_snapshot(&transition, &snapshot);
+    after.windows.get_mut("preview").unwrap().binding.generation += 1;
+    assert_eq!(
+        transition
+            .settled_scope(&transition.scope, &config, &runtime, &after)
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::StaleBinding)
+    );
+    config.windows.get_mut("preview").unwrap().output_protection =
+        OutputProtection::RequireVerifiedPrivate;
+    runtime.providers.register(
+        "capture".into(),
+        "session".into(),
+        BTreeSet::from(["preview".into()]),
+        true,
+        false,
+    )?;
+    runtime.providers.accept(
+        ProviderMessage {
+            provider: "capture".into(),
+            session: "session".into(),
+            sequence: 1,
+            window: "preview".into(),
+            observed_ms: 1000,
+            ttl_ms: 100,
+            output: Some(OutputState::VerifiedPrivate),
+            attention: None,
+        },
+        1000,
+    )?;
+    let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    after = settled_snapshot(&transition, &snapshot);
+    after.now_ms = 1100;
+    assert_eq!(
+        transition
+            .settled_scope(&transition.scope, &config, &runtime, &after)
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::OutputStateUnknown)
+    );
+    config.windows.get_mut("preview").unwrap().output_protection = OutputProtection::None;
+    config.windows.get_mut("preview").unwrap().capabilities.allow_show_state = true;
+    let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;
+    transition.commit(&mut runtime);
+    let current = settled_snapshot(&transition, &snapshot);
+    let action = plan_window_action(
+        &config,
+        &runtime,
+        &current,
+        &WindowAction {
+            id: "minimize-proof".into(),
+            expected_revision: config.revision,
+            window: "preview".into(),
+            slot: "work".into(),
+            action: WindowActionKind::ShowState(ShowState::Minimized),
+        },
+    )?;
+    after = settled_snapshot(&action, &current);
+    let native = after.windows.get_mut("preview").unwrap();
+    native.frame = Rect { x: -32000, y: -32000, width: 160, height: 28 };
+    native.client = [0, 0];
+    native.can_move = false;
+    native.can_resize = false;
+    let proof = action.settled_scope(&action.scope, &config, &runtime, &after)?;
+    assert_eq!(proof.desired["preview"].frame, after.windows["preview"].frame);
+    after.windows.get_mut("preview").unwrap().normal_resize_supported = false;
+    assert_eq!(
+        action
+            .settled_scope(&action.scope, &config, &runtime, &after)
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::StaleBinding)
+    );
     Ok(())
 }

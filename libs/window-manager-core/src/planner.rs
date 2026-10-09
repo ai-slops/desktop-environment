@@ -133,6 +133,25 @@ pub struct Desired {
     pub allocated: Rect,
     pub strict_size: bool,
     pub carried: bool,
+    pub dpi: u32,
+    pub client_target: [Option<i32>; 2],
+    pub minimum_client_target: Option<[i32; 2]>,
+}
+
+impl Desired {
+    #[must_use]
+    pub fn geometry_matches(&self, observed: &ObservedWindow) -> bool {
+        observed.frame == self.frame
+            && observed.dpi == self.dpi
+            && self
+                .client_target
+                .iter()
+                .zip(observed.client)
+                .all(|(target, actual)| target.is_none_or(|target| target == actual))
+            && self.minimum_client_target.is_none_or(|minimum| {
+                minimum.iter().zip(observed.client).all(|(minimum, actual)| actual >= *minimum)
+            })
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -741,6 +760,9 @@ pub fn plan(
                         allocated: previous.allocated,
                         strict_size: true,
                         carried: previous.carried,
+                        dpi: observed.dpi,
+                        client_target: observed.client.map(Some),
+                        minimum_client_target: None,
                     },
                 );
             }
@@ -784,6 +806,9 @@ pub fn plan(
                         allocated: area,
                         strict_size: true,
                         carried: true,
+                        dpi: exception.dpi,
+                        client_target: exception.client.map(Some),
+                        minimum_client_target: None,
                     },
                 );
             }
@@ -1103,6 +1128,105 @@ impl Plan {
         Ok(())
     }
 
+    /// Prove settlement and fresh authority for one connected domain. Other requested
+    /// effects are normalized only for the immutable preflight dependencies; native
+    /// identity, capabilities, modal state and external observations remain live.
+    pub fn settled_scope(
+        &self,
+        scope: &BTreeSet<Id>,
+        config: &Configuration,
+        runtime: &Runtime,
+        snapshot: &Snapshot,
+    ) -> Result<Self> {
+        let mut component = self.scoped_subset(scope, runtime);
+        component.expected.retain(|window, _| {
+            component.desired.contains_key(window)
+                || component.mutations.iter().any(|mutation| &mutation.window == window)
+                || effective_protection(config, runtime, window, None, None).maintain_visible
+        });
+        for mutation in &component.mutations {
+            let prior = &self.expected[&mutation.window];
+            let current = snapshot.windows.get(&mutation.window).ok_or_else(|| {
+                Error::new(
+                    ErrorCode::StaleBinding,
+                    "Window disappeared during settlement",
+                    &mutation.window,
+                )
+            })?;
+            if current.binding != mutation.binding {
+                return Err(Error::new(
+                    ErrorCode::StaleBinding,
+                    "Window lifetime changed during settlement",
+                    &mutation.window,
+                ));
+            }
+            let geometry_matches = mutation.geometry.is_none_or(|frame| {
+                current.frame == frame
+                    && self.desired.get(&mutation.window).map_or_else(
+                        || current.client == prior.client && current.dpi == prior.dpi,
+                        |desired| desired.geometry_matches(current),
+                    )
+            });
+            if !geometry_matches
+                || mutation.visible.is_some_and(|visible| current.visible != visible)
+                || mutation.show_state.is_some_and(|state| current.show_state != state)
+            {
+                return Err(Error::new(
+                    ErrorCode::ApplicationTimeout,
+                    "Requested geometry, client size, DPI or state has not settled",
+                    &mutation.window,
+                ));
+            }
+            // Explicit show-state operations can change geometry independently of layout.
+            if mutation.geometry.is_none()
+                && mutation.show_state.is_some()
+                && let Some(desired) = component.desired.get_mut(&mutation.window)
+            {
+                desired.frame = current.frame;
+                desired.dpi = current.dpi;
+                desired.client_target = current.client.map(Some);
+                desired.minimum_client_target = None;
+            }
+        }
+        let mut preflight = snapshot.clone();
+        for mutation in &self.mutations {
+            if let Some(current) = preflight.windows.get_mut(&mutation.window)
+                && let Some(prior) = self.expected.get(&mutation.window)
+            {
+                if mutation.geometry.is_some() || mutation.show_state.is_some() {
+                    current.frame = prior.frame;
+                    current.client = prior.client;
+                    current.dpi = prior.dpi;
+                    current.display.clone_from(&prior.display);
+                }
+                if mutation.visible.is_some() {
+                    current.visible = prior.visible;
+                }
+                if mutation.show_state.is_some() {
+                    current.show_state = prior.show_state;
+                    current.can_move = prior.can_move;
+                    current.can_resize = prior.can_resize;
+                }
+            }
+        }
+        component.revalidate(config, runtime, &preflight)?;
+        for (window, current) in &snapshot.windows {
+            if current.visible
+                && effective_protection(config, runtime, window, None, None).maintain_visible
+            {
+                for desired in component.desired.values() {
+                    if desired.window != *window && desired.frame.overlaps(current.frame) {
+                        return Err(conflict(
+                            window,
+                            "Settled destination overlaps live protected content",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(component)
+    }
+
     /// Called only once every geometry/visibility mutation has been observed as settled.
     pub fn commit(&self, runtime: &mut Runtime) {
         if self.idempotent {
@@ -1378,6 +1502,11 @@ impl Evaluator<'_> {
                     context: self.context(variant),
                     strict_size: true,
                     carried: false,
+                    dpi: self.dpi,
+                    client_target: observed.client.map(Some),
+                    minimum_client_target: leaf.minimum_client.map(|size| {
+                        size.map(|value| (value * f64::from(self.dpi) / 96.0).ceil() as i32)
+                    }),
                 },
             );
         }
@@ -1798,8 +1927,27 @@ impl Evaluator<'_> {
             return Ok(());
         }
         let scale = f64::from(self.dpi) / 96.0;
+        if observed.dpi == 0 {
+            return Err(Error::new(
+                ErrorCode::UnsupportedOperation,
+                "Source DPI unavailable",
+                &placement.id,
+            ));
+        }
         let decoration =
-            [observed.frame.width - observed.client[0], observed.frame.height - observed.client[1]];
+            [observed.frame.width - observed.client[0], observed.frame.height - observed.client[1]]
+                .map(|padding| {
+                    (f64::from(padding) * f64::from(self.dpi) / f64::from(observed.dpi)).round()
+                        as i32
+                });
+        if decoration.iter().any(|padding| *padding < 0) {
+            return Err(Error::new(
+                ErrorCode::UnsupportedOperation,
+                "Nonclient geometry cannot be inferred reliably",
+                &placement.id,
+            ));
+        }
+        let mut client_target = [None, None];
         let mut context = self.parameters.clone();
         context.extend([
             ("available_width".into(), f64::from(area.width - decoration[0]) / scale),
@@ -1813,8 +1961,10 @@ impl Evaluator<'_> {
         }
         let size = preference.size_override.or(preference.client_size);
         if let Some(size) = size {
-            frame.width = (size[0] * scale).round() as i32 + decoration[0];
-            frame.height = (size[1] * scale).round() as i32 + decoration[1];
+            let size = size.map(|value| (value * scale).round() as i32);
+            frame.width = size[0] + decoration[0];
+            frame.height = size[1] + decoration[1];
+            client_target = size.map(Some);
         }
         let exception = self.presentation.overrides.get(&placement.window);
         let locked = effective_protection(
@@ -1847,6 +1997,7 @@ impl Evaluator<'_> {
                     } else {
                         frame.height = (value * scale).round() as i32 + decoration[1];
                     }
+                    client_target[axis] = Some((value * scale).round() as i32);
                 }
             }
         }
@@ -1886,6 +2037,9 @@ impl Evaluator<'_> {
                 &placement.id,
                 format!("Minimum client size {minimum:?} exceeds allocated content"),
             ));
+        }
+        if strict_size {
+            client_target = observed.client.map(Some);
         }
         frame.validate()?;
         let moving = frame != observed.frame;
@@ -1933,6 +2087,11 @@ impl Evaluator<'_> {
                 allocated: area,
                 strict_size,
                 carried: false,
+                dpi: self.dpi,
+                client_target,
+                minimum_client_target: placement
+                    .minimum_client
+                    .map(|size| size.map(|value| (value * scale).ceil() as i32)),
             },
         );
         Ok(())

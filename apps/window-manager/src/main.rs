@@ -3,6 +3,7 @@
 #![cfg_attr(test, allow(unused_crate_dependencies))] // Integration tests share this binary's dev dependencies.
 
 mod cli;
+mod replay;
 mod service;
 mod session;
 mod ui;

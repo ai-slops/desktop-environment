@@ -174,6 +174,7 @@ pub fn simulate(config: &Configuration, input: &Simulation) -> Result<Simulation
                 show_state: ShowState::Normal,
                 can_move: true,
                 can_resize: true,
+                normal_resize_supported: true,
                 can_hide: true,
                 has_owned_dialog: false,
             },

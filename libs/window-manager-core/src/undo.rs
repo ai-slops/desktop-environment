@@ -109,9 +109,15 @@ impl UndoRecord {
                 allocated: prior.frame,
                 strict_size: false,
                 carried: true,
+                dpi: prior.dpi,
+                client_target: prior.client.map(Some),
+                minimum_client_target: None,
             });
             desired.frame = prior.frame;
             desired.strict_size = false;
+            desired.minimum_client_target = None;
+            desired.dpi = prior.dpi;
+            desired.client_target = prior.client.map(Some);
             result.desired.insert(window.clone(), desired);
         }
         for original in &self.plan.mutations {

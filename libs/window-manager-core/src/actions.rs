@@ -188,6 +188,9 @@ pub fn plan_window_action(
                 allocated: current.frame,
                 strict_size: false,
                 carried: true,
+                dpi: current.dpi,
+                client_target: current.client.map(Some),
+                minimum_client_target: None,
             });
             desired.frame = if window == &action.window {
                 mutation.geometry.unwrap_or(current.frame)
@@ -195,6 +198,8 @@ pub fn plan_window_action(
                 current.frame
             };
             desired.strict_size = window == &action.window && mutation.geometry.is_some();
+            desired.dpi = current.dpi;
+            desired.client_target = current.client.map(Some);
             result.desired.insert(window.clone(), desired);
         }
     }
@@ -205,5 +210,10 @@ pub fn plan_window_action(
         result.impact.unchanged = 1;
     }
     result.revalidate(config, runtime, snapshot)?;
+    if runtime.completed.contains(&action.id) {
+        result.idempotent = true;
+        result.mutations.clear();
+        result.impact = Impact { unchanged: 1, ..Impact::default() };
+    }
     Ok(result)
 }

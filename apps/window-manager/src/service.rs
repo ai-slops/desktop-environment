@@ -485,7 +485,17 @@ impl State {
                 outcome.settled =
                     self.snapshot.windows.get(&mutation.window).is_some_and(|observed| {
                         observed.binding == mutation.binding
-                            && mutation.geometry.is_none_or(|frame| observed.frame == frame)
+                            && mutation.geometry.is_none_or(|frame| {
+                                observed.frame == frame
+                                    && plan.desired.get(&mutation.window).map_or_else(
+                                        || {
+                                            observed.dpi == plan.expected[&mutation.window].dpi
+                                                && observed.client
+                                                    == plan.expected[&mutation.window].client
+                                        },
+                                        |desired| desired.geometry_matches(observed),
+                                    )
+                            })
                             && mutation.visible.is_none_or(|visible| observed.visible == visible)
                             && mutation.show_state.is_none_or(|state| observed.show_state == state)
                             && (!plan
@@ -509,9 +519,41 @@ impl State {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        // Validate all domains against the same pre-commit runtime so independent
+        // generation increments cannot invalidate another domain's successful result.
+        let mut verified = BTreeMap::new();
+        let domains = if plan.domains.is_empty() {
+            plan.scope.iter().map(|slot| BTreeSet::from([slot.clone()])).collect()
+        } else {
+            plan.domains.clone()
+        };
+        for domain in domains {
+            if !domain.is_disjoint(&superseded) {
+                continue;
+            }
+            let result = plan.settled_scope(&domain, &self.config, &self.runtime, &self.snapshot);
+            if let Err(error) = &result {
+                for outcome in &mut outcomes {
+                    if plan
+                        .mutation_slots
+                        .get(&outcome.window)
+                        .is_some_and(|slot| domain.contains(slot))
+                    {
+                        outcome.settled = false;
+                        if outcome.error.is_none() {
+                            outcome.error = Some(error.clone());
+                        }
+                    }
+                }
+                let _ = self.events.send(Event::Error(error.clone()));
+            }
+            for slot in domain {
+                verified.insert(slot, result.clone());
+            }
+        }
         let settled = outcomes.iter().all(|outcome| outcome.settled);
         for outcome in &mut outcomes {
-            if outcome.submitted && !outcome.settled {
+            if outcome.submitted && !outcome.settled && outcome.error.is_none() {
                 outcome.error = Some(Error::new(
                     ErrorCode::ApplicationTimeout,
                     "Native operation did not settle within 900ms; enforcement paused",
@@ -543,20 +585,8 @@ impl State {
                 }
                 continue;
             }
-            let domain = plan
-                .domains
-                .iter()
-                .find(|domain| domain.contains(slot))
-                .cloned()
-                .unwrap_or_else(|| BTreeSet::from([slot.clone()]));
-            let component_settled =
-                plan.scoped_subset(&domain, &prior_runtime).mutations.iter().all(|mutation| {
-                    outcomes
-                        .iter()
-                        .any(|outcome| outcome.window == mutation.window && outcome.settled)
-                });
-            if component_settled {
-                component.commit(&mut self.runtime);
+            if let Some(Ok(domain)) = verified.get(slot) {
+                domain.component(slot, &prior_runtime).commit(&mut self.runtime);
                 committed_slots.insert(slot.clone());
             } else {
                 self.runtime.suspended.insert(slot.clone());
@@ -579,7 +609,7 @@ impl State {
                 self.undo.remove(0);
             }
         }
-        let settled = settled && superseded.is_empty();
+        let settled = settled && superseded.is_empty() && committed_slots == plan.scope;
         if !settled || !plan.blocked.is_empty() {
             self.runtime.completed.remove(&plan.id);
         }
