@@ -12,6 +12,11 @@ pub struct Candidate {
     pub process: u32,
     pub frame: Rect,
 }
+pub struct SubmissionReport {
+    pub results: std::collections::BTreeMap<Id, window_manager_core::Result<()>>,
+    pub batched_windows: usize,
+    pub individual_windows: usize,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

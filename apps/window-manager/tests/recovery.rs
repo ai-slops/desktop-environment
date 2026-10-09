@@ -95,6 +95,7 @@ fn separate_helper_recovers_hidden_window_after_parent_process_death()
         move_only: true,
         visible: Some(false),
         focus: false,
+        show_state: None,
     })?;
     assert!(!observe(&before.binding, true)?.visible);
     parent.kill()?;

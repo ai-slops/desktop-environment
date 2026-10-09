@@ -414,6 +414,24 @@ pub fn submit(mutation: &Mutation) -> Result<()> {
     validate_binding(&mutation.binding)?;
     let _dpi = DpiGuard::new();
     let hwnd = handle(mutation.binding.handle);
+    if let Some(state) = mutation.show_state {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, ShowWindowAsync,
+        };
+        let command = match state {
+            ShowState::Normal => SW_SHOWNOACTIVATE,
+            ShowState::Minimized => SW_SHOWMINNOACTIVE,
+            ShowState::Maximized => SW_SHOWMAXIMIZED,
+        };
+        // SAFETY: separately opted-in, explicit show-state action on the lifetime-validated HWND.
+        if !unsafe { ShowWindowAsync(hwnd, command) }.as_bool() {
+            return Err(Error::new(
+                ErrorCode::UnsupportedOperation,
+                "Show-state submission was rejected",
+                &mutation.window,
+            ));
+        }
+    }
     let mut flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS;
     if mutation.move_only {
         flags |= SWP_NOSIZE;
@@ -449,6 +467,94 @@ pub fn focus(binding: &Binding) -> Result<()> {
     }
 }
 
+/// Batch only same-thread/same-parent windows, where `EndDeferWindowPos` cannot wait on a hung foreign thread.
+///
+/// Foreign app threads use one asynchronous final request each. There is no replay after a batch failure.
+#[must_use]
+pub fn submit_many(mutations: &[Mutation]) -> crate::SubmissionReport {
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::UI::WindowsAndMessaging::{GA_PARENT, GetAncestor};
+    let mut report = crate::SubmissionReport {
+        results: BTreeMap::new(),
+        batched_windows: 0,
+        individual_windows: 0,
+    };
+    let mut groups: BTreeMap<u64, Vec<&Mutation>> = BTreeMap::new();
+    for mutation in mutations {
+        let hwnd = handle(mutation.binding.handle);
+        // SAFETY: query-only native ownership. Actual lifetime is revalidated before submission.
+        let same_thread = unsafe { GetWindowThreadProcessId(hwnd, None) == GetCurrentThreadId() };
+        if same_thread
+            && mutation.show_state.is_none()
+            && (mutation.geometry.is_some() || mutation.visible.is_some())
+        {
+            let parent = unsafe { GetAncestor(hwnd, GA_PARENT) }.0 as usize as u64;
+            groups.entry(parent).or_default().push(mutation);
+        } else {
+            report.results.insert(mutation.window.clone(), submit(mutation));
+            report.individual_windows += 1;
+        }
+    }
+    for group in groups.values() {
+        let result = submit_batch(group);
+        report.batched_windows += group.len();
+        for mutation in group {
+            report.results.insert(mutation.window.clone(), result.clone());
+        }
+    }
+    report
+}
+
+fn submit_batch(mutations: &[&Mutation]) -> Result<()> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos,
+    };
+    if mutations.len() > 256 {
+        return Err(Error::new(
+            ErrorCode::UnsupportedOperation,
+            "Native batch budget exceeded",
+            "batch",
+        ));
+    }
+    for mutation in mutations {
+        validate_binding(&mutation.binding)?;
+    }
+    let _dpi = DpiGuard::new();
+    // SAFETY: bounded same-parent windows owned by the calling thread, validated above.
+    let mut batch = unsafe { BeginDeferWindowPos(mutations.len() as i32) }
+        .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "batch", error))?;
+    for mutation in mutations {
+        let mut flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER;
+        let frame = mutation.geometry.unwrap_or_default();
+        if mutation.move_only {
+            flags |= SWP_NOSIZE;
+        }
+        if mutation.geometry.is_none() {
+            flags |= SWP_NOMOVE | SWP_NOSIZE;
+        }
+        if let Some(visible) = mutation.visible {
+            flags |= if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+        }
+        // SAFETY: always retain the returned HDWP. `?` abandons the batch on failure without End/replay.
+        batch = unsafe {
+            DeferWindowPos(
+                batch,
+                handle(mutation.binding.handle),
+                None,
+                frame.x,
+                frame.y,
+                frame.width,
+                frame.height,
+                flags,
+            )
+        }
+        .map_err(|error| native_error(ErrorCode::UnsupportedOperation, &mutation.window, error))?;
+    }
+    // SAFETY: every Defer succeeded; no foreign thread can stall this same-thread commit.
+    unsafe { EndDeferWindowPos(batch) }
+        .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "batch", error))
+}
+
 /// Independent recovery restores visibility only, never historical geometry or user-minimized windows.
 pub fn recover(path: &Path) -> Result<Vec<String>> {
     recover_selected(path, None)
@@ -481,6 +587,7 @@ pub fn recover_selected(
                     move_only: true,
                     visible: Some(true),
                     focus: false,
+                    show_state: None,
                 };
                 if let Err(error) = submit(&mutation) {
                     diagnostics.push(error.to_string());
@@ -714,6 +821,7 @@ mod tests {
             move_only: true,
             visible: None,
             focus: false,
+            show_state: None,
         };
         submit(&mutation)?;
         let after = observe(&before.binding, false)?;
@@ -748,6 +856,7 @@ mod tests {
             move_only: true,
             visible: Some(false),
             focus: false,
+            show_state: None,
         })?;
         assert!(!observe(&before.binding, true)?.visible);
         recover(&path)?;
@@ -755,5 +864,93 @@ mod tests {
         assert!(after.visible);
         assert_eq!(after.frame, before.frame);
         Ok(())
+    }
+
+    #[test]
+    fn same_thread_batch_moves_once_and_preserves_each_client()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let first = Owned::new()?;
+        let second = Owned::new()?;
+        let observations = [bind(&first.candidate(), false)?, bind(&second.candidate(), false)?];
+        let mutations: Vec<_> = observations
+            .iter()
+            .enumerate()
+            .map(|(index, observed)| Mutation {
+                window: format!("fixture-{index}"),
+                binding: observed.binding.clone(),
+                geometry: Some(Rect {
+                    x: observed.frame.x + 30,
+                    y: observed.frame.y + 20,
+                    ..observed.frame
+                }),
+                move_only: true,
+                visible: None,
+                focus: false,
+                show_state: None,
+            })
+            .collect();
+        let report = submit_many(&mutations);
+        assert_eq!(report.batched_windows, 2);
+        assert_eq!(report.individual_windows, 0);
+        for (index, before) in observations.iter().enumerate() {
+            assert!(report.results[&format!("fixture-{index}")].is_ok());
+            let after = observe(&before.binding, false)?;
+            assert_eq!(after.frame, mutations[index].geometry.unwrap_or_default());
+            assert_eq!(after.client, before.client);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_minimize_and_normal_restore_do_not_need_input_injection()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let window = Owned::new()?;
+        let _ = unsafe { ShowWindow(window.0, SW_SHOWNOACTIVATE) };
+        let before = bind(&window.candidate(), false)?;
+        let mut mutation = Mutation {
+            window: "state-fixture".into(),
+            binding: before.binding.clone(),
+            geometry: None,
+            move_only: true,
+            visible: None,
+            focus: false,
+            show_state: Some(ShowState::Minimized),
+        };
+        submit(&mutation)?;
+        let _ = wait_state(&before.binding, ShowState::Minimized)?;
+        mutation.show_state = Some(ShowState::Normal);
+        submit(&mutation)?;
+        let after = wait_state(&before.binding, ShowState::Normal)?;
+        assert_eq!(after.show_state, ShowState::Normal);
+        assert_eq!(after.frame, before.frame);
+        assert_eq!(after.client, before.client);
+        Ok(())
+    }
+
+    fn wait_state(binding: &Binding, state: ShowState) -> Result<ObservedWindow> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PM_REMOVE, PeekMessageW, TranslateMessage,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(900);
+        loop {
+            let observed = observe(binding, false)?;
+            if observed.show_state == state {
+                return Ok(observed);
+            }
+            let mut message = MSG::default();
+            // SAFETY: pump only this fixture thread's messages so asynchronous show events can settle.
+            while unsafe { PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                let _ = unsafe { TranslateMessage(&raw const message) };
+                unsafe { DispatchMessageW(&raw const message) };
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorCode::ApplicationTimeout,
+                    "Fixture show state did not settle",
+                    "fixture",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 }

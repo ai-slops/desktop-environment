@@ -144,6 +144,19 @@ pub enum OutputProtection {
     FreezeWhileLinkedOrUnknown,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilityProfile {
+    pub allow_move: bool,
+    pub allow_resize: bool,
+    pub allow_show_state: bool,
+}
+impl Default for CapabilityProfile {
+    fn default() -> Self {
+        Self { allow_move: true, allow_resize: true, allow_show_state: false }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tag {
@@ -163,6 +176,8 @@ pub struct WindowRef {
     pub protection: Protection,
     #[serde(default)]
     pub output_protection: OutputProtection,
+    #[serde(default)]
+    pub capabilities: CapabilityProfile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -294,6 +309,24 @@ pub enum Strategy {
     ResponsiveTabs,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GroupPreservation {
+    #[default]
+    Fill,
+    Outer,
+    Children,
+    Arrangement,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Alignment {
+    #[default]
+    Start,
+    Center,
+    End,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Variant {
@@ -321,6 +354,12 @@ pub struct Group {
     pub membership: Option<Membership>,
     #[serde(default)]
     pub protection: Protection,
+    #[serde(default)]
+    pub preservation: GroupPreservation,
+    #[serde(default)]
+    pub allowed_fallbacks: Vec<Strategy>,
+    #[serde(default)]
+    pub alignment: Alignment,
 }
 
 impl Group {
@@ -338,6 +377,9 @@ impl Group {
             preserve_child_sizes: false,
             membership: None,
             protection: Protection::default(),
+            preservation: GroupPreservation::Fill,
+            allowed_fallbacks: Vec::new(),
+            alignment: Alignment::Start,
         }
     }
 }

@@ -10,6 +10,7 @@ pub struct UndoRecord {
     plan: Plan,
     prior_presentations: BTreeMap<Id, Presentation>,
     prior_claims: BTreeMap<Id, Claim>,
+    prior_geometry: BTreeMap<Id, Desired>,
     after: BTreeMap<Id, ObservedWindow>,
     generations: BTreeMap<Id, u64>,
 }
@@ -18,6 +19,12 @@ impl UndoRecord {
     #[must_use]
     pub fn capture(plan: &Plan, prior: &Runtime, settled: &Snapshot, current: &Runtime) -> Self {
         Self {
+            prior_geometry: prior
+                .geometry
+                .iter()
+                .filter(|(_, desired)| plan.scope.contains(&desired.slot))
+                .map(|(id, desired)| (id.clone(), desired.clone()))
+                .collect(),
             plan: plan.clone(),
             prior_presentations: prior
                 .presentations
@@ -93,19 +100,19 @@ impl UndoRecord {
             let prior = self.plan.expected.get(window).ok_or_else(|| {
                 Error::new(ErrorCode::StaleBinding, "Undo lacks prior observation", window)
             })?;
-            result.desired.insert(
-                window.clone(),
-                Desired {
-                    window: window.clone(),
-                    placement: claim.placement.clone(),
-                    slot: claim.slot.clone(),
-                    frame: prior.frame,
-                    context: String::new(),
-                    allocated: prior.frame,
-                    strict_size: false,
-                    carried: false,
-                },
-            );
+            let mut desired = self.prior_geometry.get(window).cloned().unwrap_or_else(|| Desired {
+                window: window.clone(),
+                placement: claim.placement.clone(),
+                slot: claim.slot.clone(),
+                frame: prior.frame,
+                context: String::new(),
+                allocated: prior.frame,
+                strict_size: false,
+                carried: true,
+            });
+            desired.frame = prior.frame;
+            desired.strict_size = false;
+            result.desired.insert(window.clone(), desired);
         }
         for original in &self.plan.mutations {
             let window = &original.window;
@@ -123,6 +130,21 @@ impl UndoRecord {
             let move_only = prior.frame.width == current.frame.width
                 && prior.frame.height == current.frame.height;
             let protection = crate::effective_protection(config, runtime, window, None, None);
+            let show_state = original
+                .show_state
+                .and_then(|_| (prior.show_state != current.show_state).then_some(prior.show_state));
+            if show_state.is_some()
+                && (!reference.capabilities.allow_show_state
+                    || protection.geometry_lock
+                    || protection.maintain_visible && show_state == Some(ShowState::Minimized)
+                    || protection.prohibit_focus && show_state == Some(ShowState::Maximized))
+            {
+                return Err(Error::new(
+                    ErrorCode::UnsupportedOperation,
+                    "Show-state undo is outside current profile/protection",
+                    window,
+                ));
+            }
             if geometry.is_some()
                 && (protection.geometry_lock
                     || !current.can_move
@@ -169,7 +191,7 @@ impl UndoRecord {
                     result.impact.hidden += 1;
                 }
             }
-            if geometry.is_some() || visible.is_some() {
+            if geometry.is_some() || visible.is_some() || show_state.is_some() {
                 result.mutations.push(Mutation {
                     window: window.clone(),
                     binding: current.binding.clone(),
@@ -177,6 +199,7 @@ impl UndoRecord {
                     move_only,
                     visible,
                     focus: false,
+                    show_state,
                 });
             }
         }

@@ -79,6 +79,8 @@ pub struct Presentation {
     pub visit: Id,
     pub selected_tabs: BTreeMap<Id, Id>,
     pub variants: BTreeMap<Id, Id>,
+    pub group_bounds: BTreeMap<Id, Rect>,
+    pub fallbacks: BTreeMap<Id, Strategy>,
     pub overrides: BTreeMap<Id, VisitOverride>,
     pub protection: crate::Protection,
 }
@@ -94,6 +96,7 @@ pub struct Runtime {
     pub suspended: BTreeSet<Id>,
     pub providers: crate::ProviderRegistry,
     pub attention_targets: BTreeMap<Id, Target>,
+    pub geometry: BTreeMap<Id, Desired>,
 }
 
 #[derive(Clone, Debug)]
@@ -116,6 +119,8 @@ pub struct Mutation {
     pub move_only: bool,
     pub visible: Option<bool>,
     pub focus: bool,
+    #[serde(default)]
+    pub show_state: Option<ShowState>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -142,6 +147,7 @@ pub struct Plan {
     pub impact: Impact,
     pub diagnostics: Vec<String>,
     pub idempotent: bool,
+    pub mutation_slots: BTreeMap<Id, Id>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +326,7 @@ pub fn plan(
         impact: Impact::default(),
         diagnostics: Vec::new(),
         idempotent: false,
+        mutation_slots: BTreeMap::new(),
     };
     // An ordinary recall preserves the current Visit and manual live state.
     if runtime.completed.contains(&request.id)
@@ -374,6 +381,8 @@ pub fn plan(
             visit: new_id("visit"),
             selected_tabs: BTreeMap::new(),
             variants: BTreeMap::new(),
+            group_bounds: BTreeMap::new(),
+            fallbacks: BTreeMap::new(),
             overrides: BTreeMap::new(),
             protection: crate::Protection::default(),
         });
@@ -583,7 +592,11 @@ pub fn plan(
         let geometry = (desired.frame != observed.frame).then_some(desired.frame);
         let move_only = desired.frame.width == observed.frame.width
             && desired.frame.height == observed.frame.height;
-        if geometry.is_some() && (!observed.can_move || (!move_only && !observed.can_resize)) {
+        if geometry.is_some()
+            && (!observed.can_move
+                || !reference.capabilities.allow_move
+                || (!move_only && (!observed.can_resize || !reference.capabilities.allow_resize)))
+        {
             return Err(Error::new(
                 ErrorCode::UnsupportedOperation,
                 "Requested geometry is outside the window capability profile",
@@ -630,10 +643,32 @@ pub fn plan(
                 move_only,
                 visible,
                 focus,
+                show_state: None,
             });
         }
     }
-    for (window, claim) in &runtime.claims {
+    let mut hidden_candidates: BTreeMap<Id, Claim> = runtime
+        .claims
+        .iter()
+        .filter(|(_, claim)| request.scope.contains(&claim.slot))
+        .map(|(window, claim)| (window.clone(), claim.clone()))
+        .collect();
+    for (slot, (view, root)) in &mapped {
+        let mut leaves = Vec::new();
+        config.views[view].roots[root].placements(&mut leaves);
+        for leaf in leaves {
+            if runtime
+                .claims
+                .get(&leaf.window)
+                .is_none_or(|claim| request.scope.contains(&claim.slot))
+            {
+                hidden_candidates
+                    .entry(leaf.window.clone())
+                    .or_insert_with(|| Claim { slot: slot.clone(), placement: leaf.id.clone() });
+            }
+        }
+    }
+    for (window, claim) in &hidden_candidates {
         if !request.scope.contains(&claim.slot) || result.desired.contains_key(window) {
             continue;
         }
@@ -670,6 +705,7 @@ pub fn plan(
                     move_only: true,
                     visible: Some(false),
                     focus: false,
+                    show_state: None,
                 });
             } else {
                 result
@@ -702,6 +738,16 @@ pub fn plan(
                     ));
                 }
             }
+        }
+    }
+    for mutation in &result.mutations {
+        if let Some(slot) = result
+            .desired
+            .get(&mutation.window)
+            .map(|desired| &desired.slot)
+            .or_else(|| hidden_candidates.get(&mutation.window).map(|claim| &claim.slot))
+        {
+            result.mutation_slots.insert(mutation.window.clone(), slot.clone());
         }
     }
     Ok(result)
@@ -781,6 +827,8 @@ impl Plan {
             return;
         }
         runtime.claims.retain(|_, claim| !self.scope.contains(&claim.slot));
+        runtime.geometry.retain(|_, desired| !self.scope.contains(&desired.slot));
+        runtime.geometry.extend(self.desired.clone());
         runtime.presentations.retain(|slot, _| !self.scope.contains(slot));
         for (window, desired) in &self.desired {
             if self.expected.contains_key(window) {
@@ -812,11 +860,15 @@ impl Plan {
         result.presentations.retain(|id, _| id == slot);
         result.desired.retain(|_, desired| desired.slot == slot);
         result.mutations.retain(|mutation| {
+            if let Some(id) = self.mutation_slots.get(&mutation.window) {
+                return id == slot;
+            }
             self.desired.get(&mutation.window).map_or_else(
                 || runtime.claims.get(&mutation.window).is_some_and(|claim| claim.slot == slot),
                 |desired| desired.slot == slot,
             )
         });
+        result.mutation_slots.retain(|_, id| id == slot);
         result
     }
 }
@@ -848,11 +900,189 @@ impl Evaluator<'_> {
         }
     }
 
-    #[allow(clippy::too_many_lines)] // One bounded immediate-child allocation pass.
     fn group(&mut self, group: &Group, area: Rect, preserve: bool) -> Result<()> {
+        let desired = self.desired.clone();
+        let presentation = self.presentation.clone();
+        let diagnostics = self.diagnostics.len();
+        match self.group_layout(group, area, preserve) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                *self.desired = desired.clone();
+                *self.presentation = presentation.clone();
+                self.diagnostics.truncate(diagnostics);
+                for strategy in &group.allowed_fallbacks {
+                    let mut fallback = group.clone();
+                    fallback.strategy = *strategy;
+                    fallback.variants.clear();
+                    if self.group_layout(&fallback, area, preserve).is_ok() {
+                        self.presentation.fallbacks.insert(group.id.clone(), *strategy);
+                        self.diagnostics
+                            .push(format!("{}: allowed fallback {strategy:?}; {error}", group.id));
+                        return Ok(());
+                    }
+                    *self.desired = desired.clone();
+                    *self.presentation = presentation.clone();
+                    self.diagnostics.truncate(diagnostics);
+                }
+                // Retain only an already-owned subtree fitting its independent allocation.
+                let prior = self.runtime.presentations.get(&self.slot.id);
+                let same_visit = prior.is_some_and(|prior| prior.visit == self.presentation.visit);
+                if same_visit && self.preserve_arrangement(group, area, "base", false).is_ok() {
+                    self.diagnostics
+                        .push(format!("{}: dependent subtree retained; {error}", group.id));
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    fn active_leaves<'b>(&self, node: &'b Node, leaves: &mut Vec<&'b Placement>) {
+        match node {
+            Node::Placement(placement) => leaves.push(placement),
+            Node::Group(group) => {
+                let variant = self
+                    .presentation
+                    .variants
+                    .get(&group.id)
+                    .and_then(|id| group.variants.iter().find(|variant| &variant.id == id));
+                let strategy =
+                    self.presentation.fallbacks.get(&group.id).copied().unwrap_or_else(|| {
+                        variant.map_or(group.strategy, |variant| variant.strategy)
+                    });
+                if matches!(strategy, Strategy::SemanticTabs | Strategy::ResponsiveTabs) {
+                    if let Some(child) = self
+                        .presentation
+                        .selected_tabs
+                        .get(&group.id)
+                        .and_then(|id| group.children.iter().find(|child| child.id() == id))
+                        .or_else(|| group.children.first())
+                    {
+                        self.active_leaves(child, leaves);
+                    }
+                } else {
+                    for child in &group.children {
+                        self.active_leaves(child, leaves);
+                    }
+                }
+            }
+        }
+    }
+
+    fn source_bounds(&self, group: &Group) -> Option<Rect> {
+        let mut leaves = Vec::new();
+        let node = Node::Group(group.clone());
+        self.active_leaves(&node, &mut leaves);
+        // Use an owned Group allocation first; otherwise infer an observed visible footprint.
+        if let Some(bounds) = self.presentation.group_bounds.get(&group.id) {
+            return Some(*bounds);
+        }
+        let frames: Vec<_> = leaves
+            .iter()
+            .filter_map(|leaf| {
+                self.snapshot
+                    .windows
+                    .get(&leaf.window)
+                    .filter(|window| window.visible && window.show_state == ShowState::Normal)
+                    .map(|window| window.frame)
+            })
+            .collect();
+        let x = frames.iter().map(|frame| frame.x).min()?;
+        let y = frames.iter().map(|frame| frame.y).min()?;
+        let right = frames.iter().map(|frame| frame.x + frame.width).max()?;
+        let bottom = frames.iter().map(|frame| frame.y + frame.height).max()?;
+        Some(Rect { x, y, width: right - x, height: bottom - y })
+    }
+
+    fn preserve_arrangement(
+        &mut self,
+        group: &Group,
+        area: Rect,
+        variant: &str,
+        translate: bool,
+    ) -> Result<()> {
+        let node = Node::Group(group.clone());
+        let mut leaves = Vec::new();
+        self.active_leaves(&node, &mut leaves);
+        let source = self
+            .source_bounds(group)
+            .ok_or_else(|| conflict(&group.id, "No observed Group arrangement to preserve"))?;
+        for leaf in leaves {
+            let observed = self
+                .snapshot
+                .windows
+                .get(&leaf.window)
+                .ok_or_else(|| conflict(&leaf.id, "Group preservation binding missing"))?;
+            if !translate
+                && self
+                    .runtime
+                    .claims
+                    .get(&leaf.window)
+                    .is_none_or(|claim| claim.placement != leaf.id || claim.slot != self.slot.id)
+            {
+                return Err(conflict(&leaf.id, "Failed subtree has no safe prior owner"));
+            }
+            let frame = if translate {
+                Rect {
+                    x: area.x + observed.frame.x - source.x,
+                    y: area.y + observed.frame.y - source.y,
+                    ..observed.frame
+                }
+            } else {
+                observed.frame
+            };
+            if !area.contains(frame)
+                || observed.dpi != self.dpi
+                || observed.show_state != ShowState::Normal
+                || self.desired.contains_key(&leaf.window)
+            {
+                return Err(conflict(
+                    &leaf.id,
+                    "Preserved arrangement cannot fit or has competing claims",
+                ));
+            }
+            self.desired.insert(
+                leaf.window.clone(),
+                Desired {
+                    window: leaf.window.clone(),
+                    placement: leaf.id.clone(),
+                    slot: self.slot.id.clone(),
+                    frame,
+                    allocated: area,
+                    context: context_key(self.slot, variant),
+                    strict_size: true,
+                    carried: false,
+                },
+            );
+        }
+        self.presentation.group_bounds.insert(group.id.clone(), area);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // One bounded immediate-child allocation pass.
+    fn group_layout(&mut self, group: &Group, mut area: Rect, preserve: bool) -> Result<()> {
+        self.presentation.fallbacks.remove(&group.id);
         if group.children.is_empty() {
             return Ok(());
         }
+        if group.preservation == crate::GroupPreservation::Outer {
+            let prior = self
+                .source_bounds(group)
+                .ok_or_else(|| conflict(&group.id, "Outer Group geometry has no observation"))?;
+            if !area.contains(prior) {
+                return Err(conflict(
+                    &group.id,
+                    "Preserved outer Group cannot fit its parent's allocation",
+                ));
+            }
+            area = prior;
+        }
+        if group.preservation == crate::GroupPreservation::Arrangement {
+            return self.preserve_arrangement(group, area, "base", true);
+        }
+        let preserve = preserve || group.preservation == crate::GroupPreservation::Children;
+        self.presentation.group_bounds.insert(group.id.clone(), area);
         let scale = f64::from(self.dpi) / 96.0;
         let prior_variant = self.presentation.variants.get(&group.id);
         let selected_variant = group.variants.iter().find(|variant| {
@@ -1027,8 +1257,56 @@ impl Evaluator<'_> {
         };
         let mut offset = 0;
         let mut index = 0;
-        let total_weight =
-            (0..count).map(|index| ratios.get(index).copied().unwrap_or(1.0)).sum::<f64>();
+        let preserved_sizes: Vec<_> = group
+            .children
+            .iter()
+            .zip(&fixed)
+            .filter(|(_, fixed)| !**fixed)
+            .map(|(node, _)| {
+                if let Node::Placement(placement) = node
+                    && (preserve
+                        || group.preserve_child_sizes
+                        || self
+                            .presentation
+                            .overrides
+                            .get(&placement.window)
+                            .is_some_and(|exception| exception.preserve_size))
+                {
+                    self.snapshot.windows.get(&placement.window).map(|observed| {
+                        if strategy == Strategy::Horizontal {
+                            observed.frame.width
+                        } else {
+                            observed.frame.height
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let fixed_span = preserved_sizes.iter().flatten().sum::<i32>();
+        let total_weight = (0..count)
+            .filter(|index| preserved_sizes[*index].is_none())
+            .map(|index| ratios.get(index).copied().unwrap_or(1.0))
+            .sum::<f64>();
+        let mut flex_used = 0;
+        if matches!(strategy, Strategy::Horizontal | Strategy::Vertical) && total_weight == 0.0 {
+            let span =
+                if strategy == Strategy::Horizontal { available.width } else { available.height }
+                    - gap * count.saturating_sub(1) as i32;
+            let unused = span - fixed_span;
+            if unused < 0 {
+                return Err(conflict(
+                    &group.id,
+                    "Preserved children exhaust the split; allowed wrap/fold may be used",
+                ));
+            }
+            offset = match group.alignment {
+                crate::Alignment::Start => 0,
+                crate::Alignment::Center => unused / 2,
+                crate::Alignment::End => unused,
+            };
+        }
         for (child, fixed) in group.children.iter().zip(fixed) {
             if fixed {
                 self.layout(child, area, variant_id, true)?;
@@ -1043,11 +1321,23 @@ impl Evaluator<'_> {
                         return Err(conflict(&group.id, "Gaps exhaust available content space"));
                     }
                     let weight = ratios.get(index).copied().unwrap_or(1.0);
-                    let length = if index + 1 == count {
-                        span - offset + gap * index as i32
-                    } else {
-                        (f64::from(span) * weight / total_weight).floor() as i32
-                    };
+                    let remaining = span - fixed_span;
+                    if remaining < 0 {
+                        return Err(conflict(
+                            &group.id,
+                            "Hard-preserved split children cannot fit",
+                        ));
+                    }
+                    let length = preserved_sizes[index].unwrap_or_else(|| {
+                        if preserved_sizes[index + 1..].iter().all(Option::is_some) {
+                            remaining - flex_used
+                        } else {
+                            (f64::from(remaining) * weight / total_weight).floor() as i32
+                        }
+                    });
+                    if preserved_sizes[index].is_none() {
+                        flex_used += length;
+                    }
                     let rect = if horizontal {
                         Rect { x: available.x + offset, width: length, ..available }
                     } else {
@@ -1125,7 +1415,19 @@ impl Evaluator<'_> {
             frame.width = (size[0] * scale).round() as i32 + decoration[0];
             frame.height = (size[1] * scale).round() as i32 + decoration[1];
         }
-        if preference.size_override.is_none() {
+        let exception = self.presentation.overrides.get(&placement.window);
+        let locked = effective_protection(
+            self.config,
+            self.runtime,
+            &placement.window,
+            Some(&placement.id),
+            Some(&self.slot.id),
+        )
+        .union(&self.presentation.protection)
+        .geometry_lock;
+        let strict_size =
+            exception.is_some_and(|exception| exception.preserve_size) || preserve || locked;
+        if preference.size_override.is_none() && !strict_size {
             for (formula, axis) in [(&preference.width_formula, 0), (&preference.height_formula, 1)]
             {
                 if let Some(formula) = formula {
@@ -1147,18 +1449,6 @@ impl Evaluator<'_> {
                 }
             }
         }
-        let exception = self.presentation.overrides.get(&placement.window);
-        let locked = effective_protection(
-            self.config,
-            self.runtime,
-            &placement.window,
-            Some(&placement.id),
-            Some(&self.slot.id),
-        )
-        .union(&self.presentation.protection)
-        .geometry_lock;
-        let strict_size =
-            exception.is_some_and(|exception| exception.preserve_size) || preserve || locked;
         if let Some(exception) = exception {
             if exception.dpi != self.dpi || exception.display != self.slot.display {
                 return Err(Error::new(
@@ -1197,6 +1487,20 @@ impl Evaluator<'_> {
             ));
         }
         frame.validate()?;
+        let moving = frame != observed.frame;
+        let resizing = frame.width != observed.frame.width || frame.height != observed.frame.height;
+        let profile = &self.config.windows[&placement.window].capabilities;
+        if moving
+            && (!observed.can_move
+                || !profile.allow_move
+                || resizing && (!observed.can_resize || !profile.allow_resize))
+        {
+            return Err(Error::new(
+                ErrorCode::UnsupportedOperation,
+                "Dependent window rejects movement/resizing profile",
+                &placement.id,
+            ));
+        }
         let slot_area = slot_bounds(self.slot, self.snapshot)?;
         if !slot_area.contains(frame)
             || (!locked

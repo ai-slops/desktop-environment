@@ -331,6 +331,18 @@ fn validate_node(
             }
         }
         Node::Group(group) => {
+            if group.allowed_fallbacks.len() > 3
+                || group.allowed_fallbacks.iter().any(|strategy| {
+                    !matches!(strategy, crate::Strategy::Flow | crate::Strategy::ResponsiveTabs)
+                })
+                || group.strategy == crate::Strategy::SemanticTabs
+                    && !group.allowed_fallbacks.is_empty()
+            {
+                return Err(invalid(
+                    &group.id,
+                    "Unsupported fallback or semantic alternatives cannot be unfolded",
+                ));
+            }
             if let Some(membership) = &group.membership {
                 if membership.generated.len() > 256 || membership.retired.len() > 256 {
                     return Err(invalid(&group.id, "Membership budget exceeded"));

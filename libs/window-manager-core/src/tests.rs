@@ -15,6 +15,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
             allow_hide: true,
             protection: Protection::default(),
             output_protection: OutputProtection::None,
+            capabilities: CapabilityProfile::default(),
         },
     );
     let slot = DisplaySlot {
@@ -84,6 +85,9 @@ fn settled_snapshot(plan: &Plan, snapshot: &Snapshot) -> Snapshot {
             }
             if let Some(visible) = mutation.visible {
                 observed.visible = visible;
+            }
+            if let Some(state) = mutation.show_state {
+                observed.show_state = state;
             }
         }
     }
@@ -590,6 +594,8 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             visit: "game-visit".into(),
             selected_tabs: BTreeMap::new(),
             variants: BTreeMap::new(),
+            group_bounds: BTreeMap::new(),
+            fallbacks: BTreeMap::new(),
             overrides: BTreeMap::new(),
             protection: Protection::default(),
         },
@@ -887,4 +893,169 @@ fn control_fallback_never_uses_public_intersections_or_changes_saved_topology() 
     assert_eq!(config.slots["private-control"].display, "private-monitor");
     snapshot.displays.insert(display.id.clone(), display);
     assert_eq!(control_bounds(&config, &snapshot), expected);
+}
+
+fn two_window_fixture() -> Result<(Configuration, Snapshot, Target)> {
+    let (mut config, mut snapshot, target) = fixture();
+    let mut reference = config.windows["preview"].clone();
+    reference.id = "second".into();
+    config.windows.insert(reference.id.clone(), reference);
+    let mut observed = snapshot.windows["preview"].clone();
+    observed.binding.handle = 100;
+    observed.frame.x = 800;
+    snapshot.windows.insert("second".into(), observed);
+    let group = group_mut(&mut config, &target)?;
+    group.children.push(Node::Placement(Placement::new("second".into(), "second".into())));
+    group.strategy = Strategy::Horizontal;
+    for child in &mut group.children {
+        if let Node::Placement(placement) = child {
+            placement.preferences.clear();
+        }
+    }
+    Ok((config, snapshot, target))
+}
+
+#[test]
+fn all_three_group_preservation_modes_have_distinct_geometry() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    group_mut(&mut config, &target)?.preservation = GroupPreservation::Outer;
+    let outer =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(outer.desired["preview"].allocated.x, 20);
+    assert_eq!(outer.desired["preview"].frame.height, 440);
+    assert_ne!(outer.desired["preview"].frame.width, 620);
+    group_mut(&mut config, &target)?.preservation = GroupPreservation::Children;
+    group_mut(&mut config, &target)?.alignment = Alignment::End;
+    let children =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(children.desired["preview"].frame.width, 620);
+    assert_eq!(children.desired["second"].frame.x + children.desired["second"].frame.width, 2000);
+    assert!(children.mutations.iter().all(|mutation| mutation.move_only));
+    group_mut(&mut config, &target)?.preservation = GroupPreservation::Arrangement;
+    let arrangement =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target))?;
+    assert_eq!(arrangement.desired["second"].frame.x - arrangement.desired["preview"].frame.x, 780);
+    assert_eq!(arrangement.desired["second"].frame.width, 620);
+    Ok(())
+}
+
+#[test]
+fn fixed_size_children_leave_flexible_remainder_and_allowed_fallback_folds() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    let mut request = Request::open(&config, target.clone());
+    request.mode = TransitionMode::KeepSize;
+    request.retain.insert("preview".into());
+    let mixed = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert_eq!(mixed.desired["preview"].frame.width, 620);
+    assert_eq!(mixed.desired["second"].frame.width, 1372);
+    if let Some(slot) = config.slots.get_mut("work") {
+        slot.region[2] = 0.55;
+    }
+    let group = group_mut(&mut config, &target)?;
+    group.allowed_fallbacks = vec![Strategy::ResponsiveTabs];
+    for child in &mut group.children {
+        if let Node::Placement(placement) = child {
+            placement.minimum_client = Some([800.0, 200.0]);
+        }
+    }
+    let folded = plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target))?;
+    assert_eq!(folded.desired.len(), 1);
+    assert!(folded.diagnostics.iter().any(|message| message.contains("allowed fallback")));
+    assert!(
+        folded
+            .mutations
+            .iter()
+            .any(|mutation| mutation.window == "second" && mutation.visible == Some(false))
+    );
+    Ok(())
+}
+
+#[test]
+fn failed_child_rule_keeps_only_its_owned_subtree_and_valid_sibling_progresses() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    let root = group_mut(&mut config, &target)?;
+    let children = std::mem::take(&mut root.children);
+    for (index, child) in children.into_iter().enumerate() {
+        let mut group = Group::new(format!("child-{index}"));
+        group.children.push(child);
+        root.children.push(Node::Group(group));
+    }
+    let prior =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    let observed = settled_snapshot(&prior, &snapshot);
+    let mut runtime = Runtime::default();
+    prior.commit(&mut runtime);
+    let root = group_mut(&mut config, &target)?;
+    for (index, child) in root.children.iter_mut().enumerate() {
+        if let Node::Group(group) = child
+            && let Node::Placement(placement) = &mut group.children[0]
+        {
+            placement
+                .preferences
+                .entry(prior.desired[&placement.window].context.clone())
+                .or_default()
+                .width_formula = Some(
+                if index == 0 { "1 / (available_width - available_width)" } else { "500" }.into(),
+            );
+        }
+    }
+    let mut request = Request::open(&config, target);
+    request.mode = TransitionMode::Restore;
+    let next = plan(&config, &runtime, &observed, &request)?;
+    assert_eq!(next.desired["preview"].frame, observed.windows["preview"].frame);
+    assert!(next.mutations.iter().all(|mutation| mutation.window != "preview"));
+    assert!(
+        next.mutations
+            .iter()
+            .any(|mutation| mutation.window == "second" && mutation.geometry.is_some())
+    );
+    assert!(next.diagnostics.iter().any(|message| message.contains("dependent subtree retained")));
+    Ok(())
+}
+
+#[test]
+fn explicit_rescue_and_show_state_share_scope_validation_and_undo() -> Result<()> {
+    let (mut config, mut snapshot, _) = fixture();
+    snapshot
+        .windows
+        .get_mut("preview")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
+        .frame
+        .x = 9000;
+    let action = WindowAction {
+        id: "rescue".into(),
+        expected_revision: config.revision,
+        window: "preview".into(),
+        slot: "work".into(),
+        action: WindowActionKind::Rescue,
+    };
+    let runtime = Runtime::default();
+    let rescue = plan_window_action(&config, &runtime, &snapshot, &action)?;
+    assert!(rescue.mutations[0].move_only);
+    assert_eq!(rescue.mutations[0].geometry.map(|frame| frame.x), Some(1380));
+    let mut minimize = action;
+    minimize.id = "minimize".into();
+    minimize.action = WindowActionKind::ShowState(ShowState::Minimized);
+    assert!(plan_window_action(&config, &runtime, &snapshot, &minimize).is_err());
+    config
+        .windows
+        .get_mut("preview")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
+        .capabilities
+        .allow_show_state = true;
+    let transition = plan_window_action(&config, &runtime, &snapshot, &minimize)?;
+    let after = settled_snapshot(&transition, &snapshot);
+    let mut current = runtime.clone();
+    transition.commit(&mut current);
+    let undo = UndoRecord::capture(&transition, &runtime, &after, &current)
+        .reverse(&config, &current, &after)?;
+    assert_eq!(undo.mutations[0].show_state, Some(ShowState::Normal));
+    current
+        .claims
+        .insert("preview".into(), Claim { slot: "elsewhere".into(), placement: "new".into() });
+    assert_eq!(
+        plan_window_action(&config, &current, &snapshot, &minimize).err().map(|error| error.code),
+        Some(ErrorCode::ClaimConflict)
+    );
+    Ok(())
 }

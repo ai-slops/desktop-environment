@@ -667,6 +667,11 @@ impl Manager {
                     }
                 });
             ui.small("비공개 지정은 캡처 안전 증명이 아닙니다. 검증 공급자가 없으면 출력 증거는 unknown입니다.");
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut edit.capabilities.allow_move, "이 앱 이동 허용");
+                ui.checkbox(&mut edit.capabilities.allow_resize, "크기 변경 허용");
+                ui.checkbox(&mut edit.capabilities.allow_show_state, "상태 복원 호환성 확인됨");
+            });
             ui.checkbox(&mut edit.allow_hide, "이 앱의 숨김/복구 호환성을 확인했음 (숨김 허용)");
             ui.horizontal(|ui| {
                 ui.label("태그");
@@ -687,6 +692,49 @@ impl Manager {
         {
             self.send(Command::AttentionTarget(window.clone(), target));
         }
+        ui.horizontal_wrapped(|ui| {
+            for (label, kind) in [
+                ("오프스크린 창 구조 미리보기", window_manager_core::WindowActionKind::Rescue),
+                ("선택 창 표시 미리보기", window_manager_core::WindowActionKind::Reveal),
+                (
+                    "보통 상태 복원 미리보기",
+                    window_manager_core::WindowActionKind::ShowState(
+                        window_manager_core::ShowState::Normal,
+                    ),
+                ),
+                (
+                    "최소화 미리보기",
+                    window_manager_core::WindowActionKind::ShowState(
+                        window_manager_core::ShowState::Minimized,
+                    ),
+                ),
+                (
+                    "최대화 미리보기 (활성화 가능)",
+                    window_manager_core::WindowActionKind::ShowState(
+                        window_manager_core::ShowState::Maximized,
+                    ),
+                ),
+            ] {
+                if ui.add_enabled(!self.applying, egui::Button::new(label)).clicked()
+                    && let Some(window) = &self.selected_window
+                {
+                    let id = new_id("action");
+                    self.latest_request = Some(id.clone());
+                    self.preview = None;
+                    self.apply_when_previewed = false;
+                    self.send(Command::WindowAction(
+                        self.config.clone(),
+                        window_manager_core::WindowAction {
+                            id,
+                            expected_revision: self.config.revision,
+                            window: window.clone(),
+                            slot: self.selected_slot.clone(),
+                            action: kind,
+                        },
+                    ));
+                }
+            }
+        });
         if ui.button("참조 설정 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -711,6 +759,7 @@ impl Manager {
             allow_hide: false,
             protection: Protection::default(),
             output_protection: window_manager_core::OutputProtection::None,
+            capabilities: window_manager_core::CapabilityProfile::default(),
         });
         let Some(view) = draft.views.get_mut(&self.selected_view) else {
             return;
@@ -1415,6 +1464,50 @@ fn tree_editor(
                         ui.text_edit_singleline(&mut group.gap);
                         ui.checkbox(&mut group.preserve_child_sizes, "자식 크기 유지");
                     });
+                    egui::ComboBox::from_id_salt((&group.id, "preservation"))
+                        .selected_text(format!("그룹 보존: {:?}", group.preservation))
+                        .show_ui(ui, |ui| {
+                            for mode in [
+                                window_manager_core::GroupPreservation::Fill,
+                                window_manager_core::GroupPreservation::Outer,
+                                window_manager_core::GroupPreservation::Children,
+                                window_manager_core::GroupPreservation::Arrangement,
+                            ] {
+                                ui.selectable_value(
+                                    &mut group.preservation,
+                                    mode,
+                                    format!("{mode:?}"),
+                                );
+                            }
+                        });
+                    egui::ComboBox::from_id_salt((&group.id, "alignment"))
+                        .selected_text(format!("여백 정렬: {:?}", group.alignment))
+                        .show_ui(ui, |ui| {
+                            for alignment in [
+                                window_manager_core::Alignment::Start,
+                                window_manager_core::Alignment::Center,
+                                window_manager_core::Alignment::End,
+                            ] {
+                                ui.selectable_value(
+                                    &mut group.alignment,
+                                    alignment,
+                                    format!("{alignment:?}"),
+                                );
+                            }
+                        });
+                    if group.strategy != Strategy::SemanticTabs {
+                        let mut fallback = !group.allowed_fallbacks.is_empty();
+                        if ui
+                            .checkbox(&mut fallback, "맞지 않으면 줄 바꿈 → 반응형 탭 순서로 시도")
+                            .changed()
+                        {
+                            group.allowed_fallbacks = if fallback {
+                                vec![Strategy::Flow, Strategy::ResponsiveTabs]
+                            } else {
+                                Vec::new()
+                            };
+                        }
+                    }
                     if group.strategy == Strategy::Grid {
                         ui.horizontal(|ui| {
                             ui.label("열 수식");
@@ -1525,6 +1618,14 @@ fn tree_editor(
                         }
                     } else if let Some(index) = reorder {
                         group.children.swap(index, index - 1);
+                        if group.ratios.len() > index {
+                            group.ratios.swap(index, index - 1);
+                        }
+                        for variant in &mut group.variants {
+                            if variant.ratios.len() > index {
+                                variant.ratios.swap(index, index - 1);
+                            }
+                        }
                     }
                 });
         }

@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use window_manager_core::{
-    Binding, Configuration, Desired, Error, ErrorCode, Id, ManualEdit, ObservedWindow, Plan,
-    Request, Result, Runtime, Snapshot, Status, TransitionResult, UndoRecord, WindowResult,
-    atomic_write, plan,
+    Binding, Configuration, Error, ErrorCode, Id, ManualEdit, ObservedWindow, Plan, Request,
+    Result, Runtime, Snapshot, Status, TransitionResult, UndoRecord, WindowResult, atomic_write,
+    plan,
 };
 use windows_window_manager::{Candidate, Journal, NativeEvent, RecoveryEntry};
 
@@ -17,6 +17,7 @@ pub enum Command {
     Refresh(Configuration),
     Bind(Configuration, Id, Candidate),
     Preview(Configuration, Request),
+    WindowAction(Configuration, window_manager_core::WindowAction),
     Apply(Configuration, Plan),
     Undo(Id),
     Promote(Id, Id, bool, bool),
@@ -75,7 +76,6 @@ struct State {
     events: Sender<Event>,
     undo: Vec<UndoRecord>,
     undoing: Option<Id>,
-    active_geometry: BTreeMap<Id, Desired>,
     gestures: BTreeMap<Id, ObservedWindow>,
 }
 
@@ -151,9 +151,14 @@ impl State {
         }
         journal.save(&self.path)?;
         self.journal = journal;
+        let submission = windows_window_manager::submit_many(&plan.mutations);
         let mut outcomes = Vec::new();
         for mutation in &plan.mutations {
-            let error = windows_window_manager::submit(mutation).err();
+            let error = submission
+                .results
+                .get(&mutation.window)
+                .and_then(|result| result.as_ref().err())
+                .cloned();
             outcomes.push(WindowResult {
                 window: mutation.window.clone(),
                 submitted: error.is_none(),
@@ -173,6 +178,7 @@ impl State {
                         observed.binding == mutation.binding
                             && mutation.geometry.is_none_or(|frame| observed.frame == frame)
                             && mutation.visible.is_none_or(|visible| observed.visible == visible)
+                            && mutation.show_state.is_none_or(|state| observed.show_state == state)
                             && (!plan
                                 .desired
                                 .get(&mutation.window)
@@ -205,8 +211,6 @@ impl State {
             });
             if component_settled {
                 component.commit(&mut self.runtime);
-                self.active_geometry.retain(|_, desired| &desired.slot != slot);
-                self.active_geometry.extend(component.desired.clone());
                 if self.undoing.as_ref() != Some(&plan.id) {
                     self.undo.push(UndoRecord::capture(
                         &component,
@@ -222,6 +226,7 @@ impl State {
                 self.runtime.suspended.insert(slot.clone());
                 self.runtime.claims.retain(|_, claim| &claim.slot != slot);
                 self.runtime.presentations.remove(slot);
+                self.runtime.geometry.retain(|_, desired| &desired.slot != slot);
                 *self.runtime.generations.entry(slot.clone()).or_default() += 1;
                 failed_windows
                     .extend(component.mutations.iter().map(|mutation| mutation.window.clone()));
@@ -263,7 +268,7 @@ impl State {
             rendering_readiness: "unknown".into(),
         };
         // Redacted diagnostics: opaque IDs, operation counts, scope, revisions; no titles/screenshots.
-        let record = serde_json::json!({"request": plan.id, "scope": plan.scope, "configuration_revision": plan.config_revision, "topology_revision": plan.topology_revision, "impact": plan.impact, "result": result});
+        let record = serde_json::json!({"request": plan.id, "scope": plan.scope, "configuration_revision": plan.config_revision, "topology_revision": plan.topology_revision, "impact": plan.impact, "submission": {"batched_windows": submission.batched_windows, "individual_windows": submission.individual_windows}, "result": result});
         let log_path = self.path.with_extension("last-transition.json");
         atomic_write(
             &log_path,
@@ -305,7 +310,6 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
         events,
         undo: Vec::new(),
         undoing: None,
-        active_geometry: BTreeMap::new(),
         gestures: BTreeMap::new(),
     };
     if let Err(error) = state.refresh() {
@@ -340,7 +344,7 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                         && let Some(before) = state.gestures.remove(&id)
                     {
                         let _ = state.refresh();
-                        if let Some(desired) = state.active_geometry.get(&id)
+                        if let Some(desired) = state.runtime.geometry.get(&id)
                             && let Some(presentation) =
                                 state.runtime.presentations.get(&desired.slot)
                             && let Some(after) = state.snapshot.windows.get(&id)
@@ -421,6 +425,19 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                     }
                 }
             }
+            Command::WindowAction(config, action) => {
+                state.config = config;
+                state.refresh().and_then(|()| {
+                    let plan = window_manager_core::plan_window_action(
+                        &state.config,
+                        &state.runtime,
+                        &state.snapshot,
+                        &action,
+                    )?;
+                    let _ = state.events.send(Event::Preview(Box::new(plan)));
+                    Ok(())
+                })
+            }
             Command::Preview(config, request) => {
                 state.config = config;
                 state.refresh().and_then(|()| {
@@ -483,7 +500,11 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                     let _ = state.events.send(Event::Notice(diagnostics.join("\n")));
                     state.journal = Journal::load(&state.path)?;
                     state.runtime.claims.clear();
+                    for slot in state.runtime.presentations.keys() {
+                        *state.runtime.generations.entry(slot.clone()).or_default() += 1;
+                    }
                     state.runtime.presentations.clear();
+                    state.runtime.geometry.clear();
                     state.refresh()?;
                     state.publish();
                     Ok(())

@@ -38,6 +38,17 @@ pub fn validate_binding(_: &Binding) -> Result<()> {
 pub fn submit(_: &Mutation) -> Result<()> {
     unsupported()
 }
+#[must_use]
+pub fn submit_many(mutations: &[Mutation]) -> crate::SubmissionReport {
+    crate::SubmissionReport {
+        results: mutations
+            .iter()
+            .map(|mutation| (mutation.window.clone(), unsupported()))
+            .collect(),
+        batched_windows: 0,
+        individual_windows: mutations.len(),
+    }
+}
 pub fn focus(_: &Binding) -> Result<()> {
     unsupported()
 }
