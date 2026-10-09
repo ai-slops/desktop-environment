@@ -1,0 +1,28 @@
+[package]
+name = "window-manager"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+ui-smoke = ["dep:image"]
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+window-manager-core = { path = "../../libs/window-manager-core" }
+windows-window-manager = { path = "../../platforms/windows-window-manager" }
+eframe = { version = "0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows.workspace = true
+

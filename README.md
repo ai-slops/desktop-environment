@@ -10,11 +10,20 @@ The workspace provides conventions, shared linting, and a folder layout for GUI 
 
 Concrete utilities now included:
 
+- `window-manager`: independent saved arrangements of existing Windows application windows, scoped transitions, nested groups, preservation previews, and independent visibility recovery
 - `desktop-control`: a shared Windows GUI for saving audio/display presets and managing multiple mirror windows
 - `display-relay`: mirror one Windows display into a local control window
 - `audio-output-router`: clone the audio of one Windows output device into another output device
 
 ## Saved-settings GUI
+
+Run `just window-manager` or `cargo run -p window-manager` for window management.
+Create a monitor region under **화면 / 영역**, add existing windows under **창 목록**,
+and commit **전환 미리보기 → 계획 적용**. Startup and editing never auto-apply layouts.
+This is a Windows feasibility implementation with a usable manual interface; the
+complete P1 acceptance/compatibility gate is still open. See the
+[window-manager guide and coverage](docs/window-manager.md) and the
+[provided specification](docs/window-management-system-specification.md).
 
 Run `just desktop-control` (or `mise run desktop-control`) to build both tools and open
 the control panel. Choose audio outputs and a display, enable the tools you need,

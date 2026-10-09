@@ -14,6 +14,14 @@ run = "mise install"
 description = "Build both tools and open the saved-settings GUI"
 run = "just desktop-control"
 
+[tasks.window-manager]
+description = "Open the multi-view window manager"
+run = "cargo run -p window-manager"
+
+[tasks.window-recovery]
+description = "Independently reveal manager-hidden windows"
+run = "cargo run -p window-manager -- --recover"
+
 [tasks.fmt]
 description = "Format the entire workspace"
 run = "cargo fmt --all"
