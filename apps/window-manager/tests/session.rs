@@ -183,6 +183,15 @@ fn structural_session_edits_require_revision_and_can_be_undone_without_native_ef
         ),
         ("undo-stale", serde_json::json!({"kind":"configuration_undo","expected_revision":0})),
         ("undo", serde_json::json!({"kind":"configuration_undo","expected_revision":1})),
+        (
+            "capture-stale",
+            serde_json::json!({"kind":"capture_view","expected_revision":0,"workspace":"missing","slot":"missing","windows":["missing"],"name":"capture"}),
+        ),
+        (
+            "navigate-stale",
+            serde_json::json!({"kind":"navigate","expected_revision":0,"view":view_id,"placement":"missing","slot":"missing"}),
+        ),
+        ("placements-missing", serde_json::json!({"kind":"placements","window":"missing"})),
     ] {
         serde_json::to_writer(&mut input, &serde_json::json!({"id":id,"command":command}))?;
         input.write_all(b"\n")?;
@@ -200,6 +209,9 @@ fn structural_session_edits_require_revision_and_can_be_undone_without_native_ef
     assert_eq!(replies[3]["error"]["code"], "INVALID_CONFIGURATION");
     assert_eq!(replies[4]["error"]["code"], "STALE_REVISION");
     assert_eq!(replies[5]["result"]["revision"], 2);
+    assert_eq!(replies[6]["error"]["code"], "STALE_REVISION");
+    assert_eq!(replies[7]["error"]["code"], "STALE_REVISION");
+    assert_eq!(replies[8]["error"]["code"], "TARGET_MISSING");
     config.revision = 2;
     assert_eq!(serde_json::to_value(config)?, serde_json::to_value(Configuration::load(&path)?)?);
     let journal = windows_window_manager::Journal::load(&path.with_extension("recovery.json"))?;

@@ -2607,6 +2607,9 @@ fn manual_onboarding_captures_current_arrangement_without_rules_or_native_mutati
     assert_eq!(planned.desired["preview"].frame, snapshot.windows["preview"].frame);
     assert!(config.windows["preview"].tags.is_empty());
     assert!(group_mut(&mut config, &target)?.parameters.is_empty());
+    let export = serde_json::to_string(&LayoutPackage::from_view(&config.views[&target.view]))
+        .unwrap_or_default();
+    assert!(!export.contains(&config.windows["preview"].alias));
     let revision = config.revision;
     let bytes = serde_json::to_vec(&config).unwrap_or_default();
     let mut absent = snapshot.clone();

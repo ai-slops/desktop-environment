@@ -23,7 +23,10 @@ and commit **전환 미리보기 → 계획 적용**. Startup and editing never 
 This is a Windows feasibility implementation with a usable manual interface; the
 complete P1 acceptance/compatibility gate is still open. See the
 [window-manager guide and coverage](docs/window-manager.md) and the
-[provided specification](docs/window-management-system-specification.md).
+[provided specification](docs/window-management-system-specification.md). The
+[acceptance/support matrix](docs/window-manager-conformance.md) and
+[reference measurements](docs/window-manager-performance.md) identify tested fixtures
+and remaining application/hardware gates.
 
 Run `just desktop-control` (or `mise run desktop-control`) to build both tools and open
 the control panel. Choose audio outputs and a display, enable the tools you need,

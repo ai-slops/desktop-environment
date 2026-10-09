@@ -248,6 +248,10 @@ impl Manager {
         if std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_err() {
             return;
         }
+        if self.page == 0 {
+            self.search = "__no_live_inventory_in_smoke_fixture__".into();
+            self.selected_window = self.config.windows.keys().next().cloned();
+        }
         if self.page == 3 {
             self.package = self
                 .config
@@ -736,7 +740,7 @@ impl Manager {
                 continue;
             }
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .selectable_label(
                         self.selected_window.as_ref() == Some(&reference.id),
@@ -810,7 +814,7 @@ impl Manager {
         }
         ui.horizontal_wrapped(|ui| {
             ui.label("현재 창 배치 이름"); ui.text_edit_singleline(&mut self.name);
-            if ui.add_enabled(!self.capture_windows.is_empty(), egui::Button::new("선택한 창의 현재 배치를 새 View로 저장")).clicked()
+            if ui.add_enabled(!self.capture_windows.is_empty(), egui::Button::new("선택한 창의 현재 배치를 새 배치로 저장")).clicked()
                 && let Some(workspace) = self.config.views.get(&self.selected_view).map(|view| view.workspace.clone())
             {
                 let mut draft = self.config.clone();
@@ -929,7 +933,7 @@ impl Manager {
         let Some(window) = self.selected_window.clone() else {
             return;
         };
-        egui::CollapsingHeader::new("선택한 실제 창의 모든 배치 위치 / 탐색").show(ui, |ui| {
+        egui::CollapsingHeader::new("선택한 실제 창의 모든 배치 위치 / 탐색").default_open(cfg!(feature = "ui-smoke") && std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_ok()).show(ui, |ui| {
             ui.label("각 참조는 한 번 표시됩니다. 아래 위치 선택은 미리보기만 준비하며, 계획 적용으로 확정합니다.");
             for location in window_manager_core::placement_locations(&self.config, &window) {
                 ui.horizontal_wrapped(|ui| {

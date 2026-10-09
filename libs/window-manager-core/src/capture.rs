@@ -33,7 +33,7 @@ impl Configuration {
         let mut group = Group::new("현재 창 배치".into());
         group.strategy = Strategy::Free;
         for window in windows {
-            let reference = self.windows.get(window).ok_or_else(|| {
+            self.windows.get(window).ok_or_else(|| {
                 Error::new(ErrorCode::TargetMissing, "Capture reference missing", window)
             })?;
             let observed = snapshot.windows.get(window).ok_or_else(|| {
@@ -67,7 +67,8 @@ impl Configuration {
                     window,
                 ));
             }
-            let mut placement = Placement::new(window.clone(), reference.alias.clone());
+            let mut placement =
+                Placement::new(window.clone(), format!("window-{}", group.children.len() + 1));
             placement.preferences.insert(
                 context_key(&slot, "base"),
                 Preference {

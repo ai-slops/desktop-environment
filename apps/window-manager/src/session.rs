@@ -31,6 +31,22 @@ enum SessionCommand {
     },
     Inventory {},
     MonitorInventory {},
+    Placements {
+        window: Id,
+    },
+    Navigate {
+        expected_revision: u64,
+        view: Id,
+        placement: Id,
+        slot: Id,
+    },
+    CaptureView {
+        expected_revision: u64,
+        workspace: Id,
+        slot: Id,
+        windows: BTreeSet<Id>,
+        name: String,
+    },
     ConfirmMonitor {
         epoch: Id,
         device: String,
@@ -101,6 +117,7 @@ impl SessionCommand {
                 | Self::Configuration {}
                 | Self::Inventory {}
                 | Self::MonitorInventory {}
+                | Self::Placements { .. }
                 | Self::Events { .. }
                 | Self::Simulate { .. }
         )
@@ -112,6 +129,7 @@ impl SessionCommand {
             | Self::Configuration {}
             | Self::Inventory {}
             | Self::MonitorInventory {}
+            | Self::Placements { .. }
             | Self::Events { .. } => true,
             Self::ProviderRegister { .. }
             | Self::ProviderPublish { .. }
@@ -256,6 +274,41 @@ impl Session {
         command.authorize(self.control, self.providers)?;
         match command {
             SessionCommand::Configuration {} => Ok(json!(self.config)),
+            SessionCommand::Placements { window } => {
+                if !self.config.windows.contains_key(&window) {
+                    return Err(Error::new(ErrorCode::TargetMissing, "Reference missing", window));
+                }
+                let locations = window_manager_core::placement_locations(&self.config, &window);
+                Ok(json!(locations.iter().map(|location| json!({"view":location.view,"root":location.root,"placement":location.placement,"path":location.path})).collect::<Vec<_>>()))
+            }
+            SessionCommand::Navigate { expected_revision, view, placement, slot } => {
+                if expected_revision != self.config.revision {
+                    return Err(Error::new(
+                        ErrorCode::StaleRevision,
+                        "Configuration revision changed",
+                        view,
+                    ));
+                }
+                let request =
+                    window_manager_core::placement_request(&self.config, &view, &placement, &slot)?;
+                self.preview(Command::Preview(self.config.clone(), request))
+            }
+            SessionCommand::CaptureView { expected_revision, workspace, slot, windows, name } => {
+                if expected_revision != self.config.revision {
+                    return Err(Error::new(
+                        ErrorCode::StaleRevision,
+                        "Configuration revision changed",
+                        workspace,
+                    ));
+                }
+                self.exchange(Command::Refresh(self.config.clone()))?;
+                let mut draft = self.config.clone();
+                let view =
+                    draft.save_observed_view(&workspace, &slot, &windows, name, &self.snapshot)?;
+                self.save_configuration(draft)?;
+                Ok(json!({"view":view,"revision":self.config.revision}))
+            }
+
             SessionCommand::MonitorInventory {} => {
                 self.exchange(Command::Refresh(self.config.clone()))?;
                 Ok(json!({"epoch":self.monitor_epoch,"monitors":self.monitors}))
@@ -540,6 +593,29 @@ mod tests {
     #[test]
     fn startup_grants_and_strict_commands_cannot_be_widened_by_payloads() {
         assert!(SessionCommand::Snapshot {}.authorize(false, false).is_ok());
+        assert!(SessionCommand::Placements { window: "w".into() }.authorize(false, false).is_ok());
+        assert!(
+            SessionCommand::Navigate {
+                expected_revision: 0,
+                view: "v".into(),
+                placement: "p".into(),
+                slot: "s".into()
+            }
+            .authorize(false, true)
+            .is_err()
+        );
+        assert!(
+            SessionCommand::CaptureView {
+                expected_revision: 0,
+                workspace: "workspace".into(),
+                slot: "s".into(),
+                windows: BTreeSet::new(),
+                name: "n".into()
+            }
+            .authorize(false, false)
+            .is_err()
+        );
+
         assert!(SessionCommand::Recover {}.authorize(false, true).is_err());
         assert!(
             SessionCommand::ProviderDisconnect { provider: "p".into() }
