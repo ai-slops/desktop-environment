@@ -184,6 +184,7 @@ pub struct Impact {
 pub struct Plan {
     pub id: Id,
     pub mode: Option<TransitionMode>,
+    pub planning_us: Option<u64>,
     pub config_revision: u64,
     pub topology_revision: u64,
     pub scope: BTreeSet<Id>,
@@ -509,6 +510,7 @@ fn plan_pass(
     let mut result = Plan {
         id: request.id.clone(),
         mode: Some(request.mode),
+        planning_us: None,
         config_revision: config.revision,
         topology_revision: snapshot.topology_revision,
         scope: request.scope.clone(),

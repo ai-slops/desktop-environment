@@ -151,6 +151,7 @@ pub fn plan_window_action(
     }
     let mut result = Plan {
         mode: None,
+        planning_us: None,
         id: if action.id.is_empty() { new_id("action") } else { action.id.clone() },
         config_revision: config.revision,
         topology_revision: snapshot.topology_revision,

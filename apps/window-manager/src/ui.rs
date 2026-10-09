@@ -227,7 +227,8 @@ impl Manager {
         let page = 0;
         let package_path =
             path.with_file_name("layout-package.json").to_string_lossy().into_owned();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        #[allow(unused_mut)] // Smoke fixtures prepare a pure preview after normal initialization.
+        let mut manager = Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             expansion_node: String::new(),
             expansion_slots: BTreeSet::new(),
@@ -235,6 +236,41 @@ impl Manager {
             drag_mode: DragMode::Move, spatial_selection: BTreeSet::new(), structure_preview: None,
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
+        };
+        #[cfg(feature = "ui-smoke")]
+        manager.prepare_smoke();
+        manager
+    }
+    #[cfg(feature = "ui-smoke")]
+    fn prepare_smoke(&mut self) {
+        if std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_err() {
+            return;
+        }
+        if self.page == 3 {
+            self.package = self
+                .config
+                .views
+                .get(&self.selected_view)
+                .map(window_manager_core::LayoutPackage::from_view);
+        }
+        if self.page == 1
+            && std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_ok_and(|panel| panel == "formula")
+            && let Some(target) = self.target()
+        {
+            let input = window_manager_core::Simulation {
+                target,
+                width: 1280,
+                height: 800,
+                dpi: 96,
+                group: Some(self.selected_group.clone()),
+                count: Some(16),
+                minimum: None,
+                fixed_children: false,
+                missing: BTreeSet::new(),
+                display_present: true,
+            };
+            self.simulation_report = window_manager_core::simulate(&self.draft, &input).ok();
+            self.simulation = Some(input);
         }
     }
     fn send(&mut self, command: Command) {
@@ -1088,6 +1124,20 @@ impl Manager {
     }
     fn editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("배치 편집");
+        #[cfg(feature = "ui-smoke")]
+        if let Ok(panel) = std::env::var("WINDOW_MANAGER_SMOKE_PANEL") {
+            match panel.as_str() {
+                "formula" => {
+                    self.formula_tools(ui);
+                    return;
+                }
+                "spatial" => {
+                    self.spatial_tools(ui);
+                    return;
+                }
+                _ => {}
+            }
+        }
         ui.label("구조 저장은 실제 창을 이동하지 않습니다. 미리보기와 적용으로 반영하세요.");
         if let Some(view) = self.config.views.get(&self.selected_view) {
             let mut placements = Vec::new();
@@ -1271,7 +1321,7 @@ impl Manager {
 
     #[allow(clippy::too_many_lines)] // Drag previews expose addressed source/target paths before changing a draft.
     fn spatial_tools(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("창·그룹·탭 드래그 / 선택 묶기").show(ui, |ui| {
+        egui::CollapsingHeader::new("창·그룹·탭 드래그 / 선택 묶기").default_open(cfg!(feature = "ui-smoke") && std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_ok()).show(ui, |ui| {
             ui.label("아래 항목 전체를 대상 그룹에 드래그합니다. 드롭은 검토할 구조 초안만 준비합니다.");
             let mut copy = self.drag_mode == DragMode::Copy; if ui.checkbox(&mut copy, "드롭으로 독립 복사 (기본은 이동)").changed() { self.drag_mode = if copy { DragMode::Copy } else { DragMode::Move }; }
             let mut nodes = Vec::new();
@@ -1319,7 +1369,7 @@ impl Manager {
 
     #[allow(clippy::too_many_lines)] // Scoped declarations and synthetic inputs share an explicit no-native commit boundary.
     fn formula_tools(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("수식 문맥·매개변수·합성 미리보기").show(ui, |ui| {
+        egui::CollapsingHeader::new("수식 문맥·매개변수·합성 미리보기").default_open(cfg!(feature = "ui-smoke") && std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_ok()).show(ui, |ui| {
             let mut nodes = Vec::new();
             if let Some(view) = self.draft.views.get(&self.selected_view) { for (role, root) in &view.roots { collect_nodes(root, &view.id, role, &mut nodes); } }
             ui.label(format!("편집 범위: {}", nodes.iter().find(|(address, _, _)| address.node == self.selected_group).map_or("그룹을 선택하세요", |(_, path, _)| path.as_str())));
@@ -1422,8 +1472,20 @@ impl Manager {
                 package.dependencies
             ));
             for (key, expression) in &mut package.required_parameters {
-                ui.horizontal(|ui| {
-                    ui.label(key);
+                ui.horizontal_wrapped(|ui| {
+                    let label = key
+                        .rsplit_once(':')
+                        .and_then(|(id, parameter)| {
+                            package.roots.values().find_map(|root| root.find(id)).and_then(|node| {
+                                if let Node::Group(group) = node {
+                                    Some(format!("{} / {parameter}", group.name))
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_else(|| key.clone());
+                    ui.label(label).on_hover_text(key);
                     if ui.text_edit_singleline(expression).changed()
                         && let Some((group_id, parameter)) = key.rsplit_once(':')
                     {
@@ -2572,13 +2634,28 @@ fn draw_rectangles<'a>(
                 Color32::from_rgb(37, 64, 96)
             },
         );
-        painter.text(
-            tile.center(),
-            egui::Align2::CENTER_CENTER,
-            config.windows.get(&desired.window).map_or("창", |window| window.alias.as_str()),
+        let label =
+            config.windows.get(&desired.window).map_or("창", |window| window.alias.as_str());
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            label.into(),
             egui::FontId::proportional(12.0),
             Color32::WHITE,
         );
+        job.wrap.max_width = (tile.width() - 4.0).max(0.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let text = painter.layout_job(job);
+        painter.with_clip_rect(painter.clip_rect().intersect(tile.shrink(2.0))).galley(
+            tile.center() - text.size() * 0.5,
+            text,
+            Color32::WHITE,
+        );
+        ui.interact(
+            tile,
+            egui::Id::new(("preview-window", &desired.placement)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(label);
     }
 }
 

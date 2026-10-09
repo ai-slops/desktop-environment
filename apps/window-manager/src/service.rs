@@ -9,6 +9,10 @@ use window_manager_core::{
 };
 use windows_window_manager::{Candidate, Journal, NativeEvent, RecoveryEntry};
 
+fn micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
 pub fn journal_path(path: &Path) -> PathBuf {
     path.with_extension("recovery.json")
 }
@@ -504,8 +508,10 @@ impl State {
                     if !scheduler.ready(&slot, fingerprint, self.snapshot.now_ms) {
                         continue;
                     }
+                    let started = Instant::now();
                     match plan_independent(&self.config, &self.runtime, &self.snapshot, &request) {
-                        Ok(plan) => {
+                        Ok(mut plan) => {
+                            plan.planning_us = Some(micros(started.elapsed()));
                             let metadata_changed =
                                 plan.presentations.iter().any(|(slot, presentation)| {
                                     self.runtime.presentations.get(slot) != Some(presentation)
@@ -581,6 +587,7 @@ impl State {
             }));
             return Ok(());
         }
+        let execution_started = Instant::now();
         // Persist every prior visible state BEFORE submitting the first hide.
         let mut journal = self.journal.clone();
         for mutation in &plan.mutations {
@@ -597,7 +604,10 @@ impl State {
         }
         journal.save(&self.path)?;
         self.journal = journal;
+        let native_started = Instant::now();
         let submission = windows_window_manager::submit_many(&plan.mutations);
+        let native_api_us = micros(native_started.elapsed());
+        let submission_us = micros(execution_started.elapsed());
         let mut outcomes = Vec::new();
         for mutation in &plan.mutations {
             let error = submission.results.get(&mutation.window).map_or_else(
@@ -718,6 +728,9 @@ impl State {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        let settlement_elapsed_us = micros(execution_started.elapsed());
+        let geometry_settlement_us =
+            outcomes.iter().all(|outcome| outcome.settled).then_some(settlement_elapsed_us);
         // Validate all domains against the same pre-commit runtime so independent
         // generation increments cannot invalidate another domain's successful result.
         let mut verified = BTreeMap::new();
@@ -842,6 +855,7 @@ impl State {
             let _ = windows_window_manager::recover_selected(&self.path, Some(&failed_windows));
             self.journal = Journal::load(&self.path)?;
         }
+        let focus_started = Instant::now();
         // Focus succeeds independently of unrelated failed components.
         for (mutation, outcome) in plan.mutations.iter().zip(&mut outcomes) {
             if mutation.focus && outcome.settled {
@@ -864,7 +878,7 @@ impl State {
             rendering_readiness: "unknown".into(),
         };
         // Redacted diagnostics: opaque IDs, operation counts, scope, revisions; no titles/screenshots.
-        let record = serde_json::json!({"request": plan.id, "scope": plan.scope, "configuration_revision": plan.config_revision, "topology_revision": plan.topology_revision, "impact": plan.impact, "submission": {"batched_windows": submission.batched_windows, "individual_windows": submission.individual_windows}, "result": result});
+        let record = serde_json::json!({"request": plan.id, "scope": plan.scope, "mode": plan.mode, "affected_windows": plan.mutations.iter().map(|mutation| &mutation.window).collect::<Vec<_>>(), "fallback_reasons": plan.diagnostics, "timings_us": {"planning":plan.planning_us,"submission":submission_us,"native_api":native_api_us,"settlement_elapsed":settlement_elapsed_us,"geometry_settlement":geometry_settlement_us,"focus":micros(focus_started.elapsed())}, "configuration_revision": plan.config_revision, "topology_revision": plan.topology_revision, "impact": plan.impact, "submission": {"batched_windows": submission.batched_windows, "individual_windows": submission.individual_windows}, "result": result});
         let log_path = self.path.with_extension("last-transition.json");
         atomic_write(
             &log_path,
@@ -1072,12 +1086,14 @@ fn run(
             Command::WindowAction(config, action) => {
                 state.config = config;
                 state.refresh().and_then(|()| {
-                    let plan = window_manager_core::plan_window_action(
+                    let started = Instant::now();
+                    let mut plan = window_manager_core::plan_window_action(
                         &state.config,
                         &state.runtime,
                         &state.snapshot,
                         &action,
                     )?;
+                    plan.planning_us = Some(micros(started.elapsed()));
                     let _ = state.events.send(Event::Preview(Box::new(plan)));
                     Ok(())
                 })
@@ -1085,8 +1101,10 @@ fn run(
             Command::Preview(config, request) => {
                 state.config = config;
                 state.refresh().and_then(|()| {
-                    let plan =
+                    let started = Instant::now();
+                    let mut plan =
                         plan_independent(&state.config, &state.runtime, &state.snapshot, &request)?;
+                    plan.planning_us = Some(micros(started.elapsed()));
                     let _ = state.events.send(Event::Preview(Box::new(plan)));
                     Ok(())
                 })
@@ -1099,8 +1117,10 @@ fn run(
                 let record = state.undo.last().ok_or_else(|| {
                     Error::new(ErrorCode::TargetMissing, "No native transition to undo", &id)
                 })?;
+                let started = Instant::now();
                 let mut reversed =
                     record.reverse(&state.config, &state.runtime, &state.snapshot)?;
+                reversed.planning_us = Some(micros(started.elapsed()));
                 reversed.id.clone_from(&id);
                 state.undoing = Some(id);
                 let _ = state.events.send(Event::Preview(Box::new(reversed)));

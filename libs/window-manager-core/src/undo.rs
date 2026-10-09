@@ -86,6 +86,7 @@ impl UndoRecord {
         let mut result = self.plan.clone();
         result.id = new_id("undo");
         result.mode = None;
+        result.planning_us = None;
         result.config_revision = config.revision;
         result.generations = self.generations.clone();
         result.expected = self.after.clone();
