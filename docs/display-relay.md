@@ -51,6 +51,16 @@ Open the mirror fullscreen on another monitor:
 cargo run -p display-relay -- mirror \\.\DISPLAY3 --fullscreen
 ```
 
+Windowed size, position, and maximized state are automatically remembered per source
+display. Minimized and fullscreen bounds do not overwrite the normal window placement.
+The CLI uses `%LOCALAPPDATA%\DesktopEnvironment\presets.json.relay-window.json` by
+default; the GUI supplies the file associated with its selected configuration.
+For a separate layout file:
+
+```powershell
+cargo run -p display-relay -- mirror \\.\DISPLAY3 --window-state-file .\relay-windows.json
+```
+
 ## Important constraints
 
 - The target output still needs to exist as a Windows desktop display. Many HDMI dummy plugs and capture devices do this well; pure EDID-less sinks do not.

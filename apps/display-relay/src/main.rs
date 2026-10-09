@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
+use desktop_presets::{WindowStateFile, default_store_path, window_state_path};
 use display_relay_core::RelayConfig;
-use std::ffi::c_void;
+use std::ffi::{OsString, c_void};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -50,7 +52,7 @@ fn main() -> Result<()> {
     let command = Command::from_env()?;
     match command {
         Command::List => list_displays(),
-        Command::Mirror(config) => run_relay(config),
+        Command::Mirror { config, window_state_file } => run_relay(config, window_state_file),
     }
 }
 
@@ -70,46 +72,56 @@ fn list_displays() -> Result<()> {
     Ok(())
 }
 
-fn run_relay(config: RelayConfig) -> Result<()> {
+fn run_relay(config: RelayConfig, window_state_file: PathBuf) -> Result<()> {
     let event_loop = EventLoop::new()?;
-    let mut app = RelayApp::new(config)?;
+    let mut app = RelayApp::new(config, window_state_file)?;
     event_loop.run_app(&mut app)?;
     Ok(())
 }
 
 enum Command {
     List,
-    Mirror(RelayConfig),
+    Mirror { config: RelayConfig, window_state_file: PathBuf },
 }
 
 impl Command {
     fn from_env() -> Result<Self> {
-        let mut args = std::env::args().skip(1);
+        Self::from_args(std::env::args_os().skip(1))
+    }
+
+    fn from_args(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        let mut args = args.into_iter();
         let Some(first) = args.next() else {
             bail!(
-                "Usage: display-relay list | mirror <DISPLAY_NAME> [--fullscreen] [--timeout-ms N] [--fps N]"
+                "Usage: display-relay list | mirror <DISPLAY_NAME> [--fullscreen] [--timeout-ms N] [--fps N] [--window-state-file PATH]"
             )
         };
 
-        match first.as_str() {
+        match first.to_string_lossy().as_ref() {
             "list" => Ok(Self::List),
             "mirror" => {
                 let display_name = args
                     .next()
                     .context("mirror requires a display name such as \\\\.\\DISPLAY3")?;
                 let mut config = RelayConfig::default();
-                config.target.display_name = display_name;
+                config.target.display_name = display_name.to_string_lossy().into_owned();
+                let mut window_state_file = None;
 
                 while let Some(arg) = args.next() {
-                    match arg.as_str() {
+                    match arg.to_string_lossy().as_ref() {
                         "--fullscreen" => config.mirror_fullscreen = true,
+                        "--window-state-file" => {
+                            window_state_file = Some(PathBuf::from(
+                                args.next().context("--window-state-file expects a path")?,
+                            ));
+                        }
                         "--timeout-ms" => {
                             let value = args.next().context("--timeout-ms expects a number")?;
-                            config.capture_timeout_ms = value.parse()?;
+                            config.capture_timeout_ms = value.to_string_lossy().parse()?;
                         }
                         "--fps" => {
                             let value = args.next().context("--fps expects a number")?;
-                            config.target_fps = value.parse()?;
+                            config.target_fps = value.to_string_lossy().parse()?;
                             if config.target_fps == 0 {
                                 bail!("--fps must be greater than 0");
                             }
@@ -118,7 +130,11 @@ impl Command {
                     }
                 }
 
-                Ok(Self::Mirror(config))
+                let window_state_file = match window_state_file {
+                    Some(path) => std::path::absolute(path)?,
+                    None => window_state_path(&default_store_path()?, "relay"),
+                };
+                Ok(Self::Mirror { config, window_state_file })
             }
             other => bail!("Unknown command: {other}"),
         }
@@ -136,6 +152,7 @@ struct RelayApp {
     frame_interval: Duration,
     next_frame_deadline: Instant,
     next_capture_recovery_attempt: Instant,
+    window_state: Option<WindowStateFile>,
 }
 
 const CAPTURE_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -153,7 +170,14 @@ struct AspectRatioHook {
 }
 
 impl RelayApp {
-    fn new(config: RelayConfig) -> Result<Self> {
+    fn new(config: RelayConfig, window_state_file: PathBuf) -> Result<Self> {
+        let window_state = match WindowStateFile::load(window_state_file) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                warn!("Could not load window placement; preserving the file: {error:#}");
+                None
+            }
+        };
         let duplicator = DesktopDuplicator::new(&config.target.display_name)?;
         let input = RemoteInputController::new(duplicator.display_info().virtual_desktop);
         let frame_interval = Duration::from_secs_f64(1.0 / f64::from(config.target_fps.max(1)));
@@ -169,7 +193,27 @@ impl RelayApp {
             frame_interval,
             next_frame_deadline: Instant::now(),
             next_capture_recovery_attempt: Instant::now(),
+            window_state,
         })
+    }
+
+    fn remember_window_placement(&mut self) {
+        let (Some(window), Some(state)) = (self.window.as_ref(), self.window_state.as_mut()) else {
+            return;
+        };
+        // Fullscreen is a tool option, not the user's normal window rectangle.
+        if window.fullscreen().is_some() {
+            return;
+        }
+        let result = (|| -> Result<()> {
+            if let Some(placement) = windows_window_placement::capture(window.window_handle()?)? {
+                state.remember(&self.config.target.display_name, placement)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            warn!("Could not save relay window placement: {error:#}");
+        }
     }
 
     fn redraw(&mut self) -> Result<()> {
@@ -279,7 +323,7 @@ impl ApplicationHandler for RelayApp {
         let display = self.duplicator.display_info();
         let (resize_step_width, resize_step_height) =
             reduce_ratio(display.area.width.max(1), display.area.height.max(1));
-        let mut attributes = WindowAttributes::default()
+        let attributes = WindowAttributes::default()
             .with_title(format!("Relay {} (view only)", display.name))
             .with_inner_size(LogicalSize::new(
                 f64::from(display.area.width),
@@ -289,10 +333,6 @@ impl ApplicationHandler for RelayApp {
                 f64::from(resize_step_width),
                 f64::from(resize_step_height),
             ));
-
-        if self.config.mirror_fullscreen {
-            attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
-        }
 
         let window = match event_loop.create_window(attributes) {
             Ok(window) => window,
@@ -304,6 +344,19 @@ impl ApplicationHandler for RelayApp {
         };
 
         let window = Arc::new(window);
+        if let Some(placement) =
+            self.window_state.as_ref().and_then(|state| state.get(&self.config.target.display_name))
+        {
+            let result = (|| -> Result<()> {
+                windows_window_placement::restore(window.window_handle()?, placement)
+            })();
+            if let Err(error) = result {
+                warn!("Could not restore relay window placement: {error:#}");
+            }
+        }
+        if self.config.mirror_fullscreen {
+            window.set_fullscreen(Some(Fullscreen::Borderless(window.current_monitor())));
+        }
         if let Err(error) = install_aspect_ratio_hook(
             &window,
             display.area.width.max(1),
@@ -341,7 +394,9 @@ impl ApplicationHandler for RelayApp {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Moved(_) => self.remember_window_placement(),
             WindowEvent::Resized(size) => {
+                self.remember_window_placement();
                 self.last_window_size = Some(size);
                 if let Some(renderer) = self.renderer.as_mut() {
                     if let Err(error) = renderer.resize(size.width, size.height) {
@@ -373,6 +428,7 @@ impl ApplicationHandler for RelayApp {
     }
 
     fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.remember_window_placement();
         if let Some(window) = self.window.as_ref() {
             let _ = uninstall_aspect_ratio_hook(window);
         }
@@ -998,4 +1054,50 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
     }
 
     a.max(1)
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_geometry_path_and_mirror_options_are_preserved() -> Result<()> {
+        let path = PathBuf::from("target/한글 설정.relay-window.json");
+        let args = [
+            OsString::from("mirror"),
+            OsString::from(r"\\.\DISPLAY3"),
+            OsString::from("--fps"),
+            OsString::from("120"),
+            OsString::from("--timeout-ms"),
+            OsString::from("8"),
+            OsString::from("--fullscreen"),
+            OsString::from("--window-state-file"),
+            path.clone().into_os_string(),
+        ];
+        let Command::Mirror { config, window_state_file } = Command::from_args(args)? else {
+            bail!("Expected a mirror command");
+        };
+        assert_eq!(window_state_file, std::path::absolute(path)?);
+        assert_eq!(config.target.display_name, r"\\.\DISPLAY3");
+        assert_eq!(config.target_fps, 120);
+        assert_eq!(config.capture_timeout_ms, 8);
+        assert!(config.mirror_fullscreen);
+        Ok(())
+    }
+
+    #[test]
+    fn missing_geometry_path_and_zero_fps_are_rejected() {
+        for args in [
+            vec!["mirror", r"\\.\DISPLAY3", "--window-state-file"],
+            vec!["mirror", r"\\.\DISPLAY3", "--fps", "0"],
+        ] {
+            assert!(Command::from_args(args.into_iter().map(OsString::from)).is_err());
+        }
+    }
+
+    #[test]
+    fn list_does_not_need_a_geometry_path() -> Result<()> {
+        assert!(matches!(Command::from_args([OsString::from("list")])?, Command::List));
+        Ok(())
+    }
 }

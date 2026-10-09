@@ -14,12 +14,14 @@ ui-smoke = ["dep:image"]
 
 [dependencies]
 anyhow.workspace = true
+raw-window-handle.workspace = true
 desktop-presets = { path = "../../libs/desktop-presets" }
 eframe = { version = "0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 windows-audio-router = { path = "../../platforms/windows-audio-router" }
 windows-desktop-duplication = { path = "../../platforms/windows-desktop-duplication" }
 windows-shortcuts = { path = "../../platforms/windows-shortcuts" }
+windows-window-placement = { path = "../../platforms/windows-window-placement" }
 
 [dev-dependencies]
 tempfile.workspace = true

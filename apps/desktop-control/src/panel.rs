@@ -1,7 +1,9 @@
 use crate::process::{ManagedProcess, sibling_binary};
 use anyhow::{Result, bail};
-use desktop_presets::{PresetStore, Settings};
+use desktop_presets::{PresetStore, Settings, WindowStateFile, window_state_path};
 use eframe::egui::{self, Color32, RichText};
+use raw_window_handle::HasWindowHandle;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
@@ -24,6 +26,7 @@ pub struct ControlPanel {
     error: Option<String>,
     notice: String,
     has_saved_settings: bool,
+    window_state: Option<WindowStateFile>,
     devices_pending: Option<Receiver<Devices>>,
     audio_devices: Vec<AudioOutputDevice>,
     displays: Vec<DisplayInfo>,
@@ -47,6 +50,11 @@ impl ControlPanel {
         } else {
             "설정을 선택하고 저장하세요. 저장한 설정은 다음 실행 때 복원됩니다."
         };
+        let (window_state, window_error) =
+            match WindowStateFile::load(window_state_path(&path, "control")) {
+                Ok(state) => (Some(state), None),
+                Err(error) => (None, Some(format!("창 배치를 읽지 못했습니다: {error:#}"))),
+            };
         let mut panel = Self {
             path,
             draft: store.last_used.clone(),
@@ -55,9 +63,10 @@ impl ControlPanel {
             name: String::new(),
             confirm_delete: false,
             storage_error,
-            error: None,
+            error: window_error,
             notice: notice.into(),
             has_saved_settings,
+            window_state,
             devices_pending: None,
             audio_devices: Vec::new(),
             displays: Vec::new(),
@@ -70,6 +79,27 @@ impl ControlPanel {
         };
         panel.refresh_devices();
         panel
+    }
+
+    pub fn restore_window(&mut self, window: &impl HasWindowHandle) {
+        let Some(placement) = self.window_state.as_ref().and_then(|state| state.get("control"))
+        else {
+            return;
+        };
+        let result = (|| -> Result<()> {
+            windows_window_placement::restore(window.window_handle()?, placement)
+        })();
+        if let Err(error) = result {
+            self.error = Some(format!("창 배치를 복원하지 못했습니다: {error:#}"));
+        }
+    }
+
+    fn remember_window(&mut self, window: &impl HasWindowHandle) -> Result<()> {
+        let Some(state) = self.window_state.as_mut() else { return Ok(()) };
+        if let Some(placement) = windows_window_placement::capture(window.window_handle()?)? {
+            state.remember("control", placement)?;
+        }
+        Ok(())
     }
 
     const fn is_running(&self) -> bool {
@@ -256,11 +286,17 @@ impl ControlPanel {
         if let Some(binary) = audio_binary {
             self.audio.start(&binary, &self.draft.audio_args())?;
         }
-        if let Some(binary) = display_binary
-            && let Err(error) = self.display.start(&binary, &self.draft.display_args())
-        {
-            self.audio.stop()?;
-            return Err(error);
+        if let Some(binary) = display_binary {
+            let mut args: Vec<OsString> =
+                self.draft.display_args().into_iter().map(OsString::from).collect();
+            args.extend([
+                OsString::from("--window-state-file"),
+                window_state_path(&self.path, "relay").into_os_string(),
+            ]);
+            if let Err(error) = self.display.start(&binary, &args) {
+                self.audio.stop()?;
+                return Err(error);
+            }
         }
         self.notice = "저장한 설정으로 시작했습니다. 창을 닫으면 실행한 도구도 중지됩니다.".into();
         Ok(())
@@ -392,6 +428,7 @@ impl ControlPanel {
         });
         ui.add_space(12.0);
         ui.weak("다음 실행 때 마지막으로 저장한 설정을 복원합니다. 자동으로 실행하지는 않습니다.");
+        ui.weak("창 크기와 위치는 자동으로 기억합니다.");
         ui.separator();
         if ui
             .button("바탕화면 바로가기 만들기")
@@ -553,8 +590,11 @@ impl ControlPanel {
 }
 
 impl eframe::App for ControlPanel {
-    fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll();
+        if let Err(error) = self.remember_window(frame) {
+            self.error = Some(format!("창 배치를 저장하지 못했습니다: {error:#}"));
+        }
         #[cfg(feature = "ui-smoke")]
         self.screenshot_ui(ctx);
         ctx.request_repaint_after(Duration::from_millis(200));
@@ -754,6 +794,20 @@ mod tests {
         assert!(panel.add_preset().is_err());
         assert_eq!(panel.store, old);
         assert_eq!(panel.selected, None);
+        Ok(())
+    }
+
+    #[test]
+    fn broken_window_state_does_not_block_presets_or_get_overwritten() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = window_state_path(&directory.path().join("presets.json"), "control");
+        std::fs::write(&path, "broken placement")?;
+        let mut panel = panel(directory.path());
+        assert!(panel.window_state.is_none());
+        assert!(panel.error.is_some());
+        panel.save_current()?;
+        assert_eq!(std::fs::read_to_string(path)?, "broken placement");
+        assert_eq!(PresetStore::load(&panel.path)?.last_used, panel.draft);
         Ok(())
     }
 }

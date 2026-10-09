@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,7 +26,7 @@ impl ManagedProcess {
         self.child.is_some()
     }
 
-    pub fn start(&mut self, binary: &Path, args: &[String]) -> Result<()> {
+    pub fn start(&mut self, binary: &Path, args: &[impl AsRef<OsStr>]) -> Result<()> {
         if self.is_running() {
             anyhow::bail!("이미 실행 중입니다.");
         }

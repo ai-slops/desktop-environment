@@ -695,10 +695,12 @@ dependencies = [
  "desktop-presets",
  "eframe",
  "image",
+ "raw-window-handle",
  "tempfile",
  "windows-audio-router",
  "windows-desktop-duplication",
  "windows-shortcuts",
+ "windows-window-placement",
 ]
 
 [[package]]
@@ -733,12 +735,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "desktop-presets",
  "display-relay-core",
  "tracing",
  "tracing-subscriber",
  "windows",
  "windows-desktop-duplication",
  "windows-input",
+ "windows-window-placement",
  "winit",
 ]
 

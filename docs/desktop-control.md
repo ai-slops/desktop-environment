@@ -50,6 +50,13 @@ Opening the panel restores the last saved configuration without starting either 
 Unsaved edits are marked and are not retained across launches. While a tool is running,
 stop all running tools before changing settings or loading another preset.
 
+The control panel automatically remembers its window size, position, and maximized
+state. Each source display's mirror window also remembers its own last placement.
+Move or resize the windows normally; no extra save button is needed for geometry.
+Minimizing a window does not overwrite its normal bounds, and fullscreen mirroring
+keeps the previous windowed placement. Windows moves a restored window back onto
+an available screen if its saved bounds would be completely off-screen.
+
 Audio outputs are stored by endpoint ID; displays use their Windows display name
 (for example `\\.\DISPLAY3`). IDs and settings are passed as literal arguments,
 without shell interpolation. The audio dropdown also offers **Windows 기본 출력**,
@@ -70,6 +77,14 @@ is shown in the panel. To use another file:
 ```powershell
 target\desktop-control\debug\desktop-control.exe --config .\my-presets.json
 ```
+
+Window placements are stored separately beside that file:
+`presets.json.control-window.json` and `presets.json.relay-window.json`.
+Using another `--config` file gives it independent window placements. Automatic
+geometry saves do not save unsaved device or preset edits. Invalid placement files
+are preserved, and their errors are reported without preventing tool settings from
+being used. To reset window placements, close the tools and remove the relevant
+placement file.
 
 Saves write and flush a temporary file in the same directory before replacing the
 existing JSON. Failed saves leave the in-memory preset list unchanged. If an existing

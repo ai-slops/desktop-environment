@@ -13,9 +13,11 @@ workspace = true
 anyhow.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 display-relay-core = { path = "../../libs/display-relay-core" }
+desktop-presets = { path = "../../libs/desktop-presets" }
 windows.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 windows-desktop-duplication = { path = "../../platforms/windows-desktop-duplication" }
 windows-input = { path = "../../platforms/windows-input" }
+windows-window-placement = { path = "../../platforms/windows-window-placement" }
 winit = "0.30"

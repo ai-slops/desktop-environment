@@ -38,7 +38,9 @@ fn main() -> Result<()> {
         options,
         Box::new(move |cc| {
             configure_style(&cc.egui_ctx);
-            Ok(Box::new(panel::ControlPanel::new(path)))
+            let mut panel = panel::ControlPanel::new(path);
+            panel.restore_window(cc);
+            Ok(Box::new(panel))
         }),
     )
     .map_err(|error| anyhow::anyhow!("설정 창을 열 수 없습니다: {error}"))
