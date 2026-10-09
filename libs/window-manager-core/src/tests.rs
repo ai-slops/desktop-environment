@@ -943,6 +943,8 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             overrides: BTreeMap::new(),
             protection: Protection::default(),
             bindings: BTreeMap::new(),
+            filter: None,
+            before_filter: None,
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;
@@ -1261,6 +1263,77 @@ fn two_window_fixture() -> Result<(Configuration, Snapshot, Target)> {
         }
     }
     Ok((config, snapshot, target))
+}
+
+#[test]
+fn temporary_filter_clear_restores_layout_without_authored_state_drift() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    if let Some(window) = config.windows.get_mut("preview") {
+        window.tags.push(Tag { name: "keep".into(), source: "manual".into() });
+    }
+    let authored = serde_json::to_string(&config).unwrap_or_default();
+    let original =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    let mut runtime = Runtime::default();
+    original.commit(&mut runtime);
+    let observed = settled_snapshot(&original, &snapshot);
+    let mut request = Request::open(&config, target.clone());
+    request.filter = Some(Query::Tag("keep".into()));
+    let filtered = plan(&config, &runtime, &observed, &request)?;
+    assert_eq!(filtered.desired.len(), 1);
+    assert!(
+        filtered
+            .mutations
+            .iter()
+            .any(|mutation| mutation.window == "second" && mutation.visible == Some(false))
+    );
+    let filtered_snapshot = settled_snapshot(&filtered, &observed);
+    filtered.commit(&mut runtime);
+    assert_eq!(runtime.presentations["work"].visit, original.presentations["work"].visit);
+    let clear =
+        plan(&config, &runtime, &filtered_snapshot, &Request::open(&config, target.clone()))?;
+    for window in ["preview", "second"] {
+        assert_eq!(clear.desired[window].frame, original.desired[window].frame);
+    }
+    assert_eq!(serde_json::to_string(&config).unwrap_or_default(), authored);
+    let mut unknown = Request::open(&config, target);
+    unknown.filter = Some(Query::Not(Box::new(Query::Private)));
+    assert!(plan(&config, &runtime, &filtered_snapshot, &unknown)?.desired.is_empty());
+    if let Some(window) = config.windows.get_mut("preview") {
+        window.protection.maintain_visible = true;
+    }
+    assert!(plan(&config, &runtime, &filtered_snapshot, &unknown).is_err());
+    assert!(validate_filter(&Query::And(vec![Query::All; 257])).is_err());
+    Ok(())
+}
+
+#[test]
+fn semantic_choice_before_temporary_filter_returns_when_filter_clears() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    if let Some(window) = config.windows.get_mut("preview") {
+        window.tags.push(Tag { name: "keep".into(), source: "manual".into() });
+    }
+    let group = group_mut(&mut config, &target)?;
+    group.strategy = Strategy::SemanticTabs;
+    let group_id = group.id.clone();
+    let second = group.children[1].id().to_owned();
+    let mut initial = Request::open(&config, target.clone());
+    initial.selected_tabs.insert(group_id.clone(), second.clone());
+    let original = plan(&config, &Runtime::default(), &snapshot, &initial)?;
+    let mut runtime = Runtime::default();
+    original.commit(&mut runtime);
+    let observed = settled_snapshot(&original, &snapshot);
+    let mut request = Request::open(&config, target.clone());
+    request.filter = Some(Query::Tag("keep".into()));
+    let filtered = plan(&config, &runtime, &observed, &request)?;
+    assert!(filtered.desired.contains_key("preview"));
+    let observed = settled_snapshot(&filtered, &observed);
+    filtered.commit(&mut runtime);
+    let cleared = plan(&config, &runtime, &observed, &Request::open(&config, target))?;
+    assert_eq!(cleared.presentations["work"].selected_tabs[&group_id], second);
+    assert!(cleared.desired.contains_key("second"));
+    assert!(!cleared.desired.contains_key("preview"));
+    Ok(())
 }
 
 #[test]

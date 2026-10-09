@@ -3,6 +3,7 @@
 mod actions;
 mod domains;
 mod editing;
+mod filtering;
 mod formula;
 mod membership;
 mod model;
@@ -17,6 +18,7 @@ mod undo;
 pub use actions::*;
 pub use domains::*;
 pub use editing::*;
+pub use filtering::*;
 pub use formula::*;
 pub use membership::*;
 pub use model::*;

@@ -37,6 +37,8 @@ pub struct Request {
     /// Explicit stable child IDs, never a tab's array index.
     pub selected_tabs: BTreeMap<Id, Id>,
     pub focus: Option<Id>,
+    #[serde(default)]
+    pub filter: Option<crate::Query>,
 }
 
 impl Request {
@@ -51,6 +53,7 @@ impl Request {
             retain: BTreeSet::new(),
             selected_tabs: BTreeMap::new(),
             focus: None,
+            filter: None,
         }
     }
 }
@@ -87,6 +90,14 @@ pub struct Presentation {
     pub overrides: BTreeMap<Id, VisitOverride>,
     pub protection: crate::Protection,
     pub bindings: BTreeMap<Id, Binding>,
+    pub filter: Option<crate::Query>,
+    pub before_filter: Option<FilterMemory>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterMemory {
+    pub selected_tabs: BTreeMap<Id, Id>,
+    pub variants: BTreeMap<Id, Id>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -299,6 +310,9 @@ pub fn plan(
     request: &Request,
 ) -> Result<Plan> {
     config.validate()?;
+    if let Some(filter) = &request.filter {
+        crate::validate_filter(filter)?;
+    }
     validate_binding_uniqueness(snapshot)?;
     for display in snapshot.displays.values() {
         display.work_area.validate()?;
@@ -394,6 +408,7 @@ pub fn plan(
                 runtime.presentations.get(slot).is_some_and(|active| {
                     &active.view == view
                         && &active.root == root
+                        && active.filter == request.filter
                         && active.bindings
                             == root_bindings(&config.views[view].roots[root], snapshot)
                         && resolve_slot(config, &config.slots[slot], snapshot).is_ok_and(
@@ -474,7 +489,22 @@ pub fn plan(
             overrides: BTreeMap::new(),
             protection: crate::Protection::default(),
             bindings: BTreeMap::new(),
+            filter: None,
+            before_filter: None,
         });
+        if presentation.filter.is_none() && request.filter.is_some() {
+            presentation.before_filter = Some(FilterMemory {
+                selected_tabs: presentation.selected_tabs.clone(),
+                variants: presentation.variants.clone(),
+            });
+        } else if presentation.filter.is_some()
+            && request.filter.is_none()
+            && let Some(memory) = presentation.before_filter.take()
+        {
+            presentation.selected_tabs = memory.selected_tabs;
+            presentation.variants = memory.variants;
+        }
+        presentation.filter.clone_from(&request.filter);
         let bindings = root_bindings(root, snapshot);
         presentation.overrides.retain(|window, _| {
             !presentation.bindings.contains_key(window)
@@ -543,7 +573,9 @@ pub fn plan(
         };
         // Reserve immutable geometry before allocating any siblings.
         for (window_id, exception) in &evaluator.presentation.overrides {
-            if exception.preserve_position {
+            if exception.preserve_position
+                && crate::filter_allows(request.filter.as_ref(), &config.windows[window_id])
+            {
                 if !area.contains(exception.frame) {
                     return Err(conflict(
                         window_id,
@@ -554,6 +586,9 @@ pub fn plan(
             }
         }
         for placement in &leaves {
+            if !crate::filter_allows(request.filter.as_ref(), &config.windows[&placement.window]) {
+                continue;
+            }
             if effective_protection(
                 config,
                 runtime,
@@ -588,9 +623,19 @@ pub fn plan(
                 }
             }
         }
-        evaluator.layout(root, area, "base", false)?;
+        if let Some(filter) = &request.filter {
+            if let Some(filtered) = crate::filter_tree(root, filter, config) {
+                evaluator.layout(&filtered, area, "base", false)?;
+            }
+            result.diagnostics.push("Temporary filter: authored membership and preferences unchanged; unknown results are excluded".into());
+        } else {
+            evaluator.layout(root, area, "base", false)?;
+        }
         // A carried window is a Visit-local occurrence, never saved membership.
         for (window, exception) in &presentation.overrides {
+            if !crate::filter_allows(request.filter.as_ref(), &config.windows[window]) {
+                continue;
+            }
             if !result.desired.contains_key(window) {
                 let mut frame = exception.frame;
                 if !exception.preserve_position {

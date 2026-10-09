@@ -1,6 +1,4 @@
-use crate::{
-    Configuration, Error, ErrorCode, Id, Node, Query, Result, Target, View, WindowRef, new_id,
-};
+use crate::{Configuration, Error, ErrorCode, Id, Node, Result, Target, View, WindowRef, new_id};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -52,7 +50,7 @@ impl Configuration {
                 return Err(invalid(key, "Map key does not match identity"));
             }
             add(key)?;
-            validate_query(&collection.query, 0)?;
+            crate::validate_filter(&collection.query)?;
             for id in collection.include.iter().chain(&collection.exclude) {
                 if !self.windows.contains_key(id) {
                     return Err(invalid(id, "Unknown Collection member"));
@@ -259,25 +257,6 @@ pub fn replace_node_ids(node: &mut Node) {
             }
         }
     }
-}
-
-fn validate_query(query: &Query, depth: usize) -> Result<()> {
-    if depth > 32 {
-        return Err(invalid("query", "Query depth budget exceeded"));
-    }
-    match query {
-        Query::Not(query) => validate_query(query, depth + 1)?,
-        Query::And(queries) | Query::Or(queries) => {
-            if queries.len() > 256 {
-                return Err(invalid("query", "Query width budget exceeded"));
-            }
-            for query in queries {
-                validate_query(query, depth + 1)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_lines)] // Recursive validation includes member caches in the same global identity budget.

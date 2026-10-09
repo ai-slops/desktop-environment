@@ -77,6 +77,8 @@ The structural tools select a subtree by its View/ancestor path and move or inde
 
 Group-local selector include/exclude overrides leave the source Collection and global tags untouched; local exclusion wins and the inspector exposes how to clear it. Removed generated children retain stable identity, preferences and split weights. Explicitly moving/removing an occurrence excludes it in its old selector Group, so reconciliation cannot silently recreate it there. Export also regenerates node IDs and distinguishes different resources sharing a role name (`member`, `member-2`), while repeated occurrences of one resource reuse one required mapping.
 
+Temporary filters live in the Request/Presentation rather than the authored View. Editing a filter has no native effect until preview/application; clearing it restores the prior tab/variant selection in the same Visit subject to availability and protections. Three-valued query evaluation includes only proven matches, and query width/depth/total-node/text budgets apply to both selectors and temporary filters. Filtered trees keep IDs and child weight association; maintained-visible resources cannot be silently filtered out. The active-property inspector remains available after settlement and saves only explicitly selected size/position on the matching display/DPI/normal state, preserving formulas.
+
 Use `--check` to inspect stable IDs. Export redacts live identities, titles, application hints, tags, and display geometry, replacing resources with role placeholders:
 
 ```powershell

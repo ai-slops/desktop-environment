@@ -115,6 +115,7 @@ struct Manager {
     structure_source: Option<window_manager_core::NodeAddress>,
     size_context: String,
     size_destinations: BTreeSet<Id>,
+    transient_filter: Option<Query>,
     error: Option<String>,
     notice: String,
     result: Option<TransitionResult>,
@@ -183,7 +184,7 @@ impl Manager {
             .and_then(|view| view.roots.keys().next())
             .cloned()
             .unwrap_or_default();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
@@ -445,6 +446,7 @@ impl Manager {
         if let Some(target) = self.target() {
             let mut request = Request::open(&self.config, target);
             request.mode = self.mode;
+            request.filter.clone_from(&self.transient_filter);
             if matches!(
                 self.mode,
                 TransitionMode::KeepSize | TransitionMode::KeepHere | TransitionMode::Bring
@@ -970,6 +972,7 @@ impl Manager {
                             retain: BTreeSet::new(),
                             selected_tabs: BTreeMap::new(),
                             focus: None,
+                            filter: None,
                         },
                         false,
                     );
@@ -1229,6 +1232,15 @@ impl Manager {
         });
     }
     fn transition_bar(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("임시 필터 · 저장된 배치에 영향 없음").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("태그 필터").clicked() { self.transient_filter = Some(Query::Tag(String::new())); }
+                if ui.button("앱 힌트 필터").clicked() { self.transient_filter = Some(Query::Application(String::new())); }
+                if ui.button("임시 필터 해제 미리보기").clicked() { self.transient_filter = None; if let Some(target) = self.target() { self.request_preview(Request::open(&self.config, target), false); } }
+            });
+            if let Some(query) = &mut self.transient_filter { query_editor(ui, query); }
+            ui.small("필터 편집은 창을 바꾸지 않습니다. 전환 미리보기 → 적용으로 확인하세요. unknown은 제외됩니다.");
+        });
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("mode").selected_text(mode_label(self.mode)).show_ui(
                 ui,
@@ -1303,16 +1315,15 @@ impl Manager {
                                 .get(&desired.window)
                                 .map_or(desired.window.as_str(), |window| window.alias.as_str()),
                         );
-                        if !desired.carried && ui.button("현재 크기만 저장").clicked() {
-                            self.save_here(&plan, desired, &observed, false);
-                        }
-                        if !desired.carried && ui.button("현재 위치만 저장").clicked() {
-                            self.save_here(&plan, desired, &observed, true);
-                        }
+                        ui.small(format!(
+                            "관찰된 클라이언트 {}×{} / {:?}",
+                            observed.client[0], observed.client[1], observed.show_state
+                        ));
                     });
                 }
             }
         }
+        self.active_property_tools(ui);
         if let Some(result) = &self.result {
             for outcome in &result.windows {
                 if let Some(error) = &outcome.error {
@@ -1323,14 +1334,11 @@ impl Manager {
     }
     fn save_here(
         &mut self,
-        plan: &Plan,
+        view: &str,
         desired: &Desired,
         observed: &ObservedWindow,
         position: bool,
     ) {
-        let Some(presentation) = plan.presentations.get(&desired.slot) else {
-            return;
-        };
         let mut draft = self.config.clone();
         let scale = f64::from(observed.dpi) / 96.0;
         let coordinates = [
@@ -1339,7 +1347,7 @@ impl Manager {
         ];
         let size = [f64::from(observed.client[0]) / scale, f64::from(observed.client[1]) / scale];
         match draft.save_properties(
-            &presentation.view,
+            view,
             &desired.placement,
             &desired.context,
             position.then_some(coordinates),
@@ -1358,17 +1366,57 @@ impl Manager {
             Err(error) => self.error = Some(error.to_string()),
         }
     }
+
+    fn active_property_tools(&mut self, ui: &mut egui::Ui) {
+        let active: Vec<_> =
+            self.runtime.geometry.values().filter(|desired| !desired.carried).cloned().collect();
+        egui::CollapsingHeader::new("활성 배치의 현재 속성 저장").show(ui, |ui| {
+            for desired in active {
+                if let Some(observed) = self.snapshot.windows.get(&desired.window).cloned()
+                    && let Some(presentation) =
+                        self.runtime.presentations.get(&desired.slot).cloned()
+                {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            self.config
+                                .windows
+                                .get(&desired.window)
+                                .map_or(desired.window.as_str(), |window| window.alias.as_str()),
+                        );
+                        let compatible = observed.dpi == presentation.context_dpi
+                            && observed.display == presentation.context_display
+                            && observed.show_state == window_manager_core::ShowState::Normal;
+                        if ui
+                            .add_enabled(compatible, egui::Button::new("현재 크기만 저장"))
+                            .clicked()
+                        {
+                            self.save_here(&presentation.view, &desired, &observed, false);
+                        }
+                        if ui
+                            .add_enabled(compatible, egui::Button::new("현재 위치만 저장"))
+                            .clicked()
+                        {
+                            self.save_here(&presentation.view, &desired, &observed, true);
+                        }
+                        if !compatible {
+                            ui.small("화면·DPI·일반 상태 확인 후 저장");
+                        }
+                    });
+                }
+            }
+        });
+    }
 }
 
 impl eframe::App for Manager {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
+        #[cfg(feature = "ui-smoke")]
+        self.capture_smoke(ctx);
         if !self.guard_control(ctx) {
             return;
         }
         ctx.request_repaint_after(Duration::from_millis(200));
-        #[cfg(feature = "ui-smoke")]
-        self.capture_smoke(ctx);
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Window Manager");
