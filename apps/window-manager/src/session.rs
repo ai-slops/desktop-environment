@@ -27,6 +27,12 @@ enum SessionCommand {
     Snapshot {},
     Configuration {},
     Inventory {},
+    MonitorInventory {},
+    ConfirmMonitor {
+        epoch: Id,
+        device: String,
+        alias: Id,
+    },
     Events {
         cursor: EventCursor,
     },
@@ -78,6 +84,7 @@ impl SessionCommand {
             Self::Snapshot {}
             | Self::Configuration {}
             | Self::Inventory {}
+            | Self::MonitorInventory {}
             | Self::Events { .. } => true,
             Self::ProviderRegister { .. }
             | Self::ProviderPublish { .. }
@@ -108,6 +115,8 @@ struct Session {
     providers: bool,
     path: std::path::PathBuf,
     history: Vec<Configuration>,
+    monitor_epoch: Id,
+    monitors: Vec<windows_window_manager::MonitorIdentity>,
 }
 
 impl Drop for Session {
@@ -148,6 +157,10 @@ impl Session {
                 Event::Result(result) => {
                     self.log.push(DomainEvent::Transition { result: result.clone() });
                 }
+                Event::Monitors(epoch, monitors) => {
+                    self.monitor_epoch.clone_from(epoch);
+                    self.monitors.clone_from(monitors);
+                }
                 Event::Error(error) => {
                     self.log.push(DomainEvent::OperationFailed { error: error.clone() });
                     failure = Some(error.clone());
@@ -174,6 +187,15 @@ impl Session {
         command.authorize(self.control, self.providers)?;
         match command {
             SessionCommand::Configuration {} => Ok(json!(self.config)),
+            SessionCommand::MonitorInventory {} => {
+                self.exchange(Command::Refresh(self.config.clone()))?;
+                Ok(json!({"epoch":self.monitor_epoch,"monitors":self.monitors}))
+            }
+            SessionCommand::ConfirmMonitor { epoch, device, alias } => {
+                self.exchange(Command::ConfirmMonitor { epoch, device, alias })?;
+                self.plans.clear();
+                Ok(self.public_snapshot())
+            }
             SessionCommand::Snapshot {} => {
                 self.exchange(Command::Refresh(self.config.clone()))?;
                 Ok(self.public_snapshot())
@@ -356,6 +378,8 @@ pub fn run(path: &Path, control: bool, providers: bool) -> anyhow::Result<()> {
         providers,
         path: path.to_owned(),
         history: Vec::new(),
+        monitor_epoch: String::new(),
+        monitors: Vec::new(),
     };
     session.exchange(Command::Refresh(session.config.clone()))?;
     let input = std::io::stdin();

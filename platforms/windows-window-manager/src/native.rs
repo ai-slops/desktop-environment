@@ -49,7 +49,7 @@ pub fn foreground_handle() -> u64 {
     unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize as u64 }
 }
 /// Only this process's own manager surface is relocated. No managed app's geometry is involved.
-pub fn position_control(area: Rect) -> Result<()> {
+fn control_handle() -> Result<HWND> {
     unsafe extern "system" fn find(hwnd: HWND, data: LPARAM) -> BOOL {
         let mut process = 0;
         // SAFETY: callback receives a live enumerated HWND and our writable output pointer.
@@ -68,7 +68,6 @@ pub fn position_control(area: Rect) -> Result<()> {
         }
         BOOL(1)
     }
-    area.validate()?;
     let _dpi = DpiGuard::new();
     let mut hwnd = HWND::default();
     // SAFETY: callback output outlives the synchronous enumeration.
@@ -80,10 +79,76 @@ pub fn position_control(area: Rect) -> Result<()> {
             "control",
         ));
     }
+    Ok(hwnd)
+}
+
+#[must_use]
+pub fn control_fits(area: Rect) -> bool {
+    let _dpi = DpiGuard::new();
+    let Ok(hwnd) = control_handle() else {
+        return false;
+    };
+    let mut frame = RECT::default();
+    // SAFETY: query only for this process's own control surface.
+    unsafe { GetWindowRect(hwnd, &raw mut frame) }.is_ok() && area.contains(rect(frame))
+}
+
+pub fn position_control(area: Rect) -> Result<()> {
+    area.validate()?;
+    let _dpi = DpiGuard::new();
+    let hwnd = control_handle()?;
     let mut frame = RECT::default();
     unsafe { GetWindowRect(hwnd, &raw mut frame) }
         .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "control", error))?;
     let frame = rect(frame);
+    let initial_dpi = unsafe { GetDpiForWindow(hwnd) };
+    place_control(hwnd, area, frame)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(900);
+    let mut corrected = false;
+    let mut stable = None;
+    loop {
+        let mut actual = RECT::default();
+        // SAFETY: only the previously located window in this manager process is observed.
+        if unsafe { GetWindowRect(hwnd, &raw mut actual) }.is_ok() {
+            let actual = rect(actual);
+            let dpi = unsafe { GetDpiForWindow(hwnd) };
+            if area.contains(actual) {
+                match stable {
+                    Some((previous, previous_dpi, started))
+                        if actual == previous && dpi == previous_dpi =>
+                    {
+                        if std::time::Instant::now().duration_since(started)
+                            >= std::time::Duration::from_millis(80)
+                        {
+                            return Ok(());
+                        }
+                    }
+                    _ => stable = Some((actual, dpi, std::time::Instant::now())),
+                }
+            } else {
+                stable = None;
+                // WM_DPICHANGED can expand the own control window after its first asynchronous move.
+                if !corrected
+                    && dpi != initial_dpi
+                    && (actual.width != frame.width || actual.height != frame.height)
+                {
+                    corrected = true;
+                    place_control(hwnd, area, actual)?;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::new(
+                ErrorCode::ApplicationTimeout,
+                "Control could not fit private-designated area; content stays redacted",
+                "control",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn place_control(hwnd: HWND, area: Rect, frame: Rect) -> Result<()> {
     let width = frame.width.min(area.width);
     let height = frame.height.min(area.height);
     let x = area.x + (area.width - width) / 2;
@@ -99,23 +164,7 @@ pub fn position_control(area: Rect) -> Result<()> {
             SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
         )
     }
-    .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "control", error))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(900);
-    loop {
-        let mut actual = RECT::default();
-        // SAFETY: only the previously located window in this manager process is observed.
-        if unsafe { GetWindowRect(hwnd, &raw mut actual) }.is_ok() && area.contains(rect(actual)) {
-            return Ok(());
-        }
-        if std::time::Instant::now() >= deadline {
-            return Err(Error::new(
-                ErrorCode::ApplicationTimeout,
-                "Control could not fit private-designated area; content stays redacted",
-                "control",
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "control", error))
 }
 fn string(value: &[u16]) -> String {
     String::from_utf16_lossy(
@@ -168,6 +217,22 @@ fn process_identity(pid: u32) -> Result<(u64, u32)> {
 }
 
 pub fn bind(candidate: &Candidate, allow_hide: bool) -> Result<ObservedWindow> {
+    bind_internal(candidate, allow_hide, None)
+}
+
+pub fn bind_mapped(
+    candidate: &Candidate,
+    allow_hide: bool,
+    mappings: &crate::MonitorMappings,
+) -> Result<ObservedWindow> {
+    bind_internal(candidate, allow_hide, Some(mappings))
+}
+
+fn bind_internal(
+    candidate: &Candidate,
+    allow_hide: bool,
+    mappings: Option<&crate::MonitorMappings>,
+) -> Result<ObservedWindow> {
     static GENERATION: AtomicU64 = AtomicU64::new(1);
     let hwnd = handle(candidate.handle);
     let mut pid = 0;
@@ -198,7 +263,7 @@ pub fn bind(candidate: &Candidate, allow_hide: bool) -> Result<ObservedWindow> {
         generation,
         token_property: property,
     };
-    observe(&binding, allow_hide)
+    observe_internal(&binding, allow_hide, mappings)
 }
 
 pub fn validate_binding(binding: &Binding) -> Result<()> {
@@ -226,7 +291,7 @@ pub fn validate_binding(binding: &Binding) -> Result<()> {
     Ok(())
 }
 
-fn monitor_info(monitor: HMONITOR) -> Result<(Display, String)> {
+fn raw_monitor_info(monitor: HMONITOR) -> Result<crate::MonitorIdentity> {
     let mut info = MONITORINFOEXW::default();
     info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
     // SAFETY: correctly sized MONITORINFOEXW begins with MONITORINFO.
@@ -244,31 +309,53 @@ fn monitor_info(monitor: HMONITOR) -> Result<(Display, String)> {
     // SAFETY: writable sized display structure and NUL-terminated adapter name.
     let enumerated =
         unsafe { EnumDisplayDevicesW(PCWSTR(name_wide.as_ptr()), 0, &raw mut device, 0) }.as_bool();
-    let id = if enumerated && !string(&device.DeviceID).is_empty() {
-        string(&device.DeviceID)
-    } else {
-        return Err(Error::new(
-            ErrorCode::AmbiguousBinding,
-            "Monitor identity unavailable; explicit mapping required",
-            name,
-        ));
-    };
+    let hardware =
+        (enumerated && !string(&device.DeviceID).is_empty()).then(|| string(&device.DeviceID));
     let mut dpi_x = 96;
     let mut dpi_y = 96;
     let _ = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y) };
+    Ok(crate::MonitorIdentity {
+        device: name.clone(),
+        hardware,
+        name: if enumerated { format!("{} ({name})", string(&device.DeviceString)) } else { name },
+        work_area: rect(info.monitorInfo.rcWork),
+        dpi: dpi_x,
+    })
+}
+
+fn monitor_info(monitor: HMONITOR) -> Result<(Display, String)> {
+    let monitor = raw_monitor_info(monitor)?;
+    let id = monitor.hardware.ok_or_else(|| {
+        Error::new(
+            ErrorCode::AmbiguousBinding,
+            "Monitor identity unavailable; explicit mapping required",
+            &monitor.device,
+        )
+    })?;
     Ok((
-        Display {
-            id,
-            name: if enumerated {
-                format!("{} ({name})", string(&device.DeviceString))
-            } else {
-                name.clone()
-            },
-            work_area: rect(info.monitorInfo.rcWork),
-            dpi: dpi_x,
-        },
-        name,
+        Display { id, name: monitor.name, work_area: monitor.work_area, dpi: monitor.dpi },
+        monitor.device,
     ))
+}
+
+pub fn monitor_inventory() -> Result<Vec<crate::MonitorIdentity>> {
+    unsafe extern "system" fn callback(
+        monitor: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        parameter: LPARAM,
+    ) -> BOOL {
+        // SAFETY: synchronous enumeration owns the writable Vec for the complete callback lifetime.
+        let output = unsafe { &mut *(parameter.0 as *mut Vec<Result<crate::MonitorIdentity>>) };
+        output.push(raw_monitor_info(monitor));
+        BOOL(1)
+    }
+    let _dpi = DpiGuard::new();
+    let mut output: Vec<Result<crate::MonitorIdentity>> = Vec::new();
+    unsafe { EnumDisplayMonitors(None, None, Some(callback), LPARAM((&raw mut output) as isize)) }
+        .ok()
+        .map_err(|error| native_error(ErrorCode::TargetMissing, "displays", error))?;
+    output.into_iter().collect()
 }
 
 pub fn displays() -> Result<BTreeMap<Id, Display>> {
@@ -370,6 +457,22 @@ fn has_owned_dialog(hwnd: HWND) -> bool {
 }
 
 pub fn observe(binding: &Binding, allow_hide: bool) -> Result<ObservedWindow> {
+    observe_internal(binding, allow_hide, None)
+}
+
+pub fn observe_mapped(
+    binding: &Binding,
+    allow_hide: bool,
+    mappings: &crate::MonitorMappings,
+) -> Result<ObservedWindow> {
+    observe_internal(binding, allow_hide, Some(mappings))
+}
+
+fn observe_internal(
+    binding: &Binding,
+    allow_hide: bool,
+    mappings: Option<&crate::MonitorMappings>,
+) -> Result<ObservedWindow> {
     validate_binding(binding)?;
     let _dpi = DpiGuard::new();
     let hwnd = handle(binding.handle);
@@ -390,7 +493,20 @@ pub fn observe(binding: &Binding, allow_hide: bool) -> Result<ObservedWindow> {
         }
     };
     let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    let display = monitor_info(monitor)?.0.id;
+    let raw = raw_monitor_info(monitor)?;
+    let display = if let Some(mappings) = mappings {
+        if !mappings.inventory().contains(&raw) {
+            return Err(Error::new(
+                ErrorCode::StaleRevision,
+                "Monitor topology changed during observation",
+                "displays",
+            ));
+        }
+        mappings.resolve(&raw.device)?
+    } else {
+        // Recovery needs visibility/show state even when durable display identity is unavailable.
+        raw.hardware.unwrap_or_else(|| format!("unresolved:{}", raw.device))
+    };
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
     let observed = ObservedWindow {
         binding: binding.clone(),
@@ -807,6 +923,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = unsafe { DestroyWindow(self.0) };
         }
+    }
+
+    #[test]
+    fn explicit_monitor_alias_observation_preserves_geometry_and_rejects_changed_inventory()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let window = Owned::new()?;
+        let mut mappings = crate::MonitorMappings::default();
+        mappings.update(monitor_inventory()?)?;
+        let monitor =
+            raw_monitor_info(unsafe { MonitorFromWindow(window.0, MONITOR_DEFAULTTONEAREST) })?;
+        let epoch = mappings.epoch().to_owned();
+        mappings.confirm(&epoch, &monitor.device, "manual-fixture".into())?;
+        let before = bind_mapped(&window.candidate(), false, &mappings)?;
+        assert_eq!(before.display, "manual-fixture");
+        assert_eq!(observe(&before.binding, false)?.frame, before.frame);
+        let mut changed = mappings.inventory().to_vec();
+        for item in &mut changed {
+            if item.device == monitor.device {
+                item.dpi += 1;
+            }
+        }
+        mappings.update(changed)?;
+        assert!(observe_mapped(&before.binding, false, &mappings).is_err());
+        assert!(observe(&before.binding, false).is_ok());
+        Ok(())
     }
 
     #[test]

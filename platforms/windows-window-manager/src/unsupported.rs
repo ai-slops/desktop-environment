@@ -20,13 +20,26 @@ pub const fn foreground_handle() -> u64 {
 pub fn position_control(_: window_manager_core::Rect) -> Result<()> {
     unsupported()
 }
+#[must_use]
+pub const fn control_fits(_: window_manager_core::Rect) -> bool {
+    false
+}
 pub fn inventory() -> Result<Vec<Candidate>> {
     unsupported()
 }
 pub fn displays() -> Result<BTreeMap<Id, Display>> {
     unsupported()
 }
+pub fn monitor_inventory() -> Result<Vec<crate::MonitorIdentity>> {
+    unsupported()
+}
+pub fn observe_mapped(_: &Binding, _: bool, _: &crate::MonitorMappings) -> Result<ObservedWindow> {
+    unsupported()
+}
 pub fn bind(_: &Candidate, _: bool) -> Result<ObservedWindow> {
+    unsupported()
+}
+pub fn bind_mapped(_: &Candidate, _: bool, _: &crate::MonitorMappings) -> Result<ObservedWindow> {
     unsupported()
 }
 pub fn observe(_: &Binding, _: bool) -> Result<ObservedWindow> {

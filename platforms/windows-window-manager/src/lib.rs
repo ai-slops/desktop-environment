@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use window_manager_core::{Binding, Id, ObservedWindow, Rect};
+mod monitors;
+pub use monitors::*;
 
 #[derive(Clone, Debug)]
 pub struct Candidate {

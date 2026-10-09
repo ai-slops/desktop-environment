@@ -133,6 +133,7 @@ mod tests {
             undoing: None,
             gestures: BTreeMap::new(),
             pending: VecDeque::new(),
+            monitors: windows_window_manager::MonitorMappings::default(),
         };
         state.runtime.generations.insert("unrelated".into(), 7);
         state.refresh()?;
@@ -229,6 +230,7 @@ pub enum Command {
     Provider(ProviderCommand),
     Barrier(Id),
     Supersede(BTreeSet<Id>),
+    ConfirmMonitor { epoch: Id, device: String, alias: Id },
     Shutdown,
 }
 
@@ -249,6 +251,7 @@ pub enum Event {
     ManualEdit(ManualEdit),
     ControlReady(window_manager_core::Rect, bool),
     Barrier(Id),
+    Monitors(Id, Vec<windows_window_manager::MonitorIdentity>),
 }
 
 pub struct Worker {
@@ -301,12 +304,17 @@ struct State {
     undoing: Option<Id>,
     gestures: BTreeMap<Id, ObservedWindow>,
     pending: VecDeque<Command>,
+    monitors: windows_window_manager::MonitorMappings,
 }
 
 impl State {
     fn refresh(&mut self) -> Result<()> {
-        let displays = windows_window_manager::displays()?;
-        if self.snapshot.displays != displays {
+        let topology_changed = self.monitors.update(windows_window_manager::monitor_inventory()?)?;
+        if topology_changed {
+            self.publish_monitors();
+        }
+        let displays = self.monitors.displays();
+        if topology_changed || self.snapshot.displays != displays {
             self.snapshot.topology_revision += 1;
             self.snapshot.displays = displays;
         }
@@ -326,7 +334,11 @@ impl State {
             .map(|(id, _)| id.clone());
         for (id, binding) in &self.bindings {
             if let Some(reference) = self.config.windows.get(id)
-                && let Ok(observed) = windows_window_manager::observe(binding, reference.allow_hide)
+                && let Ok(observed) = windows_window_manager::observe_mapped(
+                    binding,
+                    reference.allow_hide,
+                    &self.monitors,
+                )
             {
                 self.snapshot.windows.insert(id.clone(), observed);
             }
@@ -336,6 +348,13 @@ impl State {
 
     fn publish(&self) {
         let _ = self.events.send(Event::State(self.snapshot.clone(), self.runtime.clone()));
+    }
+
+    fn publish_monitors(&self) {
+        let _ = self.events.send(Event::Monitors(
+            self.monitors.epoch().into(),
+            self.monitors.inventory().to_vec(),
+        ));
     }
 
     #[allow(clippy::too_many_lines)] // Journal, submission, and settlement are one execution transaction.
@@ -655,6 +674,7 @@ fn run(
         undoing: None,
         gestures: BTreeMap::new(),
         pending: VecDeque::new(),
+        monitors: windows_window_manager::MonitorMappings::default(),
     };
     if let Err(error) = state.refresh() {
         let _ = state.events.send(Event::Error(error));
@@ -665,7 +685,21 @@ fn run(
     state.publish();
     let mut dirty = false;
     let mut refreshed = Instant::now();
+    let mut topology_checked = Instant::now();
     loop {
+        if topology_checked.elapsed() >= Duration::from_secs(1) {
+            let prior_topology = state.snapshot.topology_revision;
+            let prior_windows = state.snapshot.windows.clone();
+            let prior_focus = state.snapshot.focused.clone();
+            if state.refresh().is_ok()
+                && (state.snapshot.topology_revision != prior_topology
+                    || state.snapshot.windows != prior_windows
+                    || state.snapshot.focused != prior_focus)
+            {
+                state.publish();
+            }
+            topology_checked = Instant::now();
+        }
         while let Ok(event) = native_events.try_recv() {
             match event {
                 NativeEvent::GestureStarted(handle) => {
@@ -740,6 +774,7 @@ fn run(
                     let _ = state.events.send(Event::Inventory(inventory));
                 }
                 state.publish();
+                state.publish_monitors();
                 result
             }
             Command::Bind(config, id, candidate) => {
@@ -758,9 +793,10 @@ fn run(
                             id,
                         ))
                     }
-                    Some(reference) => windows_window_manager::bind(
+                    Some(reference) => windows_window_manager::bind_mapped(
                         &candidate,
                         reference.allow_hide,
+                        &state.monitors,
                     )
                     .and_then(|observed| {
                         if let Some(claim) = state.runtime.claims.get(&id).cloned() {
@@ -902,6 +938,14 @@ fn run(
                 }
                 state.publish();
                 Ok(())
+            }
+            Command::ConfirmMonitor { epoch, device, alias } => {
+                state.monitors.confirm(&epoch, &device, alias).and_then(|()| {
+                    state.refresh()?;
+                    state.publish();
+                    state.publish_monitors();
+                    Ok(())
+                })
             }
             Command::Shutdown => break,
         };

@@ -116,6 +116,9 @@ struct Manager {
     size_context: String,
     size_destinations: BTreeSet<Id>,
     transient_filter: Option<Query>,
+    monitor_epoch: Id,
+    monitor_inventory: Vec<windows_window_manager::MonitorIdentity>,
+    monitor_alias: Id,
     error: Option<String>,
     notice: String,
     result: Option<TransitionResult>,
@@ -184,7 +187,7 @@ impl Manager {
             .and_then(|view| view.roots.keys().next())
             .cloned()
             .unwrap_or_default();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
@@ -254,10 +257,19 @@ impl Manager {
         }
     }
     fn guard_control(&mut self, ctx: &egui::Context) -> bool {
-        if !self.config.slots.is_empty()
-            && (window_manager_core::control_bounds(&self.config, &self.snapshot)
-                .is_none_or(|bounds| self.settled_control != Some(bounds)))
-        {
+        if window_manager_core::control_bounds(&self.config, &self.snapshot).is_none_or(|bounds| {
+            self.settled_control != Some(bounds)
+                || !windows_window_manager::control_fits(bounds)
+                || self.config.slots.values().any(|slot| slot.designated_public)
+                    && self.monitor_inventory.iter().any(|monitor| {
+                        monitor.work_area.overlaps(bounds)
+                            && !self
+                                .snapshot
+                                .displays
+                                .values()
+                                .any(|display| display.name == monitor.name)
+                    })
+        }) {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.heading("비공개 제어 영역을 사용할 수 없습니다");
                 ui.label("제어 내용은 가려져 있습니다. 사용할 화면을 비공개 제어 영역으로 명시적으로 지정하세요.");
@@ -273,6 +285,11 @@ impl Manager {
                     }
                 }
                 if ui.button("숨긴 창 복구").clicked() { self.send(Command::Recover); }
+                self.monitor_mapping_ui(ui);
+                if let Some(bounds) = window_manager_core::control_bounds(&self.config, &self.snapshot)
+                    && ui.button("기존 비공개 제어 영역으로 돌아가기").clicked() {
+                    self.settled_control = None; self.send(Command::PlaceControl(bounds));
+                }
             });
             ctx.request_repaint_after(Duration::from_millis(200));
             return false;
@@ -407,6 +424,10 @@ impl Manager {
                 }
                 Event::Notice(notice) => self.notice = notice,
                 Event::Barrier(_) => {}
+                Event::Monitors(epoch, inventory) => {
+                    self.monitor_epoch = epoch;
+                    self.monitor_inventory = inventory;
+                }
             }
         }
     }
@@ -812,6 +833,7 @@ impl Manager {
     }
     #[allow(clippy::too_many_lines)] // One composition editor UI panel.
     fn slots(&mut self, ui: &mut egui::Ui) {
+        self.monitor_mapping_ui(ui);
         ui.heading("디스플레이 영역");
         ui.label(
             "모니터를 명시적으로 선택합니다. 연결 변경 시 다른 모니터로 자동 배정하지 않습니다.",
@@ -985,6 +1007,21 @@ impl Manager {
                 self.commit(draft);
             }
         }
+    }
+
+    fn monitor_mapping_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("현재 모니터의 식별·연결 확인").show(ui, |ui| {
+            ui.small("확인은 현재 화면 구성에서만 유효합니다. 화면 연결·위치·DPI가 바뀌면 다시 확인해야 하며 저장된 배치 문맥은 유지됩니다.");
+            let aliases: BTreeSet<_> = self.config.slots.values().flat_map(|slot| std::iter::once(slot.display.clone()).chain(slot.fallback_displays.iter().cloned())).collect();
+            egui::ComboBox::from_id_salt("monitor-alias").selected_text(if self.monitor_alias.is_empty() { "저장된 화면 ID 선택 또는 입력" } else { &self.monitor_alias }).show_ui(ui, |ui| { for alias in aliases { ui.selectable_value(&mut self.monitor_alias, alias.clone(), alias); } });
+            ui.text_edit_singleline(&mut self.monitor_alias);
+            for monitor in self.monitor_inventory.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("{} · {} · {:?} · {} DPI · {}", monitor.name, monitor.device, monitor.work_area, monitor.dpi, monitor.hardware.as_deref().unwrap_or("하드웨어 ID 확인 불가")));
+                    if ui.add_enabled(!self.monitor_alias.is_empty(), egui::Button::new("이 화면을 선택한 ID로 확인")).clicked() { self.send(Command::ConfirmMonitor { epoch: self.monitor_epoch.clone(), device: monitor.device, alias: self.monitor_alias.clone() }); }
+                });
+            }
+        });
     }
     fn editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("배치 편집");
