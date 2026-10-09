@@ -143,6 +143,62 @@ mod tests {
     }
 
     #[test]
+    fn provider_disconnect_received_during_application_prevents_scope_commit() -> anyhow::Result<()>
+    {
+        let (_fixture, candidate) = stalled_window()?;
+        let directory = tempfile::tempdir()?;
+        let (mut state, mut plan, events) =
+            fixture_state(directory.path().join("recovery.json"), &candidate)?;
+        let reference = state
+            .config
+            .windows
+            .get_mut("fixture")
+            .ok_or_else(|| anyhow::anyhow!("fixture missing"))?;
+        reference.output_protection = OutputProtection::RequireVerifiedPrivate;
+        let now = window_manager_core::unix_millis();
+        state.runtime.providers.register(
+            "capture".into(),
+            "session".into(),
+            BTreeSet::from(["fixture".into()]),
+            true,
+            false,
+        )?;
+        state.runtime.providers.accept(
+            window_manager_core::ProviderMessage {
+                provider: "capture".into(),
+                session: "session".into(),
+                sequence: 1,
+                window: "fixture".into(),
+                observed_ms: now,
+                ttl_ms: 60000,
+                output: Some(window_manager_core::OutputState::VerifiedPrivate),
+                attention: None,
+            },
+            now,
+        )?;
+        let current = state
+            .snapshot
+            .windows
+            .get("fixture")
+            .ok_or_else(|| anyhow::anyhow!("observation missing"))?;
+        let desired =
+            plan.desired.get_mut("fixture").ok_or_else(|| anyhow::anyhow!("desired missing"))?;
+        desired.frame = current.frame;
+        desired.client_target = current.client.map(Some);
+        desired.dpi = current.dpi;
+        plan.mutations[0].geometry = Some(current.frame);
+        plan.mutations[0].move_only = true;
+        let (commands, receive) = mpsc::channel();
+        let (_native, native) = mpsc::channel();
+        commands.send(Command::Provider(ProviderCommand::Disconnect("capture".into())))?;
+        state.apply(&plan, &receive, &native)?;
+        assert!(state.runtime.suspended.contains("work"));
+        assert!(!state.runtime.claims.contains_key("fixture"));
+        assert!(events.try_iter().any(|event| matches!(event,Event::Result(result) if result.status == Status::Failed && result.windows.iter().any(|window| window.error.as_ref().is_some_and(|error| error.code == ErrorCode::OutputStateUnknown)))));
+        Ok(())
+    }
+
+    #[test]
     fn supersession_interrupts_a_stalled_scope_without_cancelling_disjoint_generations()
     -> anyhow::Result<()> {
         let (_fixture, candidate) = stalled_window()?;
@@ -347,6 +403,132 @@ impl State {
         Ok(())
     }
 
+    fn provider(&mut self, command: ProviderCommand) -> Result<()> {
+        match command {
+            ProviderCommand::Register(id, session, resources, output, attention) => {
+                if resources.iter().any(|id| !self.config.windows.contains_key(id)) {
+                    Err(Error::new(ErrorCode::TargetMissing, "Provider resource missing", id))
+                } else {
+                    self.runtime.providers.register(id, session, resources, output, attention)
+                }
+            }
+            ProviderCommand::Publish(message) => {
+                let linked = (message.output
+                    == Some(window_manager_core::OutputState::OutputLinked))
+                .then(|| message.window.clone());
+                self.runtime.providers.accept(message, window_manager_core::unix_millis()).map(
+                    |()| {
+                        if let Some(window) = linked {
+                            self.runtime.public_content.insert(window);
+                        }
+                    },
+                )
+            }
+            ProviderCommand::Disconnect(id) => {
+                self.runtime.providers.disconnect(&id);
+                Ok(())
+            }
+        }
+    }
+
+    fn reflow_fingerprint(&self, slot: &str) -> Result<u64> {
+        use std::hash::Hasher;
+        let active = &self.runtime.presentations[slot];
+        let root = &self.config.views[&active.view].roots[&active.root];
+        let mut leaves = Vec::new();
+        root.placements(&mut leaves);
+        let windows: BTreeMap<_, _> = leaves
+            .iter()
+            .map(|placement| {
+                (
+                    &placement.window,
+                    (
+                        self.snapshot.windows.get(&placement.window),
+                        self.runtime.providers.output(&placement.window, self.snapshot.now_ms),
+                    ),
+                )
+            })
+            .collect();
+        let bytes = serde_json::to_vec(&(
+            self.config.revision,
+            self.snapshot.topology_revision,
+            &self.snapshot.displays,
+            windows,
+            &self.snapshot.focused,
+        ))
+        .map_err(|error| Error::new(ErrorCode::InvalidConfiguration, error.to_string(), slot))?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        hasher.write(bytes.as_slice());
+        Ok(hasher.finish())
+    }
+
+    fn continuous(
+        &mut self,
+        scheduler: &mut crate::reflow::ReflowScheduler,
+        commands: &Receiver<Command>,
+        native_events: &Receiver<NativeEvent>,
+    ) {
+        let slots: BTreeSet<_> = self
+            .runtime
+            .presentations
+            .iter()
+            .filter(|(_, active)| {
+                self.config
+                    .views
+                    .get(&active.view)
+                    .and_then(|view| view.roots.get(&active.root))
+                    .is_some_and(window_manager_core::has_continuous_rule)
+            })
+            .map(|(slot, _)| slot.clone())
+            .collect();
+        scheduler.retain(&slots);
+        let prior_pending = self.runtime.pending_reflow.clone();
+        self.runtime.pending_reflow.retain(|slot, _| slots.contains(slot));
+        for slot in slots {
+            let request = window_manager_core::continuous_request(
+                &self.config,
+                &self.runtime,
+                &self.snapshot,
+                &slot,
+                !self.gestures.is_empty(),
+            );
+            match request.and_then(|request| Ok((request, self.reflow_fingerprint(&slot)?))) {
+                Err(error) => {
+                    self.runtime.pending_reflow.insert(slot, error.message);
+                }
+                Ok((request, fingerprint)) => {
+                    if scheduler.completed(&slot, fingerprint) {
+                        continue;
+                    }
+                    self.runtime.pending_reflow.remove(&slot);
+                    if !scheduler.ready(&slot, fingerprint, self.snapshot.now_ms) {
+                        continue;
+                    }
+                    match plan_independent(&self.config, &self.runtime, &self.snapshot, &request) {
+                        Ok(plan) => {
+                            let metadata_changed =
+                                plan.presentations.iter().any(|(slot, presentation)| {
+                                    self.runtime.presentations.get(slot) != Some(presentation)
+                                });
+                            if !plan.mutations.is_empty() || metadata_changed {
+                                if let Err(error) = self.apply(&plan, commands, native_events) {
+                                    self.runtime.pending_reflow.insert(slot, error.message);
+                                }
+                                break; // One bounded native transaction per scheduler pass.
+                            }
+                        }
+                        Err(error) => {
+                            self.runtime.pending_reflow.insert(slot, error.message);
+                        }
+                    }
+                }
+            }
+        }
+        if prior_pending != self.runtime.pending_reflow {
+            self.publish();
+        }
+    }
+
     fn publish(&self) {
         let _ = self.events.send(Event::State(self.snapshot.clone(), self.runtime.clone()));
     }
@@ -373,6 +555,17 @@ impl State {
             ));
         }
         self.refresh()?;
+        if plan.mode == Some(window_manager_core::TransitionMode::Reflow) {
+            for slot in &plan.scope {
+                window_manager_core::continuous_permission(
+                    &self.config,
+                    &self.runtime,
+                    &self.snapshot,
+                    slot,
+                    !self.gestures.is_empty(),
+                )?;
+            }
+        }
         plan.revalidate(&self.config, &self.runtime, &self.snapshot)?;
         let prior_runtime = self.runtime.clone();
         if plan.idempotent {
@@ -431,6 +624,11 @@ impl State {
                 match command {
                     Command::Supersede(scope) => {
                         superseded.extend(plan.scope.intersection(&scope).cloned());
+                    }
+                    Command::Provider(command) => {
+                        if let Err(error) = self.provider(command) {
+                            let _ = self.events.send(Event::Error(error));
+                        }
                     }
                     command @ (Command::Recover | Command::Shutdown | Command::Pause(true)) => {
                         superseded.extend(plan.scope.iter().cloned());
@@ -730,6 +928,8 @@ fn run(
     let mut dirty = false;
     let mut refreshed = Instant::now();
     let mut topology_checked = Instant::now();
+    let mut rule_checked = Instant::now();
+    let mut rule_scheduler = crate::reflow::ReflowScheduler::default();
     loop {
         if topology_checked.elapsed() >= Duration::from_secs(1) {
             let prior_topology = state.snapshot.topology_revision;
@@ -807,7 +1007,17 @@ fn run(
             .map_or_else(|| commands.recv_timeout(Duration::from_millis(50)), Ok)
         {
             Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if recover_on_exit
+                    && rule_checked.elapsed() >= Duration::from_millis(250)
+                    && !dirty
+                    && state.undoing.is_none()
+                {
+                    state.continuous(&mut rule_scheduler, commands, &native_events);
+                    rule_checked = Instant::now();
+                }
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
         let result = match command {
@@ -946,29 +1156,7 @@ fn run(
                 })
             }
             Command::Provider(command) => {
-                let result = match command {
-                    ProviderCommand::Register(id, session, resources, output, attention) => {
-                        if resources.iter().any(|id| !state.config.windows.contains_key(id)) {
-                            Err(Error::new(
-                                ErrorCode::TargetMissing,
-                                "Provider resource missing",
-                                id,
-                            ))
-                        } else {
-                            state
-                                .runtime
-                                .providers
-                                .register(id, session, resources, output, attention)
-                        }
-                    }
-                    ProviderCommand::Publish(message) => {
-                        state.runtime.providers.accept(message, window_manager_core::unix_millis())
-                    }
-                    ProviderCommand::Disconnect(id) => {
-                        state.runtime.providers.disconnect(&id);
-                        Ok(())
-                    }
-                };
+                let result = state.provider(command);
                 state.publish();
                 result
             }

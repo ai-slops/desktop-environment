@@ -2021,6 +2021,12 @@ impl eframe::App for Manager {
                 ui.colored_label(Color32::LIGHT_RED, error);
             }
             ui.small(&self.notice);
+            for (slot, reason) in &self.runtime.pending_reflow {
+                ui.small(format!(
+                    "규칙 재배치 대기: {} · {reason}",
+                    self.config.slots.get(slot).map_or(slot.as_str(), |slot| slot.name.as_str())
+                ));
+            }
             self.show_attention(ui);
         });
         egui::SidePanel::left("workspace")
@@ -2059,6 +2065,7 @@ const fn mode_label(mode: TransitionMode) -> &'static str {
         TransitionMode::KeepSize => "선택한 창 크기 유지",
         TransitionMode::KeepHere => "여기 유지 · 주변만 전환",
         TransitionMode::Bring => "현재 크기로 잠시 가져오기",
+        TransitionMode::Reflow => "연속 규칙 재계산",
         TransitionMode::Restore => "저장된 배치로 복원",
     }
 }
@@ -2312,6 +2319,10 @@ fn tree_editor(
                                 );
                             }
                         });
+                    egui::ComboBox::from_id_salt((&group.id, "reflow-policy")).selected_text(format!("재배치 정책: {:?}", group.reflow)).show_ui(ui, |ui| {
+                        for (policy, label) in [(window_manager_core::ReflowPolicy::ExistingPositionFirst, "기존 위치 우선 (기본)"), (window_manager_core::ReflowPolicy::OnEntryOrRequest, "진입·명시 요청 시 재배치"), (window_manager_core::ReflowPolicy::ContinuousRule, "연속 규칙 · 감지된 상호작용 중 보류")] { ui.selectable_value(&mut group.reflow, policy, label); }
+                    });
+                    ui.small("구성원 계산·저장은 별도 단계입니다. 연속 규칙은 공개/확장/보호 영역과 전경 관리 창·드래그·모달 중 보류합니다. 앱 내부 입력 상태는 완전히 감지할 수 없습니다.");
                     ui.horizontal(|ui| {
                         ui.label("간격 수식");
                         ui.text_edit_singleline(&mut group.gap);

@@ -370,6 +370,15 @@ pub struct Variant {
     pub condition: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReflowPolicy {
+    #[default]
+    ExistingPositionFirst,
+    OnEntryOrRequest,
+    ContinuousRule,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
@@ -396,6 +405,8 @@ pub struct Group {
     pub parameters: BTreeMap<String, String>,
     #[serde(default)]
     pub sort_formula: Option<String>,
+    #[serde(default)]
+    pub reflow: ReflowPolicy,
 }
 
 impl Group {
@@ -418,6 +429,7 @@ impl Group {
             alignment: Alignment::Start,
             parameters: BTreeMap::new(),
             sort_formula: None,
+            reflow: ReflowPolicy::default(),
         }
     }
 }

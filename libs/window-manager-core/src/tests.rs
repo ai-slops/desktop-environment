@@ -1373,6 +1373,7 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             expansion: None,
             before_expansion: None,
             group_inputs: BTreeMap::new(),
+            variant_history: BTreeMap::new(),
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;
@@ -2228,4 +2229,125 @@ fn first_placement_mut<'a>(
         .iter_mut()
         .find_map(|node| if let Node::Placement(placement) = node { Some(placement) } else { None })
         .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "Fixture Placement missing", "fixture"))
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture tree.
+fn continuous_rules_defer_interaction_and_reflow_only_opted_in_groups() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    let root = group_mut(&mut config, &target)?;
+    root.strategy = Strategy::Horizontal;
+    let first = root.children.remove(0);
+    let mut continuous = Group::new("Continuous child".into());
+    continuous.reflow = ReflowPolicy::ContinuousRule;
+    continuous.children.push(first);
+    let child = continuous.id.clone();
+    root.children.insert(0, Node::Group(continuous));
+    let initial =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    let mut current = settled_snapshot(&initial, &snapshot);
+    let mut runtime = Runtime::default();
+    initial.commit(&mut runtime);
+    let root = config.views.get_mut(&target.view).unwrap().roots.get_mut("main").unwrap();
+    let group = root.group_mut(&child).unwrap();
+    if let Node::Placement(placement) = &mut group.children[0] {
+        placement.default_preference.width_formula = Some("available_width / 3".into());
+    }
+    config.revision += 1;
+    let request = continuous_request(&config, &runtime, &current, "work", false)?;
+    let reflow = plan(&config, &runtime, &current, &request)?;
+    assert!(
+        reflow
+            .mutations
+            .iter()
+            .any(|mutation| mutation.window == "preview" && mutation.geometry.is_some())
+    );
+    assert!(!reflow.mutations.iter().any(|mutation| mutation.window == "second"));
+    assert_eq!(reflow.desired["second"].frame, current.windows["second"].frame);
+    assert_eq!(reflow.presentations["work"].visit, runtime.presentations["work"].visit);
+    current.focused = Some("preview".into());
+    assert_eq!(
+        continuous_request(&config, &runtime, &current, "work", false)
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::PermissionDenied)
+    );
+    current.focused = None;
+    assert!(continuous_request(&config, &runtime, &current, "work", true).is_err());
+    config.slots.get_mut("work").unwrap().designated_public = true;
+    assert!(continuous_request(&config, &runtime, &current, "work", false).is_err());
+    Ok(())
+}
+
+#[test]
+fn existing_position_first_keeps_owned_frames_when_membership_is_explicitly_added() -> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    let initial =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    let mut runtime = Runtime::default();
+    initial.commit(&mut runtime);
+    let mut current = settled_snapshot(&initial, &snapshot);
+    let mut reference = config.windows["preview"].clone();
+    reference.id = "new-member".into();
+    config.windows.insert(reference.id.clone(), reference);
+    let mut observed = current.windows["preview"].clone();
+    observed.binding.handle = 2;
+    observed.binding.generation = 2;
+    current.windows.insert("new-member".into(), observed);
+    let mut placement = Placement::new("new-member".into(), "new".into());
+    placement.default_preference.client_size = Some([300.0, 220.0]);
+    group_mut(&mut config, &target)?.children.push(Node::Placement(placement));
+    config.revision += 1;
+    let open = plan(&config, &runtime, &current, &Request::open(&config, target.clone()))?;
+    assert_eq!(open.desired["preview"].frame, current.windows["preview"].frame);
+    assert!(!open.mutations.iter().any(|mutation| mutation.window == "preview"));
+    assert!(open.desired.contains_key("new-member"));
+    let mut explicit = Request::open(&config, target);
+    explicit.mode = TransitionMode::Restore;
+    assert!(
+        !plan(&config, &runtime, &current, &explicit)?.presentations["work"]
+            .overrides
+            .contains_key("preview")
+    );
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture display.
+fn variant_oscillation_freezes_last_good_arrangement_and_explicit_restore_resets_it() -> Result<()>
+{
+    let (mut config, mut snapshot, target) = fixture();
+    let group = group_mut(&mut config, &target)?;
+    let group_id = group.id.clone();
+    group.variants.push(Variant {
+        id: "threshold".into(),
+        below_width: Some(1999.5),
+        below_height: None,
+        hysteresis: 0.0,
+        strategy: Strategy::Grid,
+        ratios: vec![],
+        condition: None,
+    });
+    let mut runtime = Runtime::default();
+    for (index, width) in [2000, 1999, 2000, 1999].into_iter().enumerate() {
+        snapshot.displays.get_mut("monitor").unwrap().work_area.width = width;
+        snapshot.now_ms = 1000 + u64::try_from(index).unwrap() * 100;
+        let mut request = Request::open(&config, target.clone());
+        request.mode = TransitionMode::KeepSize;
+        let next = plan(&config, &runtime, &snapshot, &request)?;
+        if index == 3 {
+            assert!(next.diagnostics.iter().any(|message| message.contains("oscillation")));
+            assert!(next.mutations.is_empty());
+            assert_eq!(next.presentations["work"].variants[&group_id], "base");
+        }
+        snapshot = settled_snapshot(&next, &snapshot);
+        next.commit(&mut runtime);
+    }
+    assert!(runtime.presentations["work"].variant_history[&group_id].frozen);
+    let mut restore = Request::open(&config, target);
+    restore.mode = TransitionMode::Restore;
+    let next = plan(&config, &runtime, &snapshot, &restore)?;
+    assert!(!next.presentations["work"].variant_history[&group_id].frozen);
+    assert_eq!(next.presentations["work"].variants[&group_id], "threshold");
+    Ok(())
 }

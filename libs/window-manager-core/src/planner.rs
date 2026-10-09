@@ -23,6 +23,7 @@ pub enum TransitionMode {
     KeepHere,
     Bring,
     Restore,
+    Reflow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +102,7 @@ pub struct Presentation {
     pub expansion: Option<crate::Expansion>,
     pub before_expansion: Option<Box<crate::ExpansionMemory>>,
     pub group_inputs: BTreeMap<Id, BTreeMap<String, f64>>,
+    pub variant_history: BTreeMap<Id, crate::VariantHistory>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +124,7 @@ pub struct Runtime {
     pub attention_targets: BTreeMap<Id, Target>,
     pub geometry: BTreeMap<Id, Desired>,
     pub public_content: BTreeSet<Id>,
+    pub pending_reflow: BTreeMap<Id, String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -180,6 +183,7 @@ pub struct Impact {
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub id: Id,
+    pub mode: Option<TransitionMode>,
     pub config_revision: u64,
     pub topology_revision: u64,
     pub scope: BTreeSet<Id>,
@@ -437,6 +441,7 @@ pub fn plan(
         .collect();
     let mut result = Plan {
         id: request.id.clone(),
+        mode: Some(request.mode),
         config_revision: config.revision,
         topology_revision: snapshot.topology_revision,
         scope: request.scope.clone(),
@@ -452,6 +457,38 @@ pub fn plan(
         domains: vec![request.scope.clone()],
         blocked: BTreeMap::new(),
     };
+    if request.mode == TransitionMode::Reflow {
+        if request.focus.is_some()
+            || !request.retain.is_empty()
+            || !request.release.is_empty()
+            || request.expansion.is_some()
+        {
+            return Err(Error::new(
+                ErrorCode::OutOfScope,
+                "Automatic reflow cannot transfer, expand, preserve new targets or request focus",
+                &request.id,
+            ));
+        }
+        for (slot, (view, root)) in &mapped {
+            crate::continuous_permission(config, runtime, snapshot, slot, false)?;
+            let active = &runtime.presentations[slot];
+            if active.view != *view
+                || active.root != *root
+                || active.filter != request.filter
+                || active.bindings != root_bindings(&config.views[view].roots[root], snapshot)
+                || request
+                    .selected_tabs
+                    .iter()
+                    .any(|(group, child)| active.selected_tabs.get(group) != Some(child))
+            {
+                return Err(Error::new(
+                    ErrorCode::PermissionDenied,
+                    "Automatic reflow requires the unchanged active binding/membership and tab/filter scope",
+                    slot,
+                ));
+            }
+        }
+    }
     // An ordinary recall preserves the current Visit and manual live state.
     if runtime.completed.contains(&request.id)
         || (request.mode == TransitionMode::Open
@@ -574,6 +611,7 @@ pub fn plan(
             expansion: None,
             before_expansion: None,
             group_inputs: BTreeMap::new(),
+            variant_history: BTreeMap::new(),
         });
         if presentation.expansion.is_some() && request.expansion.is_none() {
             if let Some(memory) = presentation.before_expansion.take() {
@@ -600,6 +638,31 @@ pub fn plan(
         }
         presentation.filter.clone_from(&request.filter);
         let bindings = root_bindings(authored_root, snapshot);
+        if request.mode == TransitionMode::Open
+            && prior.is_some_and(|prior| prior.bindings != bindings)
+        {
+            for placement in crate::existing_position_members(authored_root) {
+                if runtime
+                    .claims
+                    .get(&placement.window)
+                    .is_some_and(|claim| claim.slot == *slot_id && claim.placement == placement.id)
+                    && let Some(observed) = snapshot.windows.get(&placement.window)
+                {
+                    presentation.overrides.entry(placement.window.clone()).or_insert_with(|| {
+                        VisitOverride {
+                            mode: TransitionMode::KeepHere,
+                            frame: observed.frame,
+                            client: observed.client,
+                            dpi: observed.dpi,
+                            display: observed.display.clone(),
+                            preserve_position: true,
+                            preserve_size: true,
+                        }
+                    });
+                }
+            }
+            result.diagnostics.push(format!("{slot_id}: existing-position-first keeps owned members; explicit Restore previews reflow"));
+        }
         presentation.overrides.retain(|window, _| {
             !presentation.bindings.contains_key(window)
                 || bindings.get(window) == presentation.bindings.get(window)
@@ -610,6 +673,7 @@ pub fn plan(
         presentation.context_dpi = snapshot.displays[&slot.display].dpi;
         if request.mode == TransitionMode::Restore {
             presentation.overrides.clear();
+            presentation.variant_history.clear();
         }
         for (group, child) in &request.selected_tabs {
             presentation.selected_tabs.insert(group.clone(), child.clone());
@@ -677,6 +741,7 @@ pub fn plan(
             reservations: Vec::new(),
             explicit_tabs: &request.selected_tabs,
             parameters,
+            automatic: request.mode == TransitionMode::Reflow,
         };
         // Reserve immutable geometry before allocating any siblings.
         for (window_id, exception) in &evaluator.presentation.overrides {
@@ -1048,6 +1113,28 @@ pub fn plan(
             }
         }
     }
+    if request.mode == TransitionMode::Reflow {
+        let desired: Vec<_> = result.desired.values().collect();
+        for (index, window) in desired.iter().enumerate() {
+            for other in &desired[..index] {
+                if window.frame.overlaps(other.frame)
+                    && (snapshot
+                        .windows
+                        .get(&window.window)
+                        .is_some_and(|current| current.frame != window.frame)
+                        || snapshot
+                            .windows
+                            .get(&other.window)
+                            .is_some_and(|current| current.frame != other.frame))
+                {
+                    return Err(conflict(
+                        &window.placement,
+                        "Automatic reflow overlaps an existing arrangement; choose explicit reflow",
+                    ));
+                }
+            }
+        }
+    }
     for mutation in &result.mutations {
         if let Some(slot) = result
             .desired
@@ -1139,6 +1226,11 @@ impl Plan {
         runtime: &Runtime,
         snapshot: &Snapshot,
     ) -> Result<Self> {
+        if self.mode == Some(TransitionMode::Reflow) {
+            for slot in scope {
+                crate::continuous_permission(config, runtime, snapshot, slot, false)?;
+            }
+        }
         let mut component = self.scoped_subset(scope, runtime);
         component.expected.retain(|window, _| {
             component.desired.contains_key(window)
@@ -1309,6 +1401,7 @@ struct Evaluator<'a> {
     reservations: Vec<Rect>,
     explicit_tabs: &'a BTreeMap<Id, Id>,
     parameters: BTreeMap<String, f64>,
+    automatic: bool,
 }
 
 impl Evaluator<'_> {
@@ -1349,6 +1442,9 @@ impl Evaluator<'_> {
     }
 
     fn group(&mut self, group: &Group, area: Rect, preserve: bool) -> Result<()> {
+        if self.automatic && group.reflow != crate::ReflowPolicy::ContinuousRule {
+            return self.stable_group(group, area);
+        }
         let desired = self.desired.clone();
         let presentation = self.presentation.clone();
         let parameters = self.parameters.clone();
@@ -1418,6 +1514,67 @@ impl Evaluator<'_> {
                 }
             }
         }
+    }
+
+    fn stable_group(&mut self, group: &Group, fallback_area: Rect) -> Result<()> {
+        let area = self.presentation.group_bounds.get(&group.id).copied().unwrap_or(fallback_area);
+        if let Some(inputs) = self.presentation.group_inputs.get(&group.id) {
+            self.parameters.clone_from(inputs);
+        }
+        let prior_variant =
+            self.presentation.variants.get(&group.id).map_or("base", String::as_str);
+        let strategy = group
+            .variants
+            .iter()
+            .find(|variant| variant.id == prior_variant)
+            .map_or(group.strategy, |variant| variant.strategy);
+        let selected = self.presentation.selected_tabs.get(&group.id);
+        let active = if matches!(strategy, Strategy::SemanticTabs | Strategy::ResponsiveTabs) {
+            selected
+                .and_then(|selected| {
+                    group.children.iter().find(|child| child.find(selected).is_some())
+                })
+                .map_or_else(
+                    || group.children.first().into_iter().collect::<Vec<_>>(),
+                    |child| vec![child],
+                )
+        } else {
+            group.children.iter().collect()
+        };
+        for child in active {
+            match child {
+                Node::Group(child) => {
+                    let allocated =
+                        self.presentation.group_bounds.get(&child.id).copied().unwrap_or(area);
+                    self.group(child, allocated, false)?;
+                }
+                Node::Placement(placement) => {
+                    if let Some(current) = self.runtime.geometry.get(&placement.window)
+                        && let Some(observed) = self.snapshot.windows.get(&placement.window)
+                        && current.placement == placement.id
+                        && current.slot == self.slot.id
+                    {
+                        let mut frozen = current.clone();
+                        frozen.frame = observed.frame;
+                        frozen.dpi = observed.dpi;
+                        frozen.client_target = observed.client.map(Some);
+                        frozen.strict_size = true;
+                        if self.desired.insert(placement.window.clone(), frozen).is_some() {
+                            return Err(conflict(
+                                &placement.id,
+                                "Automatic reflow found competing occurrences",
+                            ));
+                        }
+                    } else {
+                        return Err(conflict(
+                            &placement.id,
+                            "Automatic reflow cannot create a new owner; preview the membership explicitly",
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn source_bounds(&self, group: &Group) -> Option<Rect> {
@@ -1629,6 +1786,17 @@ impl Evaluator<'_> {
             }
         }
         let variant_id = selected_variant.map_or("base", |variant| variant.id.as_str());
+        if self.presentation.variant_history.entry(group.id.clone()).or_default().observe(
+            variant_id,
+            self.snapshot.now_ms,
+            self.config.revision,
+        ) {
+            let previous =
+                self.presentation.variants.get(&group.id).cloned().unwrap_or_else(|| "base".into());
+            self.preserve_arrangement(group, area, &previous, false)?;
+            self.diagnostics.push(format!("{}: repeated variant oscillation; last valid arrangement frozen until explicit Restore or rule revision", group.id));
+            return Ok(());
+        }
         let strategy = if group.strategy == Strategy::SemanticTabs {
             Strategy::SemanticTabs
         } else {

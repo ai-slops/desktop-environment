@@ -135,6 +135,7 @@ pub struct PublicPresentation {
     pub expansion: Option<crate::Expansion>,
     pub area: crate::Rect,
     pub group_inputs: BTreeMap<Id, BTreeMap<String, f64>>,
+    pub frozen_groups: BTreeSet<Id>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -145,6 +146,7 @@ pub struct PublicSnapshot {
     pub cursor: EventCursor,
     pub paused: bool,
     pub suspended_slots: BTreeSet<Id>,
+    pub pending_reflow: BTreeMap<Id, String>,
     pub windows: BTreeMap<Id, PublicWindow>,
     pub presentations: BTreeMap<Id, PublicPresentation>,
 }
@@ -164,6 +166,7 @@ impl PublicSnapshot {
             cursor,
             paused: runtime.paused,
             suspended_slots: runtime.suspended.clone(),
+            pending_reflow: runtime.pending_reflow.clone(),
             windows: config
                 .windows
                 .keys()
@@ -226,6 +229,12 @@ impl PublicSnapshot {
                             expansion: presentation.expansion.clone(),
                             area: presentation.context_area,
                             group_inputs: presentation.group_inputs.clone(),
+                            frozen_groups: presentation
+                                .variant_history
+                                .iter()
+                                .filter(|(_, history)| history.frozen)
+                                .map(|(group, _)| group.clone())
+                                .collect(),
                         },
                     )
                 })
