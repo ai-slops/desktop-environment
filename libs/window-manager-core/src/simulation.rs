@@ -110,6 +110,7 @@ pub fn simulate(config: &Configuration, input: &Simulation) -> Result<Simulation
                 tags: Vec::new(),
                 application_hint: None,
                 allow_hide: true,
+                public_content: false,
                 protection: crate::Protection::default(),
                 output_protection: crate::OutputProtection::None,
                 capabilities: crate::CapabilityProfile::default(),

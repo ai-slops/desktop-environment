@@ -129,8 +129,13 @@ pub fn expansion_layout<'a>(
         if active.expansion.as_ref() != Some(expansion) && active.expansion.is_some() {
             return Err(invalid(slot, "Collapse the existing expansion before changing its scope"));
         }
-        memory.selected_tabs = active.selected_tabs.clone();
-        memory.variants = active.variants.clone();
+        if request.targets.iter().any(|target| {
+            target.view == active.view
+                && target.roots.get(&active.root).is_some_and(|id| id == slot)
+        }) {
+            memory.selected_tabs = active.selected_tabs.clone();
+            memory.variants = active.variants.clone();
+        }
     }
     for borrowed in &expansion.borrow_slots {
         if let Some(active) = runtime.presentations.get(borrowed) {

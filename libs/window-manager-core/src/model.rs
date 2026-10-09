@@ -173,6 +173,8 @@ pub struct WindowRef {
     pub application_hint: Option<String>,
     /// Hide is opt-in per reference after compatibility testing, not inferred from the executable.
     pub allow_hide: bool,
+    #[serde(default)]
+    pub public_content: bool,
     pub protection: Protection,
     #[serde(default)]
     pub output_protection: OutputProtection,
@@ -189,6 +191,7 @@ impl WindowRef {
             tags: Vec::new(),
             application_hint: None,
             allow_hide: false,
+            public_content: false,
             protection: Protection::default(),
             output_protection: OutputProtection::None,
             capabilities: CapabilityProfile::default(),
@@ -548,7 +551,7 @@ pub struct Composition {
 #[serde(deny_unknown_fields)]
 pub struct Shortcut {
     pub number: u32,
-    pub target: Target,
+    pub target: crate::ShortcutTarget,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

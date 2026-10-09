@@ -107,6 +107,7 @@ mod tests {
                 tags: vec![],
                 application_hint: None,
                 allow_hide: false,
+                public_content: false,
                 protection: Protection::default(),
                 output_protection: OutputProtection::None,
                 capabilities: CapabilityProfile::default(),
@@ -598,6 +599,19 @@ impl State {
                     .extend(component.mutations.iter().map(|mutation| mutation.window.clone()));
             }
         }
+        self.runtime.public_content.extend(
+            plan.desired
+                .iter()
+                .filter(|(_, desired)| {
+                    committed_slots.contains(&desired.slot)
+                        && self
+                            .config
+                            .slots
+                            .get(&desired.slot)
+                            .is_some_and(|slot| slot.designated_public)
+                })
+                .map(|(window, _)| window.clone()),
+        );
         if !committed_slots.is_empty() && self.undoing.as_ref() != Some(&plan.id) {
             self.undo.push(UndoRecord::capture(
                 &plan.scoped_subset(&committed_slots, &prior_runtime),

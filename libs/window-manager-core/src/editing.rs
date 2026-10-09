@@ -72,3 +72,61 @@ impl Runtime {
         }
     }
 }
+
+impl crate::Configuration {
+    /// An explicit choice to replace BOTH dimension rules; local manual edits never call this.
+    pub fn replace_size_formulas(
+        &mut self,
+        view: &str,
+        placement: &str,
+        context: &str,
+        size: [f64; 2],
+    ) -> crate::Result<()> {
+        let mut draft = self.clone();
+        draft.save_properties(view, placement, context, None, Some(size))?;
+        let node = draft
+            .views
+            .get_mut(view)
+            .and_then(|view| view.roots.values_mut().find_map(|root| root.placement_mut(placement)))
+            .ok_or_else(|| {
+                crate::Error::new(crate::ErrorCode::TargetMissing, "Placement missing", placement)
+            })?;
+        let preference = node.preferences.get_mut(context).ok_or_else(|| {
+            crate::Error::new(crate::ErrorCode::TargetMissing, "Context missing", placement)
+        })?;
+        preference.client_size = Some(size);
+        preference.size_override = None;
+        preference.width_formula = None;
+        preference.height_formula = None;
+        draft.validate()?;
+        *self = draft;
+        Ok(())
+    }
+    /// Copy only the authored size rule into the portable baseline. Geometry contexts,
+    /// position and manual overrides remain independent.
+    pub fn promote_size_rule(
+        &mut self,
+        view: &str,
+        placement: &str,
+        context: &str,
+    ) -> crate::Result<()> {
+        let mut draft = self.clone();
+        let node = draft
+            .views
+            .get_mut(view)
+            .and_then(|view| view.roots.values_mut().find_map(|root| root.placement_mut(placement)))
+            .ok_or_else(|| {
+                crate::Error::new(crate::ErrorCode::TargetMissing, "Placement missing", placement)
+            })?;
+        let rule = node.preferences.get(context).cloned().ok_or_else(|| {
+            crate::Error::new(crate::ErrorCode::TargetMissing, "Context rule missing", placement)
+        })?;
+        node.default_preference.client_size = rule.client_size;
+        node.default_preference.width_formula = rule.width_formula;
+        node.default_preference.height_formula = rule.height_formula;
+        draft.revision += 1;
+        draft.validate()?;
+        *self = draft;
+        Ok(())
+    }
+}

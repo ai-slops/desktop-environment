@@ -121,6 +121,7 @@ pub struct Runtime {
     pub providers: crate::ProviderRegistry,
     pub attention_targets: BTreeMap<Id, Target>,
     pub geometry: BTreeMap<Id, Desired>,
+    pub public_content: BTreeSet<Id>,
 }
 
 #[derive(Clone, Debug, Serialize)]

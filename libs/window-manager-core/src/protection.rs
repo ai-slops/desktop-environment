@@ -111,3 +111,42 @@ pub fn control_bounds(config: &Configuration, snapshot: &crate::Snapshot) -> Opt
         .then_some(bounds)
     })
 }
+
+/// Designation is a persistent content-sharing warning, never proof of capture privacy.
+#[must_use]
+pub fn shared_public_content(
+    config: &crate::Configuration,
+    runtime: &crate::Runtime,
+    window: &str,
+    now_ms: u64,
+) -> bool {
+    if config.windows.get(window).is_some_and(|reference| reference.public_content)
+        || runtime.public_content.contains(window)
+        || runtime.providers.output(window, now_ms) == crate::OutputState::OutputLinked
+        || runtime.claims.get(window).is_some_and(|claim| {
+            config.slots.get(&claim.slot).is_some_and(|slot| slot.designated_public)
+        })
+    {
+        return true;
+    }
+    let targets =
+        config.compositions.values().flat_map(|composition| composition.targets.clone()).chain(
+            config
+                .shortcuts
+                .iter()
+                .filter_map(|shortcut| shortcut.target.resolve(config).ok())
+                .flat_map(|request| request.targets),
+        );
+    targets.into_iter().any(|target| {
+        target.roots.iter().any(|(role, slot)| {
+            config.slots.get(slot).is_some_and(|slot| slot.designated_public)
+                && config.views.get(&target.view).and_then(|view| view.roots.get(role)).is_some_and(
+                    |root| {
+                        let mut placements = Vec::new();
+                        root.placements(&mut placements);
+                        placements.iter().any(|placement| placement.window == window)
+                    },
+                )
+        })
+    })
+}

@@ -86,6 +86,14 @@ enum DragMode {
     Copy,
 }
 
+#[derive(Clone, Default, PartialEq, Eq)]
+enum ShortcutSelection {
+    #[default]
+    View,
+    Workspace,
+    Composition(Id),
+}
+
 struct Manager {
     path: PathBuf,
     _lock: std::fs::File,
@@ -123,6 +131,8 @@ struct Manager {
     size_context: String,
     size_destinations: BTreeSet<Id>,
     transient_filter: Option<Query>,
+    shortcut_selection: ShortcutSelection,
+    last_transition: Option<Request>,
     expansion_node: Id,
     expansion_slots: BTreeSet<Id>,
     parameter_group: Id,
@@ -217,7 +227,7 @@ impl Manager {
         let page = 0;
         let package_path =
             path.with_file_name("layout-package.json").to_string_lossy().into_owned();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             expansion_node: String::new(),
             expansion_slots: BTreeSet::new(),
@@ -445,10 +455,10 @@ impl Manager {
                     if let Some(shortcut) =
                         self.config.shortcuts.iter().find(|shortcut| shortcut.number == number)
                     {
-                        self.request_preview(
-                            Request::open(&self.config, shortcut.target.clone()),
-                            true,
-                        );
+                        match shortcut.target.resolve(&self.config) {
+                            Ok(request) => self.request_preview(request, true),
+                            Err(error) => self.error = Some(error.to_string()),
+                        }
                     }
                 }
                 Event::Error(error) => {
@@ -491,6 +501,7 @@ impl Manager {
             self.pending_requests.push((request, apply));
             return;
         }
+        self.last_transition = Some(request.clone());
         self.latest_request = Some(request.id.clone());
         self.apply_when_previewed = apply;
         self.preview = None;
@@ -699,6 +710,17 @@ impl Manager {
                         )
                     },
                 ));
+                if window_manager_core::shared_public_content(
+                    &self.config,
+                    &self.runtime,
+                    &reference.id,
+                    self.snapshot.now_ms,
+                ) {
+                    ui.colored_label(
+                        Color32::YELLOW,
+                        "공개 배치와 앱 콘텐츠 공유 · 복사해도 같은 창",
+                    );
+                }
                 let mut retain = self.retained.contains(&reference.id);
                 if ui.checkbox(&mut retain, "전환 시 유지").changed() {
                     if retain {
@@ -723,6 +745,10 @@ impl Manager {
         {
             ui.separator();
             ui.text_edit_singleline(&mut edit.alias);
+            ui.checkbox(
+                &mut edit.public_content,
+                "이 창의 콘텐츠는 공개 출력에 사용됨 (공유 경고 유지)",
+            );
             ui.horizontal(|ui| {
                 ui.checkbox(&mut edit.protection.geometry_lock, "위치·크기 잠금");
                 ui.checkbox(&mut edit.protection.maintain_visible, "계속 표시");
@@ -835,6 +861,7 @@ impl Manager {
             tags: Vec::new(),
             application_hint: Some(candidate.class.clone()),
             allow_hide: false,
+            public_content: false,
             protection: Protection::default(),
             output_protection: window_manager_core::OutputProtection::None,
             capabilities: window_manager_core::CapabilityProfile::default(),
@@ -1062,6 +1089,24 @@ impl Manager {
     fn editor(&mut self, ui: &mut egui::Ui) {
         ui.heading("배치 편집");
         ui.label("구조 저장은 실제 창을 이동하지 않습니다. 미리보기와 적용으로 반영하세요.");
+        if let Some(view) = self.config.views.get(&self.selected_view) {
+            let mut placements = Vec::new();
+            for root in view.roots.values() {
+                root.placements(&mut placements);
+            }
+            let shared =
+                placements.iter().map(|placement| &placement.window).collect::<BTreeSet<_>>();
+            for window in shared {
+                if window_manager_core::shared_public_content(
+                    &self.config,
+                    &self.runtime,
+                    window,
+                    self.snapshot.now_ms,
+                ) {
+                    ui.colored_label(Color32::YELLOW, format!("{} · 공개 출력과 콘텐츠를 공유합니다. 배치 복사는 앱 내용을 복제하지 않습니다.", self.config.windows[window].alias));
+                }
+            }
+        }
         let mut tab_action = None;
         if let Some(view) = self.draft.views.get_mut(&self.selected_view) {
             ui.horizontal(|ui| {
@@ -1098,6 +1143,14 @@ impl Manager {
         self.expansion_tools(ui);
         self.formula_tools(ui);
         self.spatial_tools(ui);
+        if ui.button("저장된 구조로 다시 계산 미리보기 · 임시 유지 해제").clicked()
+            && let Some(target) = self.target()
+        {
+            let mut request = Request::open(&self.config, target);
+            request.mode = TransitionMode::Restore;
+            request.filter.clone_from(&self.transient_filter);
+            self.request_preview(request, false);
+        }
         if ui.button("배치 구조 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -1116,15 +1169,67 @@ impl Manager {
             group.children.push(Node::Group(Group::new("새 그룹".into())));
         }
         ui.separator();
-        ui.label("고정 단축키: 현재 배치 ID와 영역에 연결 (저장 후 앱 재시작)");
+        self.shortcuts_editor(ui);
+    }
+
+    fn shortcuts_editor(&mut self, ui: &mut egui::Ui) {
+        ui.label("고정 단축키: 대상 ID와 영역에 연결 (등록 변경 후 앱 재시작)");
+        egui::ComboBox::from_id_salt("shortcut-destination")
+            .selected_text(match &self.shortcut_selection {
+                ShortcutSelection::View => "현재 배치 · 선택한 고정 영역",
+                ShortcutSelection::Workspace => "현재 작업 공간 · 기억한 배치 · 고정 영역",
+                ShortcutSelection::Composition(id) => self
+                    .config
+                    .compositions
+                    .get(id)
+                    .map_or("구성 없음", |composition| composition.name.as_str()),
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.shortcut_selection,
+                    ShortcutSelection::View,
+                    "현재 배치 · 선택한 고정 영역",
+                );
+                ui.selectable_value(
+                    &mut self.shortcut_selection,
+                    ShortcutSelection::Workspace,
+                    "현재 작업 공간 · 기억한 배치 · 고정 영역",
+                );
+                for composition in self.config.compositions.values() {
+                    ui.selectable_value(
+                        &mut self.shortcut_selection,
+                        ShortcutSelection::Composition(composition.id.clone()),
+                        format!("전체 화면 구성: {}", composition.name),
+                    );
+                }
+            });
         ui.horizontal(|ui| {
             for number in 1..=9 {
                 if ui.button(format!("{number}")).clicked()
                     && let Some(target) = self.target()
                 {
+                    let destination = match &self.shortcut_selection {
+                        ShortcutSelection::View => {
+                            window_manager_core::CommandTarget::View { target }
+                        }
+                        ShortcutSelection::Workspace => {
+                            window_manager_core::CommandTarget::Workspace {
+                                workspace: self.config.views[&target.view].workspace.clone(),
+                                roots: target.roots,
+                            }
+                        }
+                        ShortcutSelection::Composition(id) => {
+                            window_manager_core::CommandTarget::Composition {
+                                composition: id.clone(),
+                            }
+                        }
+                    };
                     let mut draft = self.config.clone();
                     draft.shortcuts.retain(|shortcut| shortcut.number != number);
-                    draft.shortcuts.push(Shortcut { number, target });
+                    draft.shortcuts.push(Shortcut {
+                        number,
+                        target: window_manager_core::ShortcutTarget::Command(destination),
+                    });
                     self.commit(draft);
                 }
             }
@@ -1400,6 +1505,7 @@ impl Manager {
                             tags: Vec::new(),
                             application_hint: None,
                             allow_hide: false,
+                            public_content: false,
                             protection: Protection::default(),
                             output_protection: window_manager_core::OutputProtection::None,
                             capabilities: window_manager_core::CapabilityProfile::default(),
@@ -1602,7 +1708,7 @@ impl Manager {
             }
         });
     }
-    fn transition_bar(&mut self, ui: &mut egui::Ui) {
+    fn temporary_filter_tools(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("임시 필터 · 저장된 배치에 영향 없음").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("태그 필터").clicked() { self.transient_filter = Some(Query::Tag(String::new())); }
@@ -1610,8 +1716,44 @@ impl Manager {
                 if ui.button("임시 필터 해제 미리보기").clicked() { self.transient_filter = None; if let Some(target) = self.target() { self.request_preview(Request::open(&self.config, target), false); } }
             });
             if let Some(query) = &mut self.transient_filter { query_editor(ui, query); }
+            if let Some(query) = self.transient_filter.clone() { ui.horizontal(|ui| {
+                ui.label("새 배치 이름"); ui.text_edit_singleline(&mut self.name);
+                if ui.button("필터 결과를 독립 배치로 저장").clicked() { let mut draft = self.config.clone(); match draft.save_filtered_view(&self.selected_view, self.name.clone(), &query) {
+                    Ok(id) => { if self.commit(draft) { self.select_view(id); self.transient_filter = None; self.notice = "필터 결과를 독립 배치로 저장했습니다. 창 콘텐츠는 공유하며 실제 창은 변경되지 않았습니다.".into(); } },
+                    Err(error) => self.error = Some(error.to_string()),
+                } }
+            }); }
             ui.small("필터 편집은 창을 바꾸지 않습니다. 전환 미리보기 → 적용으로 확인하세요. unknown은 제외됩니다.");
         });
+    }
+
+    fn fit_actions(&mut self, ui: &mut egui::Ui) {
+        if self.error.is_some()
+            || self.preview.as_ref().is_some_and(|plan| {
+                !plan.blocked.is_empty()
+                    || plan.diagnostics.iter().any(|message| message.contains("retained"))
+            })
+        {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("임시 유지 해제·저장 규칙으로 다시 미리보기").clicked()
+                    && let Some(mut request) = self.last_transition.clone()
+                {
+                    request.id = new_id("restore-preview");
+                    request.mode = TransitionMode::Restore;
+                    request.retain.clear();
+                    request.focus = None;
+                    self.request_preview(request, false);
+                }
+                if ui.button("접기·최소 크기·그룹 규칙 편집").clicked() {
+                    self.page = 1;
+                }
+            });
+            ui.small("다시 미리보기는 현재 범위를 유지합니다. 잠금·최소 크기·출력 보호는 그대로 검사합니다. 실패 영역은 관리 재개 후 다시 미리보세요.");
+        }
+    }
+
+    fn transition_bar(&mut self, ui: &mut egui::Ui) {
+        self.temporary_filter_tools(ui);
         ui.horizontal_wrapped(|ui| {
             egui::ComboBox::from_id_salt("mode").selected_text(mode_label(self.mode)).show_ui(
                 ui,
@@ -1679,7 +1821,7 @@ impl Manager {
             draw_preview(ui, &plan, &self.config, &self.snapshot);
             for desired in plan.desired.values() {
                 if let Some(observed) = self.snapshot.windows.get(&desired.window).cloned() {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(
                             self.config
                                 .windows
@@ -1694,6 +1836,7 @@ impl Manager {
                 }
             }
         }
+        self.fit_actions(ui);
         self.active_property_tools(ui);
         if let Some(result) = &self.result {
             for outcome in &result.windows {
@@ -1768,6 +1911,41 @@ impl Manager {
                             .clicked()
                         {
                             self.save_here(&presentation.view, &desired, &observed, true);
+                        }
+                        if ui
+                            .add_enabled(
+                                compatible,
+                                egui::Button::new("크기 수식을 현재 값으로 대체"),
+                            )
+                            .clicked()
+                        {
+                            let scale = f64::from(observed.dpi) / 96.0;
+                            let mut draft = self.config.clone();
+                            match draft.replace_size_formulas(
+                                &presentation.view,
+                                &desired.placement,
+                                &desired.context,
+                                observed.client.map(|value| f64::from(value) / scale),
+                            ) {
+                                Ok(()) => {
+                                    self.commit(draft);
+                                }
+                                Err(error) => self.error = Some(error.to_string()),
+                            }
+                        }
+                        if ui.button("저장된 크기 규칙을 기본 프리셋으로 복사").clicked()
+                        {
+                            let mut draft = self.config.clone();
+                            match draft.promote_size_rule(
+                                &presentation.view,
+                                &desired.placement,
+                                &desired.context,
+                            ) {
+                                Ok(()) => {
+                                    self.commit(draft);
+                                }
+                                Err(error) => self.error = Some(error.to_string()),
+                            }
                         }
                         if !compatible {
                             ui.small("화면·DPI·일반 상태 확인 후 저장");
@@ -2044,6 +2222,27 @@ fn tree_editor(
                 ui.text_edit_singleline(&mut placement.role);
                 ui.small(&placement.window);
             });
+            egui::CollapsingHeader::new("이 배치의 기본 크기 수식 · 새 화면 문맥에 사용")
+                .id_salt((&placement.id, "default-size"))
+                .show(ui, |ui| {
+                    optional_pair(
+                        ui,
+                        "기본 클라이언트 크기",
+                        &mut placement.default_preference.client_size,
+                        [600.0, 400.0],
+                    );
+                    optional_formula(
+                        ui,
+                        "기본 너비 수식",
+                        &mut placement.default_preference.width_formula,
+                    );
+                    optional_formula(
+                        ui,
+                        "기본 높이 수식",
+                        &mut placement.default_preference.height_formula,
+                    );
+                    ui.small("이미 저장된 화면 문맥의 규칙은 독립적으로 유지됩니다.");
+                });
             if let Some(slot) = slots.get(selected_slot) {
                 let keys: Vec<_> = std::iter::once(context_key(slot, "base"))
                     .chain(placement.preferences.keys().cloned())
@@ -2054,7 +2253,10 @@ fn tree_editor(
                     egui::CollapsingHeader::new(format!("크기·위치 규칙 {key}"))
                         .id_salt((&placement.id, &key))
                         .show(ui, |ui| {
-                            let preference = placement.preferences.entry(key).or_default();
+                            let preference = placement
+                                .preferences
+                                .entry(key)
+                                .or_insert_with(|| placement.default_preference.clone());
                             optional_pair(
                                 ui,
                                 "클라이언트 크기",

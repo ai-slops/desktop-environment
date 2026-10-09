@@ -83,6 +83,9 @@ impl Configuration {
                 return Err(invalid(key, "Map key does not match identity"));
             }
             add(key)?;
+            if composition.targets.is_empty() || composition.targets.len() > 128 {
+                return Err(invalid(key, "Composition needs 1–128 explicit targets"));
+            }
             let mut slots = BTreeSet::new();
             for target in &composition.targets {
                 self.validate_target(target)?;
@@ -98,7 +101,7 @@ impl Configuration {
             if !(1..=9).contains(&shortcut.number) || !numbers.insert(shortcut.number) {
                 return Err(invalid("shortcut", "Shortcut must use a unique number 1–9"));
             }
-            self.validate_target(&shortcut.target)?;
+            shortcut.target.validate(self)?;
         }
         if ids.len() > 4096 {
             return Err(invalid("configuration", "Object budget exceeded"));
@@ -195,7 +198,8 @@ impl Configuration {
             .values_mut()
             .find_map(|root| root.placement_mut(placement))
             .ok_or_else(|| invalid(placement, "Placement missing"))?;
-        let preference = placement.preferences.entry(context.into()).or_default();
+        let baseline = placement.default_preference.clone();
+        let preference = placement.preferences.entry(context.into()).or_insert(baseline);
         if let Some(position) = position {
             preference.position_override = Some(position);
         }

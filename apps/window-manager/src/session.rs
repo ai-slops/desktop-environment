@@ -47,6 +47,15 @@ enum SessionCommand {
     Preview {
         request: Request,
     },
+    Recall {
+        target: window_manager_core::CommandTarget,
+    },
+    SaveFilteredView {
+        expected_revision: u64,
+        source: Id,
+        name: String,
+        query: window_manager_core::Query,
+    },
     Collapse {
         slot: Id,
     },
@@ -308,6 +317,23 @@ impl Session {
                 self.preview(Command::WindowAction(self.config.clone(), action))
             }
             SessionCommand::Undo { id } => self.preview(Command::Undo(id)),
+            SessionCommand::Recall { target } => {
+                let request = target.resolve(&self.config)?;
+                self.preview(Command::Preview(self.config.clone(), request))
+            }
+            SessionCommand::SaveFilteredView { expected_revision, source, name, query } => {
+                if expected_revision != self.config.revision {
+                    return Err(Error::new(
+                        ErrorCode::StaleRevision,
+                        "Configuration revision changed",
+                        source,
+                    ));
+                }
+                let mut draft = self.config.clone();
+                let view = draft.save_filtered_view(&source, name, &query)?;
+                self.save_configuration(draft)?;
+                Ok(json!({"view":view,"revision":self.config.revision}))
+            }
             SessionCommand::Collapse { slot } => {
                 self.exchange(Command::Refresh(self.config.clone()))?;
                 let request = self.runtime.collapse_request(&self.config, &slot)?;

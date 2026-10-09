@@ -13,6 +13,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
             tags: vec![],
             application_hint: None,
             allow_hide: true,
+            public_content: false,
             protection: Protection::default(),
             output_protection: OutputProtection::None,
             capabilities: CapabilityProfile::default(),
@@ -2078,4 +2079,153 @@ fn settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_
         Some(ErrorCode::StaleBinding)
     );
     Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture maps.
+fn named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection() -> Result<()> {
+    let (mut config, _, target) = fixture();
+    let workspace = config.views[&target.view].workspace.clone();
+    let destination =
+        CommandTarget::Workspace { workspace: workspace.clone(), roots: target.roots.clone() };
+    assert_eq!(
+        destination.resolve(&config).err().map(|error| error.code),
+        Some(ErrorCode::TargetMissing)
+    );
+    config.workspaces.get_mut(&workspace).unwrap().remembered_view = Some(target.view.clone());
+    config.views.get_mut(&target.view).unwrap().name = "renamed".into();
+    assert_eq!(destination.resolve(&config)?.targets, vec![target.clone()]);
+    let copied = config.copy_view(&target.view, "independent".into())?;
+    config.workspaces.get_mut(&workspace).unwrap().remembered_view = Some(copied.clone());
+    let request = destination.resolve(&config)?;
+    assert_eq!(request.targets[0].view, copied);
+    assert_eq!(request.scope, BTreeSet::from(["work".into()]));
+    config.views.get_mut(&copied).unwrap().roots =
+        BTreeMap::from([("different-role".into(), Node::Group(Group::new("different".into())))]);
+    assert_eq!(
+        destination.resolve(&config).err().map(|error| error.code),
+        Some(ErrorCode::TargetMissing)
+    );
+    let legacy: Shortcut = serde_json::from_value(serde_json::json!({"number":1,"target":target}))
+        .map_err(|error| {
+            Error::new(ErrorCode::InvalidConfiguration, error.to_string(), "fixture")
+        })?;
+    assert_eq!(legacy.target.resolve(&config)?.targets[0], target);
+    config.compositions.insert(
+        "complete".into(),
+        Composition {
+            id: "complete".into(),
+            name: "full".into(),
+            targets: vec![target.clone()],
+            protection: Protection::default(),
+        },
+    );
+    assert_eq!(
+        CommandTarget::Composition { composition: "complete".into() }.resolve(&config)?.targets,
+        vec![target]
+    );
+    assert!(
+        serde_json::from_value::<CommandTarget>(
+            serde_json::json!({"kind":"composition","composition":"complete","slot":"invented"})
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture serialization.
+fn saved_query_is_an_independent_arrangement_without_changing_resources_or_source() -> Result<()> {
+    let (mut config, _, target) = two_window_fixture()?;
+    config.windows.get_mut("second").unwrap().alias = "Editor".into();
+    let original = serde_json::to_value(&config.views[&target.view]).unwrap();
+    let references = serde_json::to_value(&config.windows).unwrap();
+    let filtered = config.save_filtered_view(
+        &target.view,
+        "Filtered".into(),
+        &Query::Alias("Preview".into()),
+    )?;
+    let mut matches = Vec::new();
+    config.views[&filtered].roots["main"].placements(&mut matches);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].window, "preview");
+    assert_ne!(
+        matches[0].id,
+        config.views[&target.view].roots["main"].find(&matches[0].id).map_or("", Node::id)
+    );
+    assert_eq!(serde_json::to_value(&config.views[&target.view]).unwrap(), original);
+    assert_eq!(serde_json::to_value(&config.windows).unwrap(), references);
+    let unknown = config.save_filtered_view(
+        &target.view,
+        "Unknown not public".into(),
+        &Query::Not(Box::new(Query::Private)),
+    )?;
+    let mut missing = Vec::new();
+    config.views[&unknown].roots["main"].placements(&mut missing);
+    assert!(missing.is_empty());
+    config.validate()?;
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture properties.
+fn explicit_formula_replacement_and_default_promotion_are_property_local() -> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    let context = context_key(&config.slots["work"], "base");
+    let placement = first_placement_mut(&mut config, &target)?;
+    placement.default_preference.width_formula = Some("available_width / 2".into());
+    placement.preferences.get_mut(&context).unwrap().position_override = Some([12.0, 34.0]);
+    placement.preferences.get_mut(&context).unwrap().width_formula =
+        Some("available_width / 3".into());
+    let id = placement.id.clone();
+    config.save_properties(&target.view, &id, "new-context", None, Some([400.0, 300.0]))?;
+    assert_eq!(
+        first_placement_mut(&mut config, &target)?.preferences["new-context"]
+            .width_formula
+            .as_deref(),
+        Some("available_width / 2")
+    );
+    config.replace_size_formulas(&target.view, &id, &context, [500.0, 350.0])?;
+    let placement = first_placement_mut(&mut config, &target)?;
+    assert!(placement.preferences[&context].width_formula.is_none());
+    assert_eq!(placement.preferences[&context].position_override, Some([12.0, 34.0]));
+    assert_eq!(placement.default_preference.width_formula.as_deref(), Some("available_width / 2"));
+    config.promote_size_rule(&target.view, &id, &context)?;
+    assert_eq!(
+        first_placement_mut(&mut config, &target)?.default_preference.client_size,
+        Some([500.0, 350.0])
+    );
+    assert_eq!(snapshot.windows["preview"].client, [600, 400]);
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture slot.
+fn copied_private_view_retains_shared_public_content_warning() -> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    config.slots.get_mut("work").unwrap().designated_public = true;
+    config
+        .shortcuts
+        .push(Shortcut { number: 1, target: ShortcutTarget::FixedView(target.clone()) });
+    let copied = config.copy_view(&target.view, "Private copy".into())?;
+    let runtime = Runtime::default();
+    assert!(shared_public_content(&config, &runtime, "preview", snapshot.now_ms));
+    let mut placements = Vec::new();
+    config.views[&copied].roots["main"].placements(&mut placements);
+    assert_eq!(placements[0].window, "preview");
+    let public =
+        PublicSnapshot::capture(&config, &runtime, &snapshot, EventLog::default().cursor());
+    assert!(public.windows["preview"].shared_public_content);
+    Ok(())
+}
+
+fn first_placement_mut<'a>(
+    config: &'a mut Configuration,
+    target: &Target,
+) -> Result<&'a mut Placement> {
+    group_mut(config, target)?
+        .children
+        .iter_mut()
+        .find_map(|node| if let Node::Placement(placement) = node { Some(placement) } else { None })
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "Fixture Placement missing", "fixture"))
 }

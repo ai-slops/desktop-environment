@@ -130,6 +130,12 @@ The Layout Library prepares privacy-safe exports, validates bounded package file
 
 The spatial editor provides Window/Group/tab-subtree drag sources with full ancestor paths and explicit Group drop targets. Drop prepares a validated structure preview; accepting it changes only the draft, and saving/applying are separate operations. A stale preview cannot replace newer typed edits. Independent copy is a separate drag mode. Selected immediate children can be wrapped into a new Group, unwrapped with stable child IDs, or removed as arrangement references without removing Window resources or closing applications. Nested AND/OR/NOT and alias queries are available through ordinary controls.
 
+Fixed shortcuts support View mappings, full Compositions, and a Workspace's remembered View in the original fixed role/Slot scope. They resolve stable IDs at invocation; missing remembered roles reject rather than using pointer position or widening scope. Version-one fixed-View shortcut documents remain readable. Local `recall { target }` returns the same control-capability preview.
+
+`Save as View` explicitly saves the proven temporary-filter matches as an independent arrangement with fresh node IDs and shared Window resources. Selector caches are detached in that copy, while the source query/View stays unchanged. Session `save_filtered_view` requires a current revision, source View, name and query. Clearing/applying temporary filters alone never saves a View.
+
+The property tools distinguish saving local observed overrides, explicitly replacing both size formulas with observed numeric values, and copying the authored size rule into a portable default preset. Position and other display contexts remain independent. New contexts inherit the portable rule instead of silently replacing it with an empty preference. Shared public-content warnings remain on reused/copied Window references through public Composition/shortcut designations, current/runtime public usage, explicit per-resource designation and live output-linked evidence. They do not claim content isolation or capture verification.
+
 Remaining release gates / P1 work:
 
 - Real editor/browser/terminal/game/broadcaster matrix; elevated windows, Korean IME/modal interaction, mixed DPI, hotkey collision, hung-app and rapid supersession measurements, and load/performance distributions.
