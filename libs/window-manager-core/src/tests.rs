@@ -2549,3 +2549,80 @@ fn duplicate_configuration_maps_are_not_normalized_or_saved_over_last_good_state
     assert!(!backup_path(&path).exists());
     Ok(())
 }
+
+#[test]
+fn navigation_resolves_exact_shared_occurrence_and_keeps_other_roots_out_of_scope() -> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    let group = group_mut(&mut config, &target)?;
+    group.strategy = Strategy::SemanticTabs;
+    let mut nested = Group::new("Nested".into());
+    nested.strategy = Strategy::ResponsiveTabs;
+    let leaf = Placement::new("preview".into(), "Other occurrence".into());
+    let id = leaf.id.clone();
+    let nested_id = nested.id.clone();
+    nested.children.push(Node::Placement(leaf));
+    group.children.push(Node::Group(nested));
+    let outer_id = group.id.clone();
+    config
+        .views
+        .get_mut(&target.view)
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "Fixture", "view"))?
+        .roots
+        .insert("unrelated".into(), Node::Group(Group::new("Unrelated".into())));
+    let locations = placement_locations(&config, "preview");
+    assert_eq!(locations.len(), 2);
+    let request = placement_request(&config, &target.view, &id, "work")?;
+    assert_eq!(request.scope, BTreeSet::from(["work".into()]));
+    assert_eq!(request.targets[0].roots.len(), 1);
+    assert_eq!(request.selected_tabs[&outer_id], nested_id);
+    assert_eq!(request.selected_tabs[&nested_id], id);
+    let before = serde_json::to_vec(&config).unwrap_or_default();
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request)?.desired["preview"].placement,
+        id
+    );
+    assert_eq!(serde_json::to_vec(&config).unwrap_or_default(), before);
+    assert!(placement_request(&config, &target.view, &outer_id, "work").is_err());
+    Ok(())
+}
+
+#[test]
+fn manual_onboarding_captures_current_arrangement_without_rules_or_native_mutations() -> Result<()>
+{
+    let (mut config, snapshot, target) = fixture();
+    let source = serde_json::to_vec(&config.views[&target.view]).unwrap_or_default();
+    let workspace = config.views[&target.view].workspace.clone();
+    let view = config.save_observed_view(
+        &workspace,
+        "work",
+        &BTreeSet::from(["preview".into()]),
+        "Captured".into(),
+        &snapshot,
+    )?;
+    assert_eq!(serde_json::to_vec(&config.views[&target.view]).unwrap_or_default(), source);
+    let target = Target { view, roots: target.roots };
+    let request = Request::open(&config, target.clone());
+    let planned = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert!(planned.mutations.is_empty());
+    assert_eq!(planned.desired["preview"].frame, snapshot.windows["preview"].frame);
+    assert!(config.windows["preview"].tags.is_empty());
+    assert!(group_mut(&mut config, &target)?.parameters.is_empty());
+    let revision = config.revision;
+    let bytes = serde_json::to_vec(&config).unwrap_or_default();
+    let mut absent = snapshot.clone();
+    absent.windows.clear();
+    assert!(
+        config
+            .save_observed_view(
+                &workspace,
+                "work",
+                &BTreeSet::from(["preview".into()]),
+                "Missing".into(),
+                &absent
+            )
+            .is_err()
+    );
+    assert_eq!(config.revision, revision);
+    assert_eq!(serde_json::to_vec(&config).unwrap_or_default(), bytes);
+    Ok(())
+}

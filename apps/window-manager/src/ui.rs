@@ -117,6 +117,8 @@ struct Manager {
     mode: TransitionMode,
     focus_target: bool,
     search: String,
+    reference_search: String,
+    capture_windows: BTreeSet<Id>,
     page: usize,
     name: String,
     display_choice: Id,
@@ -228,7 +230,7 @@ impl Manager {
         let package_path =
             path.with_file_name("layout-package.json").to_string_lossy().into_owned();
         #[allow(unused_mut)] // Smoke fixtures prepare a pure preview after normal initialization.
-        let mut manager = Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        let mut manager = Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), reference_search: String::new(), capture_windows: BTreeSet::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             expansion_node: String::new(),
             expansion_slots: BTreeSet::new(),
@@ -716,8 +718,24 @@ impl Manager {
             }
         });
         ui.heading("관리 중 / 누락된 참조");
+        ui.add(
+            egui::TextEdit::singleline(&mut self.reference_search)
+                .hint_text("참조 이름·태그·앱 힌트 검색"),
+        );
+        let query = self.reference_search.to_lowercase();
         let references: Vec<_> = self.config.windows.values().cloned().collect();
         for reference in references {
+            if !query.is_empty()
+                && !reference.alias.to_lowercase().contains(&query)
+                && !reference
+                    .application_hint
+                    .as_ref()
+                    .is_some_and(|hint| hint.to_lowercase().contains(&query))
+                && !reference.tags.iter().any(|tag| tag.name.to_lowercase().contains(&query))
+            {
+                continue;
+            }
+
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(
@@ -757,6 +775,20 @@ impl Manager {
                         "공개 배치와 앱 콘텐츠 공유 · 복사해도 같은 창",
                     );
                 }
+                let mut capture = self.capture_windows.contains(&reference.id);
+                if ui
+                    .add_enabled(
+                        self.snapshot.windows.contains_key(&reference.id),
+                        egui::Checkbox::new(&mut capture, "현재 배치 저장 대상으로 선택"),
+                    )
+                    .changed()
+                {
+                    if capture {
+                        self.capture_windows.insert(reference.id.clone());
+                    } else {
+                        self.capture_windows.remove(&reference.id);
+                    }
+                }
                 let mut retain = self.retained.contains(&reference.id);
                 if ui.checkbox(&mut retain, "전환 시 유지").changed() {
                     if retain {
@@ -776,6 +808,20 @@ impl Manager {
                 }
             });
         }
+        ui.horizontal_wrapped(|ui| {
+            ui.label("현재 창 배치 이름"); ui.text_edit_singleline(&mut self.name);
+            if ui.add_enabled(!self.capture_windows.is_empty(), egui::Button::new("선택한 창의 현재 배치를 새 View로 저장")).clicked()
+                && let Some(workspace) = self.config.views.get(&self.selected_view).map(|view| view.workspace.clone())
+            {
+                let mut draft = self.config.clone();
+                let name = if self.name.trim().is_empty() { "현재 창 배치".into() } else { self.name.trim().into() };
+                match draft.save_observed_view(&workspace, &self.selected_slot, &self.capture_windows, name, &self.snapshot) {
+                    Ok(view) => { if self.commit(draft) { self.select_view(view); self.capture_windows.clear(); self.notice = "현재 위치·크기를 새 배치로 저장했습니다. 실제 창은 이동하지 않았습니다. 단축키는 배치 편집에서 지정할 수 있습니다.".into(); } },
+                    Err(error) => self.error = Some(error.to_string()),
+                }
+            }
+        });
+        self.reference_navigation(ui);
         if let Some(id) = &self.selected_window
             && let Some(edit) = self.draft.windows.get_mut(id)
         {
@@ -878,6 +924,43 @@ impl Manager {
         if ui.button("참조 설정 저장").clicked() {
             self.commit(self.draft.clone());
         }
+    }
+    fn reference_navigation(&mut self, ui: &mut egui::Ui) {
+        let Some(window) = self.selected_window.clone() else {
+            return;
+        };
+        egui::CollapsingHeader::new("선택한 실제 창의 모든 배치 위치 / 탐색").show(ui, |ui| {
+            ui.label("각 참조는 한 번 표시됩니다. 아래 위치 선택은 미리보기만 준비하며, 계획 적용으로 확정합니다.");
+            for location in window_manager_core::placement_locations(&self.config, &window) {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(&location.path);
+                    if ui.button("편집 위치 선택").clicked() {
+                        self.select_view(location.view.clone()); self.selected_root.clone_from(&location.root);
+                        self.structure_source = Some(window_manager_core::NodeAddress { view: location.view.clone(), node: location.placement.clone() });
+                        self.page = 1;
+                    }
+                    let slot_name = self.config.slots.get(&self.selected_slot).map_or("영역 선택 필요", |slot| slot.name.as_str());
+                    if ui.button(format!("{slot_name}에서 이 위치 미리보기")).clicked() {
+                        match window_manager_core::placement_request(&self.config, &location.view, &location.placement, &self.selected_slot) {
+                            Ok(request) => self.request_preview(request, false), Err(error) => self.error = Some(error.to_string()),
+                        }
+                    }
+                });
+            }
+            if ui.button("선택 영역으로 임시 유지 가져오기 미리보기").clicked() && let Some(target) = self.target() {
+                let mut request = Request::open(&self.config, target); request.mode = TransitionMode::Bring; request.retain.insert(window.clone());
+                self.request_preview(request, false);
+            }
+            if ui.button("현재 그룹에 기존 창의 독립 배치 참조 추가").clicked() {
+                let mut draft = self.config.clone();
+                if let Some(group) = draft.views.get_mut(&self.selected_view).and_then(|view| view.roots.values_mut().find_map(|root| root.group_mut(&self.selected_group))) {
+                    let placement = Placement::new(window.clone(), "공유 창".into());
+                    if let Some(membership) = group.membership.as_mut() { membership.include.insert(window.clone()); membership.exclude.remove(&window); }
+                    group.children.push(Node::Placement(placement)); self.commit(draft);
+                }
+            }
+            ui.small("다른 영역의 유효한 소유권은 가져오지 않습니다. 공유 참조 추가는 앱 콘텐츠를 복제하지 않으며 창을 이동하지 않습니다.");
+        });
     }
     fn add_candidate(&mut self, candidate: Candidate, rebind: Option<Id>) {
         if let Some(id) = rebind {

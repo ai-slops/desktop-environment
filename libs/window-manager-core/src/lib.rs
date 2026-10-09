@@ -1,6 +1,7 @@
 //! Platform-neutral authored state, bounded layout evaluation, and scoped transition planning.
 
 mod actions;
+mod capture;
 mod commands;
 mod domains;
 mod editing;
@@ -10,6 +11,7 @@ mod formula;
 mod json;
 mod membership;
 mod model;
+mod navigation;
 mod parameters;
 mod planner;
 mod protection;
@@ -31,6 +33,7 @@ pub use formula::*;
 pub use json::*;
 pub use membership::*;
 pub use model::*;
+pub use navigation::*;
 pub use parameters::*;
 pub use planner::*;
 pub use protection::*;
