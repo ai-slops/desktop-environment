@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 pub struct WindowPlacement {
     pub normal_rect: [i32; 4],
     pub maximized: bool,
+    /// Optional pixel size of the normal client area, independent of DPI-scaled borders.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_client_size: Option<[u32; 2]>,
 }
 
 impl WindowPlacement {
@@ -18,6 +21,11 @@ impl WindowPlacement {
         let height = i64::from(bottom) - i64::from(top);
         if !(1..=65536).contains(&width) || !(1..=65536).contains(&height) {
             bail!("저장된 창 크기가 올바르지 않습니다.");
+        }
+        if let Some([width, height]) = self.normal_client_size
+            && (!(1..=65536).contains(&width) || !(1..=65536).contains(&height))
+        {
+            bail!("저장된 영상 영역 크기가 올바르지 않습니다.");
         }
         Ok(())
     }
@@ -94,8 +102,11 @@ pub fn window_state_path(config: &Path, kind: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    const PLACEMENT: WindowPlacement =
-        WindowPlacement { normal_rect: [-1400, 100, -500, 750], maximized: false };
+    const PLACEMENT: WindowPlacement = WindowPlacement {
+        normal_rect: [-1400, 100, -500, 750],
+        maximized: false,
+        normal_client_size: None,
+    };
 
     #[test]
     fn displays_and_configurations_keep_independent_geometry() -> Result<()> {
@@ -152,7 +163,34 @@ mod tests {
         std::fs::create_dir(&path)?;
         state.remember("control", PLACEMENT)?;
         for rect in [[0, 0, 0, 10], [0, 0, 20, -1], [i32::MIN, 0, i32::MAX, 10]] {
-            assert!(WindowPlacement { normal_rect: rect, maximized: false }.validate().is_err());
+            assert!(
+                WindowPlacement { normal_rect: rect, maximized: false, normal_client_size: None }
+                    .validate()
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn physical_client_size_is_optional_for_legacy_files_and_validated() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("geometry.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"windows":{"relay":{"normal_rect":[0,0,1000,600],"maximized":false}}}"#,
+        )?;
+        let mut state = WindowStateFile::load(path.clone())?;
+        let legacy =
+            state.get("relay").ok_or_else(|| anyhow::anyhow!("Missing legacy placement"))?;
+        assert_eq!(legacy.normal_client_size, None);
+        let physical = WindowPlacement { normal_client_size: Some([960, 540]), ..legacy };
+        state.remember("relay", physical)?;
+        assert_eq!(WindowStateFile::load(path)?.get("relay"), Some(physical));
+        for size in [[0, 540], [960, 0], [65537, 10]] {
+            assert!(
+                WindowPlacement { normal_client_size: Some(size), ..physical }.validate().is_err()
+            );
         }
         Ok(())
     }

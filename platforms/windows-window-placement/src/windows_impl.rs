@@ -2,9 +2,11 @@ use anyhow::{Context, Result, bail};
 use desktop_presets::WindowPlacement;
 use raw_window_handle::{RawWindowHandle, WindowHandle};
 use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowPlacement, IsIconic, SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SetWindowPlacement,
-    WINDOWPLACEMENT,
+    GWL_EXSTYLE, GWL_STYLE, GetMenu, GetWindowLongPtrW, GetWindowPlacement, IsIconic,
+    SW_SHOWMAXIMIZED, SW_SHOWNORMAL, SetWindowPlacement, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WINDOWPLACEMENT, WS_MAXIMIZE, WS_MINIMIZE,
 };
 
 fn hwnd(window: WindowHandle<'_>) -> Result<HWND> {
@@ -35,9 +37,65 @@ pub fn capture(window: WindowHandle<'_>) -> Result<Option<WindowPlacement>> {
     let placement = WindowPlacement {
         normal_rect: [rect.left, rect.top, rect.right, rect.bottom],
         maximized: native.showCmd == SW_SHOWMAXIMIZED.0.cast_unsigned(),
+        normal_client_size: None,
     };
     placement.validate()?;
     Ok(Some(placement))
+}
+
+/// Capture the normal client size in physical pixels for video mirror windows.
+pub fn capture_physical_client(window: WindowHandle<'_>) -> Result<Option<WindowPlacement>> {
+    let Some(mut placement) = capture(window)? else { return Ok(None) };
+    let frame = normal_frame_size(hwnd(window)?)?;
+    let [left, top, right, bottom] = placement.normal_rect;
+    placement.normal_client_size = Some([
+        u32::try_from(i64::from(right) - i64::from(left) - frame[0])?,
+        u32::try_from(i64::from(bottom) - i64::from(top) - frame[1])?,
+    ]);
+    placement.validate()?;
+    Ok(Some(placement))
+}
+
+/// Restore the saved pixel client size after the window reaches its saved monitor.
+pub fn restore_physical_client(window: WindowHandle<'_>, placement: WindowPlacement) -> Result<()> {
+    restore(window, placement)?;
+    let Some(size) = placement.normal_client_size else { return Ok(()) };
+    // Moving during restore can change DPI. Query the target decorations afterwards.
+    let frame = normal_frame_size(hwnd(window)?)?;
+    let mut restored = capture(window)?.context("복원한 창이 최소화되어 있습니다.")?;
+    let [left, top, _, _] = restored.normal_rect;
+    restored.normal_rect = [
+        left,
+        top,
+        i32::try_from(i64::from(left) + i64::from(size[0]) + frame[0])?,
+        i32::try_from(i64::from(top) + i64::from(size[1]) + frame[1])?,
+    ];
+    restore(window, restored)
+}
+
+fn normal_frame_size(hwnd: HWND) -> Result<[i64; 2]> {
+    // SAFETY: all queries use a borrowed, live HWND and a writable local rectangle.
+    let (style, extended_style, menu, dpi) = unsafe {
+        (
+            GetWindowLongPtrW(hwnd, GWL_STYLE),
+            GetWindowLongPtrW(hwnd, GWL_EXSTYLE),
+            GetMenu(hwnd),
+            GetDpiForWindow(hwnd),
+        )
+    };
+    let style = WINDOW_STYLE(u32::try_from(style)? & !(WS_MAXIMIZE.0 | WS_MINIMIZE.0));
+    let extended_style = WINDOW_EX_STYLE(u32::try_from(extended_style)?);
+    if dpi == 0 {
+        bail!("창 DPI를 읽을 수 없습니다.");
+    }
+    let mut frame = RECT::default();
+    unsafe {
+        AdjustWindowRectExForDpi(&raw mut frame, style, !menu.0.is_null(), extended_style, dpi)
+    }?;
+    Ok([
+        i64::from(frame.right) - i64::from(frame.left),
+        i64::from(frame.bottom) - i64::from(frame.top),
+    ])
 }
 
 pub fn restore(window: WindowHandle<'_>, placement: WindowPlacement) -> Result<()> {
@@ -117,7 +175,11 @@ mod tests {
     #[test]
     fn normal_and_maximized_geometry_round_trip_without_saving_minimized_bounds() -> Result<()> {
         let window = TestWindow::new()?;
-        let placement = WindowPlacement { normal_rect: [100, 120, 760, 640], maximized: false };
+        let placement = WindowPlacement {
+            normal_rect: [100, 120, 760, 640],
+            maximized: false,
+            normal_client_size: None,
+        };
         restore(window.borrowed()?, placement)?;
         assert_eq!(capture(window.borrowed()?)?, Some(placement));
         let maximized = WindowPlacement { maximized: true, ..placement };
@@ -135,9 +197,41 @@ mod tests {
     fn invalid_geometry_is_rejected_before_windows_is_modified() -> Result<()> {
         let window = TestWindow::new()?;
         let original = capture(window.borrowed()?)?;
-        let invalid = WindowPlacement { normal_rect: [50, 50, 40, 40], maximized: false };
+        let invalid = WindowPlacement {
+            normal_rect: [50, 50, 40, 40],
+            maximized: false,
+            normal_client_size: None,
+        };
         assert!(restore(window.borrowed()?, invalid).is_err());
         assert_eq!(capture(window.borrowed()?)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn physical_client_size_overrides_differently_scaled_outer_bounds() -> Result<()> {
+        use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+        let window = TestWindow::new()?;
+        // The saved outer size can have come from a different monitor's decorations.
+        let placement = WindowPlacement {
+            normal_rect: [100, 120, 1080, 720],
+            maximized: false,
+            normal_client_size: Some([960, 540]),
+        };
+        restore_physical_client(window.borrowed()?, placement)?;
+        let mut rect = RECT::default();
+        unsafe { GetClientRect(window.0, &raw mut rect) }?;
+        assert_eq!((rect.right - rect.left, rect.bottom - rect.top), (960, 540));
+        let saved = capture_physical_client(window.borrowed()?)?.context("Missing placement")?;
+        assert_eq!(saved.normal_client_size, Some([960, 540]));
+        assert_eq!(saved.normal_rect[..2], placement.normal_rect[..2]);
+        let maximized = WindowPlacement { maximized: true, ..saved };
+        restore_physical_client(window.borrowed()?, maximized)?;
+        let maximized_saved =
+            capture_physical_client(window.borrowed()?)?.context("Missing maximized placement")?;
+        assert!(maximized_saved.maximized);
+        assert_eq!(maximized_saved.normal_client_size, Some([960, 540]));
+        window.show(SW_MINIMIZE);
+        assert_eq!(capture_physical_client(window.borrowed()?)?, None);
         Ok(())
     }
 }
