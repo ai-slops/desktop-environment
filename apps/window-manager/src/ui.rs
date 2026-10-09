@@ -258,7 +258,7 @@ impl Manager {
                         let mut draft = self.config.clone();
                         for slot in draft.slots.values_mut() { if slot.display == display.id { slot.designated_public = false; } }
                         let id = new_id("slot");
-                        draft.slots.insert(id.clone(), DisplaySlot { id, name: "비공개 제어".into(), display: display.id, region: [0.0, 0.0, 1.0, 1.0], designated_public: false });
+                        draft.slots.insert(id.clone(), DisplaySlot { id, name: "비공개 제어".into(), display: display.id, region: [0.0, 0.0, 1.0, 1.0], designated_public: false, fallback_displays: Vec::new() });
                         self.control_position = None;
                         self.commit(draft);
                     }
@@ -834,6 +834,7 @@ impl Manager {
                     display: self.display_choice.clone(),
                     region: self.region,
                     designated_public: false,
+                    fallback_displays: Vec::new(),
                 },
             );
             if self.commit(draft) {
@@ -845,6 +846,23 @@ impl Manager {
         if let Some(slot) = self.draft.slots.get_mut(&self.selected_slot) {
             ui.text_edit_singleline(&mut slot.name);
             ui.checkbox(&mut slot.designated_public, "공개 출력 지정 (실제 캡처는 미검증)");
+            ui.label("원본 화면이 없을 때 사용할 명시적 대체 화면 (선택 순서)");
+            for display in
+                self.snapshot.displays.values().filter(|display| display.id != slot.display)
+            {
+                let mut enabled = slot.fallback_displays.contains(&display.id);
+                if ui.checkbox(&mut enabled, &display.name).changed() {
+                    if enabled {
+                        slot.fallback_displays.push(display.id.clone());
+                    } else {
+                        slot.fallback_displays.retain(|id| id != &display.id);
+                    }
+                }
+            }
+            ui.small(format!(
+                "대체 순서: {} · 원본 재연결 시 자동 이동하지 않고 복원 미리보기를 사용합니다.",
+                slot.fallback_displays.join(" → ")
+            ));
             ui.horizontal(|ui| {
                 for (label, value) in ["x", "y", "너비", "높이"].into_iter().zip(&mut slot.region)
                 {

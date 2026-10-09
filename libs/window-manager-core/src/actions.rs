@@ -38,6 +38,7 @@ pub fn plan_window_action(
     let slot = config.slots.get(&action.slot).ok_or_else(|| {
         Error::new(ErrorCode::TargetMissing, "Destination Slot missing", &action.slot)
     })?;
+    let slot = crate::resolve_slot(config, slot, snapshot)?;
     let observed = snapshot.windows.get(&action.window).ok_or_else(|| {
         Error::new(ErrorCode::StaleBinding, "Window binding missing", &action.window)
     })?;
@@ -92,7 +93,7 @@ pub fn plan_window_action(
             }
         }
         WindowActionKind::Rescue => {
-            let bounds = slot_bounds(slot, snapshot)?;
+            let bounds = slot_bounds(&slot, snapshot)?;
             if protection.geometry_lock
                 || !reference.capabilities.allow_move
                 || !observed.can_move

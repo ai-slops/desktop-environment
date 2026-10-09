@@ -76,6 +76,9 @@ pub struct VisitOverride {
 pub struct Presentation {
     pub view: Id,
     pub root: String,
+    pub context_display: Id,
+    pub context_area: Rect,
+    pub context_dpi: u32,
     pub visit: Id,
     pub selected_tabs: BTreeMap<Id, Id>,
     pub variants: BTreeMap<Id, Id>,
@@ -215,13 +218,16 @@ fn validate_binding_uniqueness(snapshot: &Snapshot) -> Result<()> {
 }
 
 pub fn slot_bounds(slot: &DisplaySlot, snapshot: &Snapshot) -> Result<Rect> {
-    let monitor = snapshot.displays.get(&slot.display).ok_or_else(|| {
-        Error::new(
-            ErrorCode::TargetMissing,
-            "Display unavailable; explicit remapping is required",
-            &slot.id,
-        )
-    })?;
+    let monitor = std::iter::once(&slot.display)
+        .chain(&slot.fallback_displays)
+        .find_map(|id| snapshot.displays.get(id))
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::TargetMissing,
+                "Display unavailable; explicit remapping is required",
+                &slot.id,
+            )
+        })?;
     let [x, y, width, height] = slot.region;
     let area = monitor.work_area;
     let result = Rect {
@@ -232,6 +238,39 @@ pub fn slot_bounds(slot: &DisplaySlot, snapshot: &Snapshot) -> Result<Rect> {
     };
     result.validate()?;
     Ok(result)
+}
+
+/// Computes a final diff without native side effects or changes to authored state.
+pub fn resolve_slot(
+    config: &Configuration,
+    slot: &DisplaySlot,
+    snapshot: &Snapshot,
+) -> Result<DisplaySlot> {
+    if snapshot.displays.contains_key(&slot.display) {
+        return Ok(slot.clone());
+    }
+    for display in &slot.fallback_displays {
+        if !snapshot.displays.contains_key(display) {
+            continue;
+        }
+        let mut resolved = slot.clone();
+        resolved.display.clone_from(display);
+        resolved.fallback_displays.clear();
+        let bounds = slot_bounds(&resolved, snapshot)?;
+        if !resolved.designated_public
+            && config.slots.values().filter(|other| other.designated_public).any(|other| {
+                slot_bounds(other, snapshot).is_ok_and(|public| public.overlaps(bounds))
+            })
+        {
+            continue;
+        }
+        return Ok(resolved);
+    }
+    Err(Error::new(
+        ErrorCode::TargetMissing,
+        "No explicitly permitted display fallback; original mapping retained",
+        &slot.id,
+    ))
 }
 
 /// Computes a final diff without native side effects or changes to authored state.
@@ -336,6 +375,15 @@ pub fn plan(
                 runtime.presentations.get(slot).is_some_and(|active| {
                     &active.view == view
                         && &active.root == root
+                        && resolve_slot(config, &config.slots[slot], snapshot).is_ok_and(
+                            |resolved| {
+                                resolved.display == active.context_display
+                                    && snapshot.displays[&resolved.display].dpi
+                                        == active.context_dpi
+                                    && slot_bounds(&resolved, snapshot)
+                                        .is_ok_and(|bounds| bounds == active.context_area)
+                            },
+                        )
                         && request
                             .selected_tabs
                             .iter()
@@ -349,9 +397,19 @@ pub fn plan(
         return Ok(result);
     }
     let mut bounds = BTreeMap::new();
+    let mut resolved_slots = BTreeMap::new();
     for (id, slot) in &config.slots {
         if request.scope.contains(id) || runtime.presentations.contains_key(id) {
-            bounds.insert(id.clone(), slot_bounds(slot, snapshot)?);
+            match resolve_slot(config, slot, snapshot) {
+                Ok(resolved) => {
+                    bounds.insert(id.clone(), slot_bounds(&resolved, snapshot)?);
+                    resolved_slots.insert(id.clone(), resolved);
+                }
+                Err(error) if request.scope.contains(id) => return Err(error),
+                Err(_) => result.diagnostics.push(format!(
+                    "{id}: unrelated display absent; ownership retained without native effects"
+                )),
+            }
         }
     }
     let bound_entries: Vec<_> = bounds.iter().collect();
@@ -367,7 +425,13 @@ pub fn plan(
     }
     let mut assigned_retained = BTreeSet::new();
     for (slot_id, (view_id, root_role)) in &mapped {
-        let slot = &config.slots[slot_id];
+        let slot = &resolved_slots[slot_id];
+        if slot.display != config.slots[slot_id].display {
+            result.diagnostics.push(format!(
+                "{slot_id}: temporary display fallback {}; original preferences retained",
+                slot.display
+            ));
+        }
         let view = &config.views[view_id];
         let root = &view.roots[root_role];
         let area = bounds[slot_id];
@@ -378,6 +442,9 @@ pub fn plan(
         let mut presentation = prior.cloned().unwrap_or_else(|| Presentation {
             view: view_id.clone(),
             root: root_role.clone(),
+            context_display: slot.display.clone(),
+            context_area: area,
+            context_dpi: snapshot.displays[&slot.display].dpi,
             visit: new_id("visit"),
             selected_tabs: BTreeMap::new(),
             variants: BTreeMap::new(),
@@ -386,6 +453,9 @@ pub fn plan(
             overrides: BTreeMap::new(),
             protection: crate::Protection::default(),
         });
+        presentation.context_display.clone_from(&slot.display);
+        presentation.context_area = area;
+        presentation.context_dpi = snapshot.displays[&slot.display].dpi;
         if request.mode == TransitionMode::Restore {
             presentation.overrides.clear();
         }
@@ -579,7 +649,7 @@ pub fn plan(
                 window,
             ));
         }
-        if protection.keep_monitor && observed.display != config.slots[&desired.slot].display {
+        if protection.keep_monitor && observed.display != resolved_slots[&desired.slot].display {
             return Err(conflict(window, "Keep-monitor protection prevents transfer"));
         }
         if observed.show_state != ShowState::Normal && desired.frame != observed.frame {

@@ -458,6 +458,9 @@ pub struct DisplaySlot {
     /// Fraction of monitor work area: x, y, width, height. Does not depend on monitor order.
     pub region: [f64; 4],
     pub designated_public: bool,
+    /// Explicit ordered display choices. Fallback never rewrites original preferences.
+    #[serde(default)]
+    pub fallback_displays: Vec<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -77,18 +77,7 @@ impl Configuration {
                 return Err(invalid(key, "Map key does not match identity"));
             }
             add(key)?;
-            let [x, y, w, h] = slot.region;
-            if !slot.region.iter().all(|n| n.is_finite())
-                || x < 0.0
-                || y < 0.0
-                || w <= 0.0
-                || h <= 0.0
-                || x + w > 1.000_001
-                || y + h > 1.000_001
-                || slot.display.is_empty()
-            {
-                return Err(invalid(key, "Slot must be inside a named monitor work area"));
-            }
+            validate_slot(slot)?;
         }
         for (key, composition) in &self.compositions {
             if key != &composition.id {
@@ -572,4 +561,30 @@ impl LayoutPackage {
         *config = draft;
         Ok(id)
     }
+}
+
+fn validate_slot(slot: &crate::DisplaySlot) -> Result<()> {
+    if slot.fallback_displays.len() > 8
+        || slot
+            .fallback_displays
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 200 || id == &slot.display)
+        || slot.fallback_displays.iter().collect::<BTreeSet<_>>().len()
+            != slot.fallback_displays.len()
+    {
+        return Err(invalid(&slot.id, "Invalid/duplicate explicit fallback display"));
+    }
+    let [x, y, w, h] = slot.region;
+    if !slot.region.iter().all(|n| n.is_finite())
+        || x < 0.0
+        || y < 0.0
+        || w <= 0.0
+        || h <= 0.0
+        || x + w > 1.000_001
+        || y + h > 1.000_001
+        || slot.display.is_empty()
+    {
+        return Err(invalid(&slot.id, "Slot must be inside a named monitor work area"));
+    }
+    Ok(())
 }

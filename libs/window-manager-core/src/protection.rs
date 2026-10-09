@@ -101,8 +101,9 @@ pub fn control_bounds(config: &Configuration, snapshot: &crate::Snapshot) -> Opt
         .filter_map(|slot| crate::slot_bounds(slot, snapshot).ok())
         .collect();
     config.slots.values().filter(|slot| !slot.designated_public).find_map(|slot| {
+        let slot = crate::resolve_slot(config, slot, snapshot).ok()?;
         let display = snapshot.displays.get(&slot.display)?;
-        let bounds = crate::slot_bounds(slot, snapshot).ok()?;
+        let bounds = crate::slot_bounds(&slot, snapshot).ok()?;
         let scale = f64::from(display.dpi) / 96.0;
         (f64::from(bounds.width) >= 1040.0 * scale
             && f64::from(bounds.height) >= 704.0 * scale

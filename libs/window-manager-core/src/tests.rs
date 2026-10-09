@@ -24,6 +24,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
         display: "monitor".into(),
         region: [0.0, 0.0, 1.0, 1.0],
         designated_public: false,
+        fallback_displays: Vec::new(),
     };
     let mut placement = Placement::new("preview".into(), "preview".into());
     placement.preferences.insert(
@@ -567,6 +568,7 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             display: "monitor".into(),
             region: [0.5, 0.0, 0.5, 1.0],
             designated_public: false,
+            fallback_displays: Vec::new(),
         },
     );
     let mut reference = config.windows["preview"].clone();
@@ -591,6 +593,9 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
         Presentation {
             view: target.view.clone(),
             root: "main".into(),
+            context_display: "monitor".into(),
+            context_area: snapshot.displays["monitor"].work_area,
+            context_dpi: 96,
             visit: "game-visit".into(),
             selected_tabs: BTreeMap::new(),
             variants: BTreeMap::new(),
@@ -1057,5 +1062,83 @@ fn explicit_rescue_and_show_state_share_scope_validation_and_undo() -> Result<()
         plan_window_action(&config, &current, &snapshot, &minimize).err().map(|error| error.code),
         Some(ErrorCode::ClaimConflict)
     );
+    Ok(())
+}
+
+#[test]
+fn explicit_topology_fallback_has_independent_preferences_and_reconnect_restores_original()
+-> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    config
+        .slots
+        .get_mut("work")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "work"))?
+        .fallback_displays
+        .push("replacement".into());
+    let original = snapshot
+        .displays
+        .remove("monitor")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "monitor"))?;
+    let mut replacement = original.clone();
+    replacement.id = "replacement".into();
+    snapshot.displays.insert(replacement.id.clone(), replacement);
+    snapshot
+        .windows
+        .get_mut("preview")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
+        .display = "replacement".into();
+    let runtime = Runtime::default();
+    let fallback = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    assert!(fallback.desired["preview"].context.contains("replacement"));
+    assert_eq!(config.slots["work"].display, "monitor");
+    config.save_properties(
+        &target.view,
+        &fallback.desired["preview"].placement,
+        &fallback.desired["preview"].context,
+        None,
+        Some([440.0, 260.0]),
+    )?;
+    let mut active = Runtime::default();
+    fallback.commit(&mut active);
+    let mut current = settled_snapshot(&fallback, &snapshot);
+    current.displays.insert(original.id.clone(), original);
+    current.topology_revision += 1;
+    let restored = plan(&config, &active, &current, &Request::open(&config, target))?;
+    assert!(!restored.idempotent);
+    assert_eq!(restored.desired["preview"].frame.width, 820);
+    assert!(restored.desired["preview"].context.contains("monitor"));
+    Ok(())
+}
+
+#[test]
+fn private_fallback_rejects_public_intersection_and_unrelated_missing_monitor_does_not_block()
+-> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    let mut public = config.slots["work"].clone();
+    public.id = "public".into();
+    public.designated_public = true;
+    config.slots.insert(public.id.clone(), public);
+    let mut missing = config.slots["work"].clone();
+    missing.id = "missing".into();
+    missing.display = "absent".into();
+    missing.fallback_displays.push("monitor".into());
+    assert!(resolve_slot(&config, &missing, &snapshot).is_err());
+    config.slots.insert(missing.id.clone(), missing);
+    config.slots.remove("public");
+    config
+        .slots
+        .get_mut("missing")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "missing"))?
+        .fallback_displays
+        .clear();
+    let mut runtime = Runtime::default();
+    let mut request = Request::open(&config, target);
+    let initial = plan(&config, &runtime, &snapshot, &request)?;
+    let mut absent = initial.presentations["work"].clone();
+    absent.context_display = "absent".into();
+    runtime.presentations.insert("missing".into(), absent);
+    request.id = "next".into();
+    assert!(plan(&config, &runtime, &snapshot, &request).is_ok());
+    assert!(runtime.presentations.contains_key("missing"));
     Ok(())
 }
