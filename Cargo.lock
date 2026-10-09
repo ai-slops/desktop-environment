@@ -3554,6 +3554,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-window-placement"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "desktop-presets",
+ "raw-window-handle",
+ "windows",
+]
+
+[[package]]
 name = "windows_aarch64_gnullvm"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

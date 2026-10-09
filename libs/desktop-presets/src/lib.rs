@@ -1,5 +1,8 @@
 //! Persistent, named configurations shared by the desktop tools' control panel.
 
+mod window_state;
+pub use window_state::{WindowPlacement, WindowStateFile, window_state_path};
+
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
