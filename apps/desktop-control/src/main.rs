@@ -5,6 +5,8 @@
 mod panel;
 mod process;
 
+const COMPACT_WINDOW_SIZE: [f32; 2] = [760.0, 560.0];
+
 use anyhow::{Context, Result, bail};
 use desktop_presets::default_store_path;
 use eframe::egui;
@@ -29,8 +31,8 @@ fn main() -> Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 760.0])
-            .with_min_inner_size([850.0, 650.0]),
+            .with_inner_size(COMPACT_WINDOW_SIZE)
+            .with_min_inner_size([640.0, 440.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -61,8 +63,8 @@ fn configure_style(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
     ctx.set_visuals(egui::Visuals::light());
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-    style.spacing.button_padding = egui::vec2(12.0, 8.0);
+    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+    style.spacing.button_padding = egui::vec2(10.0, 6.0);
     style.visuals.selection.bg_fill = egui::Color32::from_rgb(36, 96, 180);
     style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
     style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(15.0));

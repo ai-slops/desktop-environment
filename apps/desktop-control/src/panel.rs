@@ -15,6 +15,10 @@ struct Devices {
     displays: Result<Vec<DisplayInfo>, String>,
 }
 
+// A new layout key applies the smaller default once to existing installations.
+// Subsequent manual sizes continue to be restored, including larger windows.
+const CONTROL_WINDOW_KEY: &str = "control-compact-v1";
+
 pub struct ControlPanel {
     path: PathBuf,
     store: PresetStore,
@@ -27,6 +31,7 @@ pub struct ControlPanel {
     notice: String,
     has_saved_settings: bool,
     window_state: Option<WindowStateFile>,
+    skip_initial_placement_save: bool,
     devices_pending: Option<Receiver<Devices>>,
     audio_devices: Vec<AudioOutputDevice>,
     displays: Vec<DisplayInfo>,
@@ -68,6 +73,7 @@ impl ControlPanel {
             notice: notice.into(),
             has_saved_settings,
             window_state,
+            skip_initial_placement_save: false,
             devices_pending: None,
             audio_devices: Vec::new(),
             displays: Vec::new(),
@@ -82,23 +88,40 @@ impl ControlPanel {
         panel
     }
 
-    pub fn restore_window(&mut self, window: &impl HasWindowHandle) {
-        let Some(placement) = self.window_state.as_ref().and_then(|state| state.get("control"))
+    pub fn restore_window(&mut self, window: &eframe::CreationContext<'_>) {
+        let Some(state) = self.window_state.as_ref() else {
+            return;
+        };
+        let legacy = state.get(CONTROL_WINDOW_KEY).is_none();
+        let Some(mut placement) = state.get(CONTROL_WINDOW_KEY).or_else(|| state.get("control"))
         else {
             return;
         };
+        if legacy {
+            placement.maximized = false;
+        }
         let result = (|| -> Result<()> {
             windows_window_placement::restore(window.window_handle()?, placement)
         })();
         if let Err(error) = result {
             self.error = Some(format!("창 배치를 복원하지 못했습니다: {error:#}"));
         }
+        if legacy {
+            window.egui_ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                crate::COMPACT_WINDOW_SIZE.into(),
+            ));
+            self.skip_initial_placement_save = true;
+        }
     }
 
     fn remember_window(&mut self, window: &impl HasWindowHandle) -> Result<()> {
+        if self.skip_initial_placement_save {
+            self.skip_initial_placement_save = false;
+            return Ok(());
+        }
         let Some(state) = self.window_state.as_mut() else { return Ok(()) };
         if let Some(placement) = windows_window_placement::capture(window.window_handle()?)? {
-            state.remember("control", placement)?;
+            state.remember(CONTROL_WINDOW_KEY, placement)?;
         }
         Ok(())
     }
@@ -748,9 +771,19 @@ impl eframe::App for ControlPanel {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.heading("Desktop Control");
-                    ui.weak("오디오와 디스플레이, 한 번 저장하고 다시 사용하세요.");
+                    ui.weak("저장한 설정으로 간편하게 실행하세요.");
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("창 작게")
+                        .on_hover_text("설정 창을 기본 크기로 줄입니다.")
+                        .clicked()
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(
+                            crate::COMPACT_WINDOW_SIZE.into(),
+                        ));
+                    }
                     if ui
                         .add_enabled(
                             self.devices_pending.is_none(),
@@ -788,7 +821,7 @@ impl eframe::App for ControlPanel {
             }
             ui.add(egui::Label::new(RichText::new(format!("설정 파일: {}", self.path.display())).small()).wrap());
         });
-        egui::SidePanel::left("sidebar").exact_width(245.0).resizable(false).show(ctx, |ui| {
+        egui::SidePanel::left("sidebar").exact_width(220.0).resizable(false).show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| self.presets_ui(ui));
         });
         egui::CentralPanel::default().show(ctx, |ui| {

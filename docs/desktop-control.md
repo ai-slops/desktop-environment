@@ -62,6 +62,12 @@ to restore that window while other mirrors and audio keep running. Per-window op
 uses that row's current settings and does not require valid audio settings or other
 mirror rows; use **현재 설정 저장** to retain any edits across panel launches.
 
+The control panel starts at 760×560 logical pixels and can be resized down to
+640×440. The preset sidebar and settings area scroll independently in smaller
+windows. **창 작게** in the header returns it to the compact default size.
+On the first launch after this layout update, existing large panel placements are
+reduced once while retaining their position. Later manual sizes are remembered.
+
 The control panel automatically remembers its window size, position, and maximized
 state. Each mirror row remembers its own last placement for each source display.
 Move or resize the windows normally; no extra save button is needed for geometry.
