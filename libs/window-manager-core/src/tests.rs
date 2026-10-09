@@ -1374,6 +1374,7 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             before_expansion: None,
             group_inputs: BTreeMap::new(),
             variant_history: BTreeMap::new(),
+            approved_resize: BTreeSet::new(),
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;
@@ -2418,5 +2419,111 @@ fn inferred_overlap_uses_explicit_then_priority_then_stable_identity_without_sav
     assert_ne!(explicit.desired["preview"].placement, "inferred-a");
     assert_ne!(explicit.desired["preview"].placement, "inferred-b");
     assert_eq!(explicit.mutations.len(), 1);
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture keys.
+fn approved_resize_is_visit_local_scoped_and_never_rewrites_rules() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    group_mut(&mut config, &target)?.preservation = GroupPreservation::Children;
+    snapshot.displays.get_mut("monitor").unwrap().work_area =
+        Rect { x: 0, y: 0, width: 300, height: 250 };
+    let leaf = first_placement_mut(&mut config, &target)?.id.clone();
+    let authored = serde_json::to_vec(&config).unwrap();
+    let mut request = Request::open(&config, target.clone());
+    assert!(plan(&config, &Runtime::default(), &snapshot, &request).is_err());
+    request.approved_resize.insert(leaf.clone());
+    let fitted = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert_eq!(fitted.desired["preview"].frame.width, 300);
+    assert_eq!(fitted.desired["preview"].client_target, [Some(280), Some(210)]);
+    assert!(!fitted.desired["preview"].strict_size);
+    let mut runtime = Runtime::default();
+    fitted.commit(&mut runtime);
+    assert!(runtime.presentations["work"].approved_resize.contains(&leaf));
+    let observed = settled_snapshot(&fitted, &snapshot);
+    let recall = plan(&config, &runtime, &observed, &Request::open(&config, target.clone()))?;
+    assert!(recall.idempotent);
+    assert_eq!(serde_json::to_vec(&config).unwrap(), authored);
+    let mut restore = Request::open(&config, target.clone());
+    restore.mode = TransitionMode::Restore;
+    let restored = plan(&config, &runtime, &observed, &restore)?;
+    assert!(restored.presentations["work"].approved_resize.is_empty());
+    request.approved_resize.insert("outside-placement".into());
+    assert_eq!(
+        plan(&config, &runtime, &observed, &request).unwrap_err().code,
+        ErrorCode::OutOfScope
+    );
+    let copy = config.copy_view(&target.view, "Independent".into())?;
+    let other = Target { view: copy, roots: target.roots };
+    assert!(
+        plan(&config, &runtime, &observed, &Request::open(&config, other))?.presentations["work"]
+            .approved_resize
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture keys.
+fn approved_resize_enforces_minima_capabilities_output_and_geometry_locks() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    snapshot.displays.get_mut("monitor").unwrap().work_area =
+        Rect { x: 0, y: 0, width: 300, height: 250 };
+    let id = first_placement_mut(&mut config, &target)?.id.clone();
+    let mut request = Request::open(&config, target.clone());
+    request.approved_resize.insert(id);
+    first_placement_mut(&mut config, &target)?.minimum_client = Some([400.0, 100.0]);
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).unwrap_err().code,
+        ErrorCode::UnsatisfiableConstraints
+    );
+    first_placement_mut(&mut config, &target)?.minimum_client = None;
+    config.windows.get_mut("preview").unwrap().capabilities.allow_resize = false;
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).unwrap_err().code,
+        ErrorCode::UnsupportedOperation
+    );
+    config.windows.get_mut("preview").unwrap().capabilities.allow_resize = true;
+    config.windows.get_mut("preview").unwrap().output_protection =
+        OutputProtection::RequireVerifiedPrivate;
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).unwrap_err().code,
+        ErrorCode::OutputStateUnknown
+    );
+    config.windows.get_mut("preview").unwrap().output_protection = OutputProtection::None;
+    config.windows.get_mut("preview").unwrap().protection.geometry_lock = true;
+    assert!(plan(&config, &Runtime::default(), &snapshot, &request).is_err());
+    Ok(())
+}
+
+#[test]
+#[allow(clippy::unwrap_used)] // Constructed fixture keys.
+fn approved_resize_removes_only_addressed_split_sizes_and_fits_flow() -> Result<()> {
+    let (mut config, mut snapshot, target) = two_window_fixture()?;
+    snapshot.displays.get_mut("monitor").unwrap().work_area =
+        Rect { x: 0, y: 0, width: 600, height: 250 };
+    let group = group_mut(&mut config, &target)?;
+    group.strategy = Strategy::Horizontal;
+    group.preserve_child_sizes = true;
+    let mut leaves = Vec::new();
+    for child in &group.children {
+        child.placements(&mut leaves);
+    }
+    let ids = leaves.iter().map(|leaf| leaf.id.clone()).collect();
+    let mut request = Request::open(&config, target.clone());
+    request.approved_resize = ids;
+    let fitted = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert_eq!(fitted.desired.len(), 2);
+    assert!(fitted.desired.values().all(|desired| desired.frame.width <= 296));
+    group_mut(&mut config, &target)?.strategy = Strategy::Flow;
+    // A single Flow child can be fitted after explicit approval; crowded rows still reject.
+    group_mut(&mut config, &target)?.children.pop();
+    request
+        .approved_resize
+        .retain(|id| config.views[&target.view].roots["main"].find(id).is_some());
+    let fitted = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert_eq!(fitted.desired.len(), 1);
+    assert_eq!(fitted.desired["preview"].frame.height, 250);
     Ok(())
 }

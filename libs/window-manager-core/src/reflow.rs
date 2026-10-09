@@ -57,7 +57,8 @@ pub fn continuous_permission(
             "Detected gesture or foreground managed interaction; reflow deferred",
         ));
     }
-    if active.expansion.is_some()
+    if !active.approved_resize.is_empty()
+        || active.expansion.is_some()
         || config.slots.get(slot).is_none_or(|slot| slot.designated_public)
     {
         return Err(deferred(

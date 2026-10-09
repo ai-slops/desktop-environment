@@ -136,6 +136,7 @@ pub struct PublicPresentation {
     pub area: crate::Rect,
     pub group_inputs: BTreeMap<Id, BTreeMap<String, f64>>,
     pub frozen_groups: BTreeSet<Id>,
+    pub approved_resize: BTreeSet<Id>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -220,6 +221,7 @@ impl PublicSnapshot {
                         slot.clone(),
                         PublicPresentation {
                             view: presentation.view.clone(),
+                            approved_resize: presentation.approved_resize.clone(),
                             root: presentation.root.clone(),
                             visit: presentation.visit.clone(),
                             display: presentation.context_display.clone(),

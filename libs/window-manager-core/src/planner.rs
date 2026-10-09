@@ -44,6 +44,9 @@ pub struct Request {
     pub expansion: Option<crate::Expansion>,
     #[serde(default)]
     pub release: BTreeSet<Id>,
+    /// Explicit Placement IDs permitted to waive size preservation for this Visit.
+    #[serde(default)]
+    pub approved_resize: BTreeSet<Id>,
 }
 
 impl Request {
@@ -61,6 +64,7 @@ impl Request {
             filter: None,
             expansion: None,
             release: BTreeSet::new(),
+            approved_resize: BTreeSet::new(),
         }
     }
 }
@@ -103,6 +107,7 @@ pub struct Presentation {
     pub before_expansion: Option<Box<crate::ExpansionMemory>>,
     pub group_inputs: BTreeMap<Id, BTreeMap<String, f64>>,
     pub variant_history: BTreeMap<Id, crate::VariantHistory>,
+    pub approved_resize: BTreeSet<Id>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -449,6 +454,16 @@ fn plan_pass(
         }
     }
     crate::validate_expansion_scope(config, request, &mapped.keys().cloned().collect())?;
+    if request.approved_resize.len() > 256
+        || request.mode == TransitionMode::Reflow && !request.approved_resize.is_empty()
+    {
+        return Err(Error::new(
+            ErrorCode::PermissionDenied,
+            "Resize exceptions require a bounded explicit request",
+            &request.id,
+        ));
+    }
+
     for slot in &request.scope {
         if let Some(active) = runtime.presentations.get(slot)
             && let Some(expansion) = &active.expansion
@@ -558,6 +573,20 @@ fn plan_pass(
             }
         }
     }
+    let mut scoped_placements = BTreeSet::new();
+    for (slot, (view, role)) in &mapped {
+        let root = expanded.get(slot).map_or(&config.views[view].roots[role], |layout| layout.node);
+        let mut leaves = Vec::new();
+        root.placements(&mut leaves);
+        scoped_placements.extend(leaves.iter().map(|leaf| leaf.id.clone()));
+    }
+    if !request.approved_resize.is_subset(&scoped_placements) {
+        return Err(Error::new(
+            ErrorCode::OutOfScope,
+            "Resize exception is outside the exact target subtree",
+            &request.id,
+        ));
+    }
     // An ordinary recall preserves the current Visit and manual live state.
     if runtime.completed.contains(&request.id)
         || (request.mode == TransitionMode::Open
@@ -570,6 +599,7 @@ fn plan_pass(
                 runtime.presentations.get(slot).is_some_and(|active| {
                     &active.view == view
                         && &active.root == root
+                        && request.approved_resize.is_subset(&active.approved_resize)
                         && active.filter == request.filter
                         && active.expansion == request.expansion
                         && active.bindings
@@ -681,6 +711,7 @@ fn plan_pass(
             before_expansion: None,
             group_inputs: BTreeMap::new(),
             variant_history: BTreeMap::new(),
+            approved_resize: BTreeSet::new(),
         });
         if presentation.expansion.is_some() && request.expansion.is_none() {
             if let Some(memory) = presentation.before_expansion.take() {
@@ -736,6 +767,14 @@ fn plan_pass(
             !presentation.bindings.contains_key(window)
                 || bindings.get(window) == presentation.bindings.get(window)
         });
+        let mut resize_leaves = Vec::new();
+        root.placements(&mut resize_leaves);
+        presentation.approved_resize.retain(|id| {
+            resize_leaves.iter().any(|leaf| {
+                &leaf.id == id
+                    && presentation.bindings.get(&leaf.window) == bindings.get(&leaf.window)
+            })
+        });
         presentation.bindings = bindings;
         presentation.context_display.clone_from(&slot.display);
         presentation.context_area = area;
@@ -743,6 +782,16 @@ fn plan_pass(
         if request.mode == TransitionMode::Restore {
             presentation.overrides.clear();
             presentation.variant_history.clear();
+            presentation.approved_resize.clear();
+        }
+        presentation.approved_resize.extend(
+            resize_leaves
+                .iter()
+                .filter(|leaf| request.approved_resize.contains(&leaf.id))
+                .map(|leaf| leaf.id.clone()),
+        );
+        for id in &presentation.approved_resize {
+            result.diagnostics.push(format!("{id}: explicitly approved Visit size exception; hard protection, minimum and output constraints remain enforced"));
         }
         for (group, child) in &request.selected_tabs {
             presentation.selected_tabs.insert(group.clone(), child.clone());
@@ -1960,16 +2009,24 @@ impl Evaluator<'_> {
                             })
                     })
                     .collect();
-                let width = frames
+                let mut width = frames
                     .iter()
                     .map(|frame| frame.width)
                     .max()
                     .unwrap_or_else(|| (300.0 * scale).round() as i32);
-                let height = frames
+                let mut height = frames
                     .iter()
                     .map(|frame| frame.height)
                     .max()
                     .unwrap_or_else(|| (200.0 * scale).round() as i32);
+                if !leaves.is_empty()
+                    && leaves
+                        .iter()
+                        .all(|leaf| self.presentation.approved_resize.contains(&leaf.id))
+                {
+                    width = width.min(available.width);
+                    height = height.min(available.height);
+                }
                 if width > available.width || height > available.height {
                     return Err(conflict(
                         &group.id,
@@ -2038,6 +2095,7 @@ impl Evaluator<'_> {
             .filter(|(_, fixed)| !**fixed)
             .map(|(node, _)| {
                 if let Node::Placement(placement) = node
+                    && !self.presentation.approved_resize.contains(&placement.id)
                     && (preserve
                         || group.preserve_child_sizes
                         || self
@@ -2227,8 +2285,11 @@ impl Evaluator<'_> {
         )
         .union(&self.presentation.protection)
         .geometry_lock;
-        let strict_size =
-            exception.is_some_and(|exception| exception.preserve_size) || preserve || locked;
+        let approved = self.presentation.approved_resize.contains(&placement.id);
+        let preserve = preserve && !approved;
+        let strict_size = locked
+            || !approved && exception.is_some_and(|exception| exception.preserve_size)
+            || preserve;
         if preference.size_override.is_none() && !strict_size {
             for (formula, axis) in [(&preference.width_formula, 0), (&preference.height_formula, 1)]
             {
@@ -2253,14 +2314,16 @@ impl Evaluator<'_> {
             }
         }
         if let Some(exception) = exception {
-            if exception.dpi != self.dpi || exception.display != self.slot.display {
+            if (exception.preserve_position || !approved)
+                && (exception.dpi != self.dpi || exception.display != self.slot.display)
+            {
                 return Err(Error::new(
                     ErrorCode::UnsupportedOperation,
                     "Strict preservation across display/DPI contexts is not validated; keep the source monitor",
                     &placement.window,
                 ));
             }
-            if exception.preserve_size {
+            if exception.preserve_size && !approved {
                 frame.width = exception.frame.width;
                 frame.height = exception.frame.height;
             }
@@ -2279,6 +2342,26 @@ impl Evaluator<'_> {
             }
             frame.width = observed.frame.width;
             frame.height = observed.frame.height;
+        }
+        if locked {
+            frame = observed.frame;
+        } else if approved {
+            let before = [frame.width, frame.height];
+            frame.width = frame.width.min(area.width).min(area.x + area.width - frame.x);
+            frame.height = frame.height.min(area.height).min(area.y + area.height - frame.y);
+            if before != [frame.width, frame.height] {
+                client_target =
+                    [Some(frame.width - decoration[0]), Some(frame.height - decoration[1])];
+                self.diagnostics.push(format!(
+                    "{}: approved size fit {:?} → {:?}",
+                    placement.id,
+                    before,
+                    [frame.width, frame.height]
+                ));
+            }
+        }
+        if frame.width <= decoration[0] || frame.height <= decoration[1] {
+            return Err(conflict(&placement.id, "Nonclient frame leaves no positive client area"));
         }
         if let Some(minimum) = placement.minimum_client
             && (f64::from(frame.width - decoration[0]) < minimum[0] * scale

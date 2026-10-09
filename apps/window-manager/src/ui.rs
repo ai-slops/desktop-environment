@@ -1032,13 +1032,14 @@ impl Manager {
             .collect();
         for (slot, mut presentation) in presentations {
             ui.label(format!(
-                "{} → {} · 임시 유지 {}개",
+                "{} → {} · 임시 유지 {}개 · 승인한 크기 예외 {}개",
                 self.config.slots.get(&slot).map_or(slot.as_str(), |slot| slot.name.as_str()),
                 self.config
                     .views
                     .get(&presentation.view)
                     .map_or(presentation.view.as_str(), |view| view.name.as_str()),
-                presentation.overrides.len()
+                presentation.overrides.len(),
+                presentation.approved_resize.len()
             ));
             protection_editor(ui, &mut presentation.protection);
             if ui.button("현재 방문 동안 보호 적용").clicked() {
@@ -1094,6 +1095,7 @@ impl Manager {
                             filter: None,
                             expansion: None,
                             release: BTreeSet::new(),
+                            approved_resize: BTreeSet::new(),
                         },
                         false,
                     );
@@ -1803,6 +1805,20 @@ impl Manager {
                     request.id = new_id("restore-preview");
                     request.mode = TransitionMode::Restore;
                     request.retain.clear();
+                    request.focus = None;
+                    self.request_preview(request, false);
+                }
+                if ui.button("선택 그룹의 크기 예외 허용 미리보기").clicked()
+                    && let Some(mut request) = self.last_transition.clone()
+                    && let Some(node) =
+                        self.config.views.get(&self.selected_view).and_then(|view| {
+                            view.roots.values().find_map(|root| root.find(&self.selected_group))
+                        })
+                {
+                    let mut leaves = Vec::new();
+                    node.placements(&mut leaves);
+                    request.approved_resize = leaves.iter().map(|leaf| leaf.id.clone()).collect();
+                    request.id = new_id("approved-resize-preview");
                     request.focus = None;
                     self.request_preview(request, false);
                 }
