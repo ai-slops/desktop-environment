@@ -325,6 +325,62 @@ fn packages_require_explicit_mapping_and_have_no_live_identity() -> Result<()> {
     config.validate()
 }
 
+#[test]
+fn package_resources_distinguish_duplicate_roles_and_reuse_shared_windows() -> Result<()> {
+    let (mut config, _, target) = fixture();
+    let mut other = config.windows["preview"].clone();
+    other.id = "other".into();
+    config.windows.insert(other.id.clone(), other);
+    let group = group_mut(&mut config, &target)?;
+    group.children.push(Node::Placement(Placement::new("other".into(), "preview".into())));
+    group.children.push(Node::Placement(Placement::new("preview".into(), "alternative".into())));
+    let package = LayoutPackage::from_view(&config.views[&target.view]);
+    assert_eq!(package.required_roles, vec!["preview", "preview-2"]);
+    let Node::Group(exported) = &package.roots["main"] else {
+        return Err(Error::new(ErrorCode::TargetMissing, "test group", "test"));
+    };
+    let placeholders: Vec<_> = exported
+        .children
+        .iter()
+        .filter_map(|node| {
+            if let Node::Placement(placement) = node {
+                Some(placement.window.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(placeholders, vec!["preview", "preview-2", "preview"]);
+    let original_ids: BTreeSet<_> =
+        group_mut(&mut config, &target)?.children.iter().map(|node| node.id().to_owned()).collect();
+    assert!(exported.children.iter().all(|node| !original_ids.contains(node.id())));
+    let workspace = config.views[&target.view].workspace.clone();
+    let mappings = BTreeMap::from([
+        ("preview".into(), "preview".into()),
+        ("preview-2".into(), "other".into()),
+    ]);
+    let installed = package.install(&mut config, &workspace, &mappings)?;
+    let Node::Group(imported) = &config.views[&installed].roots["main"] else {
+        return Err(Error::new(ErrorCode::TargetMissing, "test group", "test"));
+    };
+    let resources: Vec<_> = imported
+        .children
+        .iter()
+        .filter_map(|node| {
+            if let Node::Placement(placement) = node {
+                Some(placement.window.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(resources, vec!["preview", "other", "preview"]);
+    let mut extra = mappings;
+    extra.insert("unexpected".into(), "preview".into());
+    assert!(package.install(&mut config, &workspace, &extra).is_err());
+    Ok(())
+}
+
 fn group_mut<'a>(config: &'a mut Configuration, target: &Target) -> Result<&'a mut Group> {
     match config.views.get_mut(&target.view).and_then(|view| view.roots.get_mut("main")) {
         Some(Node::Group(group)) => Ok(group),

@@ -431,26 +431,43 @@ impl LayoutPackage {
     /// No live handles, titles, tags, application hints, or display identifiers are exported.
     #[must_use]
     pub fn from_view(view: &View) -> Self {
-        fn redact(node: &mut Node, roles: &mut BTreeSet<String>) {
+        fn redact(
+            node: &mut Node,
+            roles: &mut BTreeSet<String>,
+            resources: &mut std::collections::BTreeMap<Id, String>,
+        ) {
             match node {
                 Node::Placement(placement) => {
-                    roles.insert(placement.role.clone());
-                    placement.window = placement.role.clone();
+                    let role = resources.entry(placement.window.clone()).or_insert_with(|| {
+                        let base =
+                            if placement.role.is_empty() { "window" } else { &placement.role };
+                        let mut candidate = base.to_owned();
+                        let mut suffix = 2;
+                        while roles.contains(&candidate) {
+                            candidate = format!("{base}-{suffix}");
+                            suffix += 1;
+                        }
+                        roles.insert(candidate.clone());
+                        candidate
+                    });
+                    placement.window.clone_from(role);
                     placement.preferences.clear();
                 }
                 Node::Group(group) => {
                     group.name = "Group".into();
                     group.membership = None;
                     for child in &mut group.children {
-                        redact(child, roles);
+                        redact(child, roles, resources);
                     }
                 }
             }
         }
         let mut roots = view.roots.clone();
         let mut roles = BTreeSet::new();
+        let mut resources = std::collections::BTreeMap::new();
         for root in roots.values_mut() {
-            redact(root, &mut roles);
+            redact(root, &mut roles, &mut resources);
+            replace_node_ids(root);
         }
         Self {
             version: 1,
@@ -487,10 +504,10 @@ impl LayoutPackage {
             }
             match node {
                 Node::Placement(placement) => {
-                    if placement.role.is_empty() {
+                    if placement.window.is_empty() {
                         return Err(invalid(&placement.id, "Empty role placeholder"));
                     }
-                    roles.insert(placement.role.clone());
+                    roles.insert(placement.window.clone());
                 }
                 Node::Group(group) => {
                     if group.membership.is_some() {
@@ -513,7 +530,10 @@ impl LayoutPackage {
         for root in self.roots.values() {
             inspect(root, &mut ids, &mut roles, 0)?;
         }
-        if roles != self.required_roles.iter().cloned().collect() {
+        if roles != self.required_roles.iter().cloned().collect()
+            || roles.len() != self.required_roles.len()
+            || roles != mappings.keys().cloned().collect()
+        {
             return Err(invalid(&self.id, "Declared roles differ from package placeholders"));
         }
         for role in &self.required_roles {
@@ -532,9 +552,9 @@ impl LayoutPackage {
             match node {
                 Node::Placement(placement) => {
                     placement.window = mappings
-                        .get(&placement.role)
+                        .get(&placement.window)
                         .cloned()
-                        .ok_or_else(|| invalid(&placement.role, "Unmapped role"))?;
+                        .ok_or_else(|| invalid(&placement.window, "Unmapped role"))?;
                     placement.preferences.clear();
                 }
                 Node::Group(group) => {
