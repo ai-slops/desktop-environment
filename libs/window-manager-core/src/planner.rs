@@ -152,6 +152,8 @@ pub struct Plan {
     pub diagnostics: Vec<String>,
     pub idempotent: bool,
     pub mutation_slots: BTreeMap<Id, Id>,
+    pub domains: Vec<BTreeSet<Id>>,
+    pub blocked: BTreeMap<Id, Error>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +383,8 @@ pub fn plan(
         diagnostics: Vec::new(),
         idempotent: false,
         mutation_slots: BTreeMap::new(),
+        domains: vec![request.scope.clone()],
+        blocked: BTreeMap::new(),
     };
     // An ordinary recall preserves the current Visit and manual live state.
     if runtime.completed.contains(&request.id)
@@ -973,6 +977,13 @@ impl Plan {
             )
         });
         result.mutation_slots.retain(|_, id| scope.contains(id));
+        result.domains = result
+            .domains
+            .iter()
+            .map(|domain| domain.intersection(scope).cloned().collect::<BTreeSet<_>>())
+            .filter(|domain| !domain.is_empty())
+            .collect();
+        result.blocked.retain(|slot, _| scope.contains(slot));
         result
     }
 }

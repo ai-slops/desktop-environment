@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use window_manager_core::{
     Binding, Configuration, Error, ErrorCode, Id, ManualEdit, ObservedWindow, Plan, Request,
     Result, Runtime, Snapshot, Status, TransitionResult, UndoRecord, WindowResult, atomic_write,
-    plan,
+    plan_independent,
 };
 use windows_window_manager::{Candidate, Journal, NativeEvent, RecoveryEntry};
 
@@ -136,7 +136,7 @@ mod tests {
         };
         state.runtime.generations.insert("unrelated".into(), 7);
         state.refresh()?;
-        let plan = plan(&state.config, &state.runtime, &state.snapshot, &request)?;
+        let plan = plan_independent(&state.config, &state.runtime, &state.snapshot, &request)?;
         Ok((state, plan, receiver))
     }
 
@@ -181,6 +181,31 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(1400));
         assert!(state.runtime.suspended.contains("work"));
         assert_eq!(state.runtime.generations["unrelated"], 7);
+        assert!(events.try_iter().any(
+            |event| matches!(event, Event::Result(result) if result.status == Status::Failed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn failed_resource_transfer_never_commits_its_empty_source_component() -> anyhow::Result<()> {
+        let (_fixture, candidate) = stalled_window()?;
+        let directory = tempfile::tempdir()?;
+        let (mut state, mut plan, events) =
+            fixture_state(directory.path().join("recovery.json"), &candidate)?;
+        let mut source = state.config.slots["work"].clone();
+        source.id = "source".into();
+        state.config.slots.insert(source.id.clone(), source);
+        plan.scope.insert("source".into());
+        plan.generations.insert("source".into(), 0);
+        plan.domains = vec![plan.scope.clone()];
+        let (_commands, receive) = mpsc::channel();
+        let (_native, native) = mpsc::channel();
+        state.apply(&plan, &receive, &native)?;
+        assert!(state.runtime.suspended.contains("work"));
+        assert!(state.runtime.suspended.contains("source"));
+        assert!(state.runtime.presentations.is_empty());
+        assert!(state.undo.is_empty());
         assert!(events.try_iter().any(
             |event| matches!(event, Event::Result(result) if result.status == Status::Failed)
         ));
@@ -333,7 +358,11 @@ impl State {
         if plan.idempotent {
             let _ = self.events.send(Event::Result(TransitionResult {
                 request: plan.id.clone(),
-                status: Status::Settled,
+                status: if plan.blocked.is_empty() {
+                    Status::Settled
+                } else {
+                    Status::PartiallyApplied
+                },
                 windows: Vec::new(),
                 rendering_readiness: "unknown".into(),
             }));
@@ -417,6 +446,11 @@ impl State {
                     NativeEvent::Changed(_) => {}
                 }
             }
+            for domain in &plan.domains {
+                if !domain.is_disjoint(&superseded) {
+                    superseded.extend(domain.iter().cloned());
+                }
+            }
             if superseded == plan.scope {
                 break;
             }
@@ -490,9 +524,18 @@ impl State {
                 }
                 continue;
             }
-            let component_settled = component.mutations.iter().all(|mutation| {
-                outcomes.iter().any(|outcome| outcome.window == mutation.window && outcome.settled)
-            });
+            let domain = plan
+                .domains
+                .iter()
+                .find(|domain| domain.contains(slot))
+                .cloned()
+                .unwrap_or_else(|| BTreeSet::from([slot.clone()]));
+            let component_settled =
+                plan.scoped_subset(&domain, &prior_runtime).mutations.iter().all(|mutation| {
+                    outcomes
+                        .iter()
+                        .any(|outcome| outcome.window == mutation.window && outcome.settled)
+                });
             if component_settled {
                 component.commit(&mut self.runtime);
                 committed_slots.insert(slot.clone());
@@ -518,7 +561,7 @@ impl State {
             }
         }
         let settled = settled && superseded.is_empty();
-        if !settled {
+        if !settled || !plan.blocked.is_empty() {
             self.runtime.completed.remove(&plan.id);
         }
         if settled {
@@ -548,9 +591,10 @@ impl State {
             request: plan.id.clone(),
             status: if !superseded.is_empty() {
                 Status::Superseded
-            } else if settled {
+            } else if settled && plan.blocked.is_empty() {
                 Status::Settled
-            } else if outcomes.iter().any(|outcome| outcome.settled) {
+            } else if !committed_slots.is_empty() || outcomes.iter().any(|outcome| outcome.settled)
+            {
                 Status::PartiallyApplied
             } else {
                 Status::Failed
@@ -751,7 +795,8 @@ fn run(
             Command::Preview(config, request) => {
                 state.config = config;
                 state.refresh().and_then(|()| {
-                    let plan = plan(&state.config, &state.runtime, &state.snapshot, &request)?;
+                    let plan =
+                        plan_independent(&state.config, &state.runtime, &state.snapshot, &request)?;
                     let _ = state.events.send(Event::Preview(Box::new(plan)));
                     Ok(())
                 })

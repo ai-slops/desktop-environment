@@ -282,7 +282,7 @@ impl Session {
         }
         let token = new_id("preview");
         // Serialize authored domain data only. Plan.expected and mutations contain native bindings.
-        let response = json!({"plan":token,"request":plan.id,"revision":plan.config_revision,"topology_revision":plan.topology_revision,"scope":plan.scope,"desired":plan.desired,"diagnostics":plan.diagnostics,"impact":plan.impact,"idempotent":plan.idempotent});
+        let response = json!({"plan":token,"request":plan.id,"revision":plan.config_revision,"topology_revision":plan.topology_revision,"scope":plan.scope,"domains":plan.domains,"blocked":plan.blocked,"desired":plan.desired,"diagnostics":plan.diagnostics,"impact":plan.impact,"idempotent":plan.idempotent});
         self.plans.insert(token, plan);
         Ok(response)
     }

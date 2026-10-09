@@ -464,6 +464,60 @@ fn composition_undo_reverses_all_successful_slots_as_one_unit() -> Result<()> {
 }
 
 #[test]
+fn independent_planning_isolates_fit_failures_but_never_splits_shared_resources() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    if let Some(slot) = config.slots.get_mut("work") {
+        slot.region[2] = 0.5;
+    }
+    let mut slot = config.slots["work"].clone();
+    slot.id = "second-slot".into();
+    slot.region[0] = 0.5;
+    config.slots.insert(slot.id.clone(), slot);
+    let mut reference = config.windows["preview"].clone();
+    reference.id = "second-window".into();
+    config.windows.insert(reference.id.clone(), reference);
+    let mut window = snapshot.windows["preview"].clone();
+    window.binding.handle = 2;
+    window.frame.x = 1200;
+    snapshot.windows.insert("second-window".into(), window);
+    let mut placement = Placement::new("second-window".into(), "other".into());
+    placement.minimum_client = Some([1500.0, 1500.0]);
+    if let Some(view) = config.views.get_mut(&target.view) {
+        view.roots.insert("second-root".into(), Node::Placement(placement));
+    }
+    let mut target = target;
+    target.roots.insert("second-root".into(), "second-slot".into());
+    let request = Request::open(&config, target.clone());
+    assert!(plan(&config, &Runtime::default(), &snapshot, &request).is_err());
+    let partial = plan_independent(&config, &Runtime::default(), &snapshot, &request)?;
+    assert_eq!(partial.scope, BTreeSet::from(["work".into()]));
+    assert!(partial.blocked.contains_key("second-slot"));
+    assert!(!partial.desired.contains_key("second-window"));
+    let mut invalid = request.clone();
+    invalid.selected_tabs.insert("foreign".into(), "child".into());
+    assert!(plan_independent(&config, &Runtime::default(), &snapshot, &invalid).is_err());
+    if let Some(view) = config.views.get_mut(&target.view) {
+        view.roots.insert(
+            "second-root".into(),
+            Node::Placement(Placement::new("preview".into(), "shared".into())),
+        );
+    }
+    assert!(plan_independent(&config, &Runtime::default(), &snapshot, &request).is_err());
+    // Overlapping new regions form a connected failure domain too.
+    if let Some(view) = config.views.get_mut(&target.view) {
+        view.roots.insert(
+            "second-root".into(),
+            Node::Placement(Placement::new("second-window".into(), "other".into())),
+        );
+    }
+    if let Some(slot) = config.slots.get_mut("second-slot") {
+        slot.region[0] = 0.25;
+    }
+    assert!(plan_independent(&config, &Runtime::default(), &snapshot, &request).is_err());
+    Ok(())
+}
+
+#[test]
 fn semantic_tabs_keep_occurrences_independent_even_when_widened() -> Result<()> {
     let (mut config, snapshot, target) = fixture();
     let group = group_mut(&mut config, &target)?;

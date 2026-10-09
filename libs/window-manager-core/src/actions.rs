@@ -171,6 +171,8 @@ pub fn plan_window_action(
         diagnostics: vec!["Explicit state/rescue action; saved geometry is unchanged".into()],
         idempotent: false,
         mutation_slots: BTreeMap::from([(action.window.clone(), action.slot.clone())]),
+        domains: vec![BTreeSet::from([action.slot.clone()])],
+        blocked: BTreeMap::new(),
     };
     for (window, claim) in &runtime.claims {
         if claim.slot == action.slot

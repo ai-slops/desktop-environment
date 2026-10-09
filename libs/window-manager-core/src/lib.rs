@@ -1,6 +1,7 @@
 //! Platform-neutral authored state, bounded layout evaluation, and scoped transition planning.
 
 mod actions;
+mod domains;
 mod editing;
 mod formula;
 mod membership;
@@ -13,6 +14,7 @@ mod store;
 mod undo;
 
 pub use actions::*;
+pub use domains::*;
 pub use editing::*;
 pub use formula::*;
 pub use membership::*;
