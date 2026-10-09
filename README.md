@@ -10,7 +10,7 @@ The workspace provides conventions, shared linting, and a folder layout for GUI 
 
 Concrete utilities now included:
 
-- `desktop-control`: a shared Windows GUI for saving and reusing audio and display presets
+- `desktop-control`: a shared Windows GUI for saving audio/display presets and managing multiple mirror windows
 - `display-relay`: mirror one Windows display into a local control window
 - `audio-output-router`: clone the audio of one Windows output device into another output device
 
@@ -20,7 +20,10 @@ Run `just desktop-control` (or `mise run desktop-control`) to build both tools a
 the control panel. Choose audio outputs and a display, enable the tools you need,
 and save a named preset. You can load it later and start both tools with one click.
 The last saved settings are restored when the GUI opens; routing and mirroring
-start only when you press **저장하고 시작**. Closing the GUI stops the tools it launched.
+start only when requested. **미러링 추가** adds another window configuration; each row
+has **창 열기** and **다시 열기** controls, so closing one mirror does not interrupt the
+others. **저장하고 시작** starts enabled tools that are stopped. Closing the GUI stops
+the tools it launched.
 
 After building, double-click `target\desktop-control\debug\desktop-control.exe`. Keep
 `audio-output-router.exe` and `display-relay.exe` beside it when copying the app.

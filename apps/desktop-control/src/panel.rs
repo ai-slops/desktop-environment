@@ -1,6 +1,6 @@
 use crate::process::{ManagedProcess, sibling_binary};
-use anyhow::{Result, bail};
-use desktop_presets::{PresetStore, Settings, WindowStateFile, window_state_path};
+use anyhow::{Context, Result, bail};
+use desktop_presets::{DisplaySettings, PresetStore, Settings, WindowStateFile, window_state_path};
 use eframe::egui::{self, Color32, RichText};
 use raw_window_handle::HasWindowHandle;
 use std::ffi::OsString;
@@ -32,7 +32,7 @@ pub struct ControlPanel {
     displays: Vec<DisplayInfo>,
     device_errors: Vec<String>,
     audio: ManagedProcess,
-    display: ManagedProcess,
+    mirrors: Vec<ManagedProcess>,
     #[cfg(feature = "ui-smoke")]
     screenshot: Option<(PathBuf, std::time::Instant, bool)>,
 }
@@ -55,6 +55,7 @@ impl ControlPanel {
                 Ok(state) => (Some(state), None),
                 Err(error) => (None, Some(format!("창 배치를 읽지 못했습니다: {error:#}"))),
             };
+        let mirrors = store.last_used.displays().map(|_| ManagedProcess::default()).collect();
         let mut panel = Self {
             path,
             draft: store.last_used.clone(),
@@ -72,7 +73,7 @@ impl ControlPanel {
             displays: Vec::new(),
             device_errors: Vec::new(),
             audio: ManagedProcess::default(),
-            display: ManagedProcess::default(),
+            mirrors,
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("DESKTOP_CONTROL_SCREENSHOT")
                 .map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
@@ -102,8 +103,8 @@ impl ControlPanel {
         Ok(())
     }
 
-    const fn is_running(&self) -> bool {
-        self.audio.is_running() || self.display.is_running()
+    fn is_running(&self) -> bool {
+        self.audio.is_running() || self.mirrors.iter().any(ManagedProcess::is_running)
     }
 
     fn refresh_devices(&mut self) {
@@ -153,8 +154,10 @@ impl ControlPanel {
         if let Err(error) = self.audio.poll() {
             self.error = Some(format!("오디오: {error:#}"));
         }
-        if let Err(error) = self.display.poll() {
-            self.error = Some(format!("디스플레이: {error:#}"));
+        for (index, mirror) in self.mirrors.iter_mut().enumerate() {
+            if let Err(error) = mirror.poll() {
+                self.error = Some(format!("미러링 {}: {error:#}", index + 1));
+            }
         }
     }
 
@@ -191,6 +194,9 @@ impl ControlPanel {
     }
 
     fn load_preset(&mut self, index: usize) -> Result<()> {
+        if self.is_running() {
+            bail!("프리셋을 불러오려면 실행 중인 도구를 모두 중지하세요.");
+        }
         let mut store = self.store.clone();
         let preset =
             store.presets.get(index).ok_or_else(|| anyhow::anyhow!("프리셋이 없습니다."))?;
@@ -199,6 +205,7 @@ impl ControlPanel {
         store.last_used = settings.clone();
         self.commit(store)?;
         self.draft = settings;
+        self.mirrors = self.draft.displays().map(|_| ManagedProcess::default()).collect();
         self.notice = format!("‘{name}’ 설정을 불러왔습니다. 시작 버튼으로 실행하세요.");
         Ok(())
     }
@@ -245,7 +252,7 @@ impl ControlPanel {
         if self.devices_pending.is_some() {
             bail!("장치 검색이 끝날 때까지 기다려 주세요.");
         }
-        if self.draft.audio.enabled {
+        if self.draft.audio.enabled && !self.audio.is_running() {
             let resolve = |selector: &str| {
                 self.audio_devices.iter().find(|device| {
                     if selector == "default" { device.is_default } else { device.id == selector }
@@ -265,50 +272,134 @@ impl ControlPanel {
                 bail!("Windows 기본 출력과 대상이 같은 장치입니다. 다른 출력을 선택하세요.");
             }
         }
-        if self.draft.display.enabled
-            && !self.displays.iter().any(|display| display.name == self.draft.display.display)
-        {
-            bail!("저장된 디스플레이가 연결되어 있지 않습니다. 장치를 다시 검색하세요.");
+        for (index, settings) in self.draft.displays().enumerate() {
+            if settings.enabled && !self.mirrors[index].is_running() {
+                self.validate_mirror(index)?;
+            }
         }
         Ok(())
     }
 
     fn start(&mut self) -> Result<()> {
-        if self.is_running() {
-            bail!("설정을 바꾸기 전에 실행 중인 도구를 모두 중지하세요.");
-        }
+        self.start_with_resolver(sibling_binary)
+    }
+
+    fn start_with_resolver(&mut self, resolve: impl Fn(&str) -> Result<PathBuf>) -> Result<()> {
+        self.poll();
         self.validate_devices()?;
-        let audio_binary =
-            self.draft.audio.enabled.then(|| sibling_binary("audio-output-router")).transpose()?;
-        let display_binary =
-            self.draft.display.enabled.then(|| sibling_binary("display-relay")).transpose()?;
+        let audio_binary = (self.draft.audio.enabled && !self.audio.is_running())
+            .then(|| resolve("audio-output-router"))
+            .transpose()?;
+        let pending: Vec<usize> = self
+            .draft
+            .displays()
+            .enumerate()
+            .filter(|(index, settings)| settings.enabled && !self.mirrors[*index].is_running())
+            .map(|(index, _)| index)
+            .collect();
+        let display_binary = (!pending.is_empty()).then(|| resolve("display-relay")).transpose()?;
         self.save_current()?;
+        let started_audio = audio_binary.is_some();
         if let Some(binary) = audio_binary {
             self.audio.start(&binary, &self.draft.audio_args())?;
         }
         if let Some(binary) = display_binary {
-            let mut args: Vec<OsString> =
-                self.draft.display_args().into_iter().map(OsString::from).collect();
-            args.extend([
-                OsString::from("--window-state-file"),
-                window_state_path(&self.path, "relay").into_os_string(),
-            ]);
-            if let Err(error) = self.display.start(&binary, &args) {
-                self.audio.stop()?;
-                return Err(error);
+            let mut started: Vec<usize> = Vec::new();
+            for index in pending {
+                if let Err(error) = self.launch_mirror(index, &binary) {
+                    // Roll back only the processes started by this click.
+                    for index in started {
+                        let _ = self.mirrors[index].stop();
+                    }
+                    if started_audio {
+                        let _ = self.audio.stop();
+                    }
+                    return Err(error);
+                }
+                started.push(index);
             }
         }
-        self.notice = "저장한 설정으로 시작했습니다. 창을 닫으면 실행한 도구도 중지됩니다.".into();
+        self.notice =
+            "저장한 설정으로 시작했습니다. 설정 앱을 닫으면 실행한 도구도 중지됩니다.".into();
         Ok(())
     }
 
     fn stop(&mut self) -> Result<()> {
-        // Attempt both stops even if one fails.
-        let audio_result = self.audio.stop();
-        let display_result = self.display.stop();
-        audio_result?;
-        display_result?;
+        // Attempt every owned process even if one stop fails.
+        let mut result = self.audio.stop();
+        for mirror in &mut self.mirrors {
+            let stopped = mirror.stop();
+            if result.is_ok() {
+                result = stopped;
+            }
+        }
+        result?;
         self.notice = "모든 도구를 중지했습니다.".into();
+        Ok(())
+    }
+
+    fn validate_mirror(&self, index: usize) -> Result<()> {
+        let settings = self.draft.display_at(index).context("미러링 설정이 없습니다.")?;
+        if !settings.enabled {
+            bail!("미러링을 선택하세요.");
+        }
+        settings.validate()?;
+        if self.devices_pending.is_some() {
+            bail!("장치 검색이 끝날 때까지 기다려 주세요.");
+        }
+        if !self.displays.iter().any(|display| display.name == settings.display) {
+            bail!("저장된 디스플레이가 연결되어 있지 않습니다. 장치를 다시 검색하세요.");
+        }
+        Ok(())
+    }
+
+    fn mirror_state_path(&self, index: usize) -> PathBuf {
+        // Separate files avoid concurrent children overwriting each other's placements.
+        let kind = if index == 0 { "relay".into() } else { format!("relay-{}", index + 1) };
+        window_state_path(&self.path, &kind)
+    }
+
+    fn launch_mirror(&mut self, index: usize, binary: &std::path::Path) -> Result<()> {
+        let settings = self.draft.display_at(index).context("미러링 설정이 없습니다.")?;
+        let mut args: Vec<OsString> = settings.args().into_iter().map(OsString::from).collect();
+        args.extend([
+            OsString::from("--window-state-file"),
+            self.mirror_state_path(index).into_os_string(),
+        ]);
+        self.mirrors.get_mut(index).context("미러링 실행 상태가 없습니다.")?.start(binary, &args)
+    }
+
+    fn open_mirror(&mut self, index: usize) -> Result<()> {
+        self.open_mirror_with_binary(index, &sibling_binary("display-relay")?)
+    }
+
+    fn open_mirror_with_binary(&mut self, index: usize, binary: &std::path::Path) -> Result<()> {
+        self.poll();
+        self.validate_mirror(index)?;
+        self.launch_mirror(index, binary)?;
+        self.notice = format!(
+            "미러링 {} 창을 열었습니다. 현재 설정 저장으로 이 구성을 보관하세요.",
+            index + 1
+        );
+        Ok(())
+    }
+
+    fn add_mirror(&mut self) {
+        self.draft
+            .additional_displays
+            .push(DisplaySettings { enabled: true, ..DisplaySettings::default() });
+        self.mirrors.push(ManagedProcess::default());
+    }
+
+    fn remove_mirror(&mut self, index: usize) -> Result<()> {
+        if index == 0 || index + 1 != self.mirrors.len() {
+            bail!("추가한 미러링만 삭제할 수 있습니다.");
+        }
+        if self.is_running() {
+            bail!("미러링 설정을 삭제하려면 실행 중인 도구를 모두 중지하세요.");
+        }
+        self.draft.additional_displays.remove(index - 1);
+        self.mirrors.remove(index);
         Ok(())
     }
 
@@ -440,81 +531,139 @@ impl ControlPanel {
         }
     }
 
-    fn device_settings_ui(&mut self, ui: &mut egui::Ui) {
+    fn audio_settings_ui(&mut self, ui: &mut egui::Ui) {
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.checkbox(&mut self.draft.audio.enabled, RichText::new("오디오 출력 복제").strong());
-            ui.weak("원본 소리를 유지하면서 다른 출력으로 복제합니다.");
-            ui.add_enabled_ui(self.draft.audio.enabled, |ui| {
-                audio_selector(
-                    ui,
-                    "audio_source",
-                    "원본 출력",
-                    &mut self.draft.audio.source,
-                    &mut self.draft.audio.source_label,
-                    &self.audio_devices,
+            ui.add_enabled_ui(!self.audio.is_running(), |ui| {
+                ui.checkbox(
+                    &mut self.draft.audio.enabled,
+                    RichText::new("오디오 출력 복제").strong(),
                 );
-                audio_selector(
-                    ui,
-                    "audio_target",
-                    "대상 출력",
-                    &mut self.draft.audio.target,
-                    &mut self.draft.audio.target_label,
-                    &self.audio_devices,
-                );
+                ui.weak("원본 소리를 유지하면서 다른 출력으로 복제합니다.");
+                if self.draft.audio.enabled {
+                    audio_selector(
+                        ui,
+                        "audio_source",
+                        "원본 출력",
+                        &mut self.draft.audio.source,
+                        &mut self.draft.audio.source_label,
+                        &self.audio_devices,
+                    );
+                    audio_selector(
+                        ui,
+                        "audio_target",
+                        "대상 출력",
+                        &mut self.draft.audio.target,
+                        &mut self.draft.audio.target_label,
+                        &self.audio_devices,
+                    );
+                }
             });
         });
         ui.add_space(8.0);
+    }
+
+    fn mirror_settings_ui(&mut self, ui: &mut egui::Ui, index: usize) {
+        let running = self.mirrors[index].is_running();
         egui::Frame::group(ui.style()).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.checkbox(
-                &mut self.draft.display.enabled,
-                RichText::new("디스플레이 미러링").strong(),
-            );
-            ui.weak("선택한 화면을 별도 창에 표시합니다. 미러링 창에서 Esc로 종료할 수 있습니다.");
-            ui.add_enabled_ui(self.draft.display.enabled, |ui| {
-                ui.label("원본 디스플레이");
-                let selected =
-                    self.displays.iter().find(|display| display.name == self.draft.display.display);
-                let label = selected.map_or_else(
-                    || {
-                        missing_label(
-                            &self.draft.display.display,
-                            &self.draft.display.display_label,
-                        )
-                    },
-                    display_label,
-                );
-                egui::ComboBox::from_id_salt("display")
-                    .width(ui.available_width() - 20.0)
-                    .selected_text(label)
-                    .show_ui(ui, |ui| {
-                        for display in &self.displays {
-                            if ui
-                                .selectable_value(
-                                    &mut self.draft.display.display,
-                                    display.name.clone(),
-                                    display_label(display),
-                                )
-                                .clicked()
-                            {
-                                self.draft.display.display_label = display_label(display);
-                            }
-                        }
-                    });
-                ui.horizontal_wrapped(|ui| {
-                    ui.checkbox(&mut self.draft.display.fullscreen, "전체 화면");
-                    ui.label("FPS");
-                    ui.add(egui::DragValue::new(&mut self.draft.display.fps).range(1..=240));
-                    ui.label("캡처 대기");
-                    ui.add(
-                        egui::DragValue::new(&mut self.draft.display.timeout_ms)
-                            .range(1..=1000)
-                            .suffix(" ms"),
+            ui.horizontal_wrapped(|ui| {
+                if let Some(settings) = self.draft.display_at_mut(index) {
+                    ui.add_enabled(
+                        !running,
+                        egui::Checkbox::new(
+                            &mut settings.enabled,
+                            RichText::new(format!("디스플레이 미러링 {}", index + 1)).strong(),
+                        ),
                     );
+                }
+                ui.label(&self.mirrors[index].status);
+                let enabled = self.draft.display_at(index).is_some_and(|settings| settings.enabled);
+                let label = if self.mirrors[index].status == "중지됨"
+                    && self.mirrors[index].logs.is_empty()
+                {
+                    "창 열기"
+                } else {
+                    "다시 열기"
+                };
+                if ui
+                    .add_enabled(
+                        !running && enabled && self.devices_pending.is_none(),
+                        egui::Button::new(label),
+                    )
+                    .clicked()
+                {
+                    let result = self.open_mirror(index);
+                    self.report(result);
+                }
+                if ui.add_enabled(running, egui::Button::new("중지")).clicked() {
+                    let result = self.mirrors[index].stop();
+                    self.report(result);
+                }
+            });
+            ui.add_enabled_ui(!running, |ui| {
+                let Some(settings) = self.draft.display_at_mut(index) else { return };
+                ui.add_enabled_ui(settings.enabled, |ui| {
+                    ui.label("원본 디스플레이");
+                    let selected =
+                        self.displays.iter().find(|display| display.name == settings.display);
+                    let label = selected.map_or_else(
+                        || missing_label(&settings.display, &settings.display_label),
+                        display_label,
+                    );
+                    egui::ComboBox::from_id_salt(("display", index))
+                        .width(ui.available_width() - 20.0)
+                        .selected_text(label)
+                        .show_ui(ui, |ui| {
+                            for display in &self.displays {
+                                if ui
+                                    .selectable_value(
+                                        &mut settings.display,
+                                        display.name.clone(),
+                                        display_label(display),
+                                    )
+                                    .clicked()
+                                {
+                                    settings.display_label = display_label(display);
+                                }
+                            }
+                        });
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut settings.fullscreen, "전체 화면");
+                        ui.label("FPS");
+                        ui.add(egui::DragValue::new(&mut settings.fps).range(1..=240));
+                        ui.label("캡처 대기");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.timeout_ms)
+                                .range(1..=1000)
+                                .suffix(" ms"),
+                        );
+                    });
                 });
             });
         });
+        ui.add_space(8.0);
+    }
+
+    fn device_settings_ui(&mut self, ui: &mut egui::Ui) {
+        self.audio_settings_ui(ui);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("미러링 추가").clicked() {
+                self.add_mirror();
+            }
+            if self.mirrors.len() > 1
+                && ui
+                    .add_enabled(!self.is_running(), egui::Button::new("마지막 미러링 설정 삭제"))
+                    .clicked()
+            {
+                let result = self.remove_mirror(self.mirrors.len() - 1);
+                self.report(result);
+            }
+        });
+        ui.weak("각 창은 따로 열고 닫을 수 있습니다. 창을 닫으면 여기서 다시 열어 주세요.");
+        for index in 0..self.mirrors.len() {
+            self.mirror_settings_ui(ui, index);
+        }
     }
 
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
@@ -523,22 +672,14 @@ impl ControlPanel {
             let saved = self.has_saved_settings && self.draft == self.store.last_used;
             ui.weak(if saved { "저장됨" } else { "저장하지 않은 변경" });
         });
-        let editable = !self.is_running();
-        ui.add_enabled_ui(editable, |ui| {
-            self.device_settings_ui(ui);
-        });
-        if !editable {
-            ui.weak("설정을 바꾸려면 실행 중인 도구를 모두 중지하세요.");
-        }
-        ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(editable, egui::Button::new("현재 설정 저장")).clicked() {
+            if ui.button("현재 설정 저장").clicked() {
                 let result = self.save_current();
                 self.report(result);
             }
             if ui
                 .add_enabled(
-                    editable && self.devices_pending.is_none(),
+                    self.devices_pending.is_none(),
                     egui::Button::new(RichText::new("저장하고 시작").color(Color32::WHITE))
                         .fill(Color32::from_rgb(36, 96, 180)),
                 )
@@ -547,11 +688,14 @@ impl ControlPanel {
                 let result = self.start();
                 self.report(result);
             }
-            if ui.add_enabled(!editable, egui::Button::new("모두 중지")).clicked() {
+            if ui.add_enabled(self.is_running(), egui::Button::new("모두 중지")).clicked() {
                 let result = self.stop();
                 self.report(result);
             }
         });
+        ui.weak("실행 중인 도구의 설정은 중지한 후 바꿀 수 있습니다.");
+        ui.add_space(8.0);
+        self.device_settings_ui(ui);
         ui.separator();
         ui.heading("실행 상태");
         ui.horizontal_wrapped(|ui| {
@@ -561,12 +705,8 @@ impl ControlPanel {
                 let result = self.audio.stop();
                 self.report(result);
             }
-            ui.label(format!("미러링: {}", self.display.status));
-            if ui.add_enabled(self.display.is_running(), egui::Button::new("미러링 중지")).clicked()
-            {
-                let result = self.display.stop();
-                self.report(result);
-            }
+            let running = self.mirrors.iter().filter(|mirror| mirror.is_running()).count();
+            ui.label(format!("미러링: {running}/{}개 실행 중", self.mirrors.len()));
         });
         egui::CollapsingHeader::new("실행 로그").show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -574,8 +714,13 @@ impl ControlPanel {
                 .max_height(150.0)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
-                    for (name, process) in [("오디오", &self.audio), ("미러링", &self.display)]
-                    {
+                    let processes = std::iter::once(("오디오".into(), &self.audio)).chain(
+                        self.mirrors
+                            .iter()
+                            .enumerate()
+                            .map(|(index, mirror)| (format!("미러링 {}", index + 1), mirror)),
+                    );
+                    for (name, process) in processes {
                         ui.strong(name);
                         if process.logs.is_empty() {
                             ui.weak("아직 로그가 없습니다.");
@@ -809,5 +954,174 @@ mod tests {
         assert_eq!(std::fs::read_to_string(path)?, "broken placement");
         assert_eq!(PresetStore::load(&panel.path)?.last_used, panel.draft);
         Ok(())
+    }
+
+    #[test]
+    fn additional_mirrors_save_reload_and_use_independent_geometry_files() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut panel = panel(directory.path());
+        panel.draft.display = DisplaySettings {
+            enabled: true,
+            display: "DISPLAY1".into(),
+            ..DisplaySettings::default()
+        };
+        panel.add_mirror();
+        panel.draft.additional_displays[0] = panel.draft.display.clone();
+        assert_ne!(panel.mirror_state_path(0), panel.mirror_state_path(1));
+        panel.name = "여러 화면".into();
+        panel.add_preset()?;
+        panel.remove_mirror(1)?;
+        panel.load_preset(0)?;
+        assert_eq!(panel.mirrors.len(), 2);
+        assert_eq!(panel.draft.additional_displays[0], panel.draft.display);
+        let restarted = ControlPanel::new(panel.path.clone());
+        assert_eq!(restarted.mirrors.len(), 2);
+        assert_eq!(restarted.draft, panel.draft);
+        assert!(!restarted.is_running());
+        Ok(())
+    }
+
+    #[test]
+    fn independent_mirror_validation_ignores_incomplete_audio_and_other_rows() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut panel = panel(directory.path());
+        panel.draft.audio.target.clear();
+        let area = display_relay_core::DisplayArea { left: 0, top: 0, width: 1920, height: 1080 };
+        panel.displays = vec![DisplayInfo {
+            name: "DISPLAY1".into(),
+            friendly_name: "Test display".into(),
+            area,
+            virtual_desktop: display_relay_core::VirtualDesktop { bounds: area },
+        }];
+        let display = panel.displays.first().context("No connected display")?;
+        panel.draft.display = DisplaySettings {
+            enabled: true,
+            display: display.name.clone(),
+            ..DisplaySettings::default()
+        };
+        panel.add_mirror();
+        assert!(panel.validate_devices().is_err());
+        panel.validate_mirror(0)?;
+        assert!(panel.validate_mirror(1).is_err());
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires a built display-relay and connected Windows display; set DESKTOP_CONTROL_RELAY_SMOKE_BINARY"]
+    fn real_mirror_close_reopen_keeps_other_windows_running() -> Result<()> {
+        use std::time::{Duration, Instant};
+        let binary = std::env::var_os("DESKTOP_CONTROL_RELAY_SMOKE_BINARY")
+            .map(PathBuf::from)
+            .context("Set DESKTOP_CONTROL_RELAY_SMOKE_BINARY")?;
+        let directory = tempfile::tempdir()?;
+        let mut panel = panel(directory.path());
+        panel.displays = enumerate_displays()?;
+        let display = panel.displays.last().context("No connected display")?;
+        panel.draft.display = DisplaySettings {
+            enabled: true,
+            display: display.name.clone(),
+            fps: 15,
+            ..DisplaySettings::default()
+        };
+        panel.add_mirror();
+        panel.draft.additional_displays[0] = panel.draft.display.clone();
+        // No audio output is selected; per-window open must remain independent.
+        panel.draft.audio.target.clear();
+        panel.open_mirror_with_binary(0, &binary)?;
+        let first_pid = panel.mirrors[0].child_id().context("First mirror missing")?;
+        panel.draft.audio.enabled = false;
+        panel.start_with_resolver(|name| {
+            assert_eq!(name, "display-relay");
+            Ok(binary.clone())
+        })?;
+        assert_eq!(panel.mirrors[0].child_id(), Some(first_pid));
+        let other_pid = panel.mirrors[1].child_id().context("Second mirror missing")?;
+        close_owned_mirror_window(first_pid)?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while panel.mirrors[0].is_running() {
+            panel.poll();
+            if Instant::now() >= deadline {
+                bail!("Closed mirror did not exit");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(panel.mirrors[0].status, "종료됨");
+        assert_eq!(panel.mirrors[1].child_id(), Some(other_pid));
+        assert!(panel.mirrors[1].is_running());
+        panel.open_mirror_with_binary(0, &binary)?;
+        assert_ne!(panel.mirrors[0].child_id(), Some(first_pid));
+        assert_eq!(panel.mirrors[1].child_id(), Some(other_pid));
+        panel
+            .start_with_resolver(|_| bail!("Already running mirrors must not resolve binaries"))?;
+        assert!(panel.open_mirror_with_binary(1, &binary).is_err());
+        assert!(panel.remove_mirror(1).is_err());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !panel.mirror_state_path(0).exists() || !panel.mirror_state_path(1).exists() {
+            panel.poll();
+            assert!(panel.mirrors.iter().all(ManagedProcess::is_running));
+            if Instant::now() >= deadline {
+                bail!("Mirrors did not save their separate placements");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panel.stop()?;
+        assert!(!panel.is_running());
+        println!(
+            "Two real mirror windows opened; closing/reopening one preserved the other; separate placements saved; all stopped."
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn close_owned_mirror_window(pid: u32) -> Result<()> {
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowTextW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+        };
+        use windows::core::BOOL;
+        struct Search {
+            pid: u32,
+            window: HWND,
+        }
+        unsafe extern "system" fn find(window: HWND, data: LPARAM) -> BOOL {
+            // EnumWindows invokes this synchronously with the live stack search below.
+            let search = unsafe { &mut *(data.0 as *mut Search) };
+            let mut pid = 0;
+            unsafe {
+                GetWindowThreadProcessId(window, Some(&raw mut pid));
+            }
+            let mut title = [0u16; 200];
+            let length = unsafe { GetWindowTextW(window, &mut title) };
+            if pid == search.pid
+                && length > 0
+                && String::from_utf16_lossy(&title[..usize::try_from(length).unwrap_or(0)])
+                    .starts_with("Relay ")
+            {
+                search.window = window;
+            }
+            BOOL(1)
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut search = Search { pid, window: HWND::default() };
+            unsafe {
+                EnumWindows(
+                    Some(find),
+                    LPARAM((&raw mut search).cast::<std::ffi::c_void>() as isize),
+                )?;
+            }
+            if search.window != HWND::default() {
+                // Only a title-bearing window of the owned test child PID is closed.
+                unsafe {
+                    PostMessageW(Some(search.window), WM_CLOSE, WPARAM(0), LPARAM(0))?;
+                }
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("Owned mirror did not create a window");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }

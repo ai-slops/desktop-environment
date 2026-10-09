@@ -25,3 +25,7 @@ windows-window-placement = { path = "../../platforms/windows-window-placement" }
 
 [dev-dependencies]
 tempfile.workspace = true
+display-relay-core = { path = "../../libs/display-relay-core" }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows.workspace = true

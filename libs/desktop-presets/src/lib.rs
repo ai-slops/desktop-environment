@@ -129,6 +129,7 @@ impl Settings {
         std::iter::once(&self.display).chain(&self.additional_displays)
     }
 
+    #[must_use]
     pub fn display_at(&self, index: usize) -> Option<&DisplaySettings> {
         self.displays().nth(index)
     }

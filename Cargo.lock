@@ -693,10 +693,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "desktop-presets",
+ "display-relay-core",
  "eframe",
  "image",
  "raw-window-handle",
  "tempfile",
+ "windows",
  "windows-audio-router",
  "windows-desktop-duplication",
  "windows-shortcuts",
