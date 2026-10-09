@@ -6,12 +6,26 @@ Rust workspace scaffold for desktop-environment tooling that targets:
 - macOS
 - Linux, primarily Ubuntu Desktop
 
-This repository is intentionally set up without concrete crates yet. The goal is to provide conventions, shared linting, and a folder layout that scales well when adding multiple GUI apps, platform adapters, window-management helpers, overlays, and capture/output utilities.
+The workspace provides conventions, shared linting, and a folder layout for GUI apps, platform adapters, window-management helpers, overlays, and capture/output utilities.
 
 Concrete utilities now included:
 
+- `desktop-control`: a shared Windows GUI for saving and reusing audio and display presets
 - `display-relay`: mirror one Windows display into a local control window
 - `audio-output-router`: clone the audio of one Windows output device into another output device
+
+## Saved-settings GUI
+
+Run `just desktop-control` (or `mise run desktop-control`) to build both tools and open
+the control panel. Choose audio outputs and a display, enable the tools you need,
+and save a named preset. You can load it later and start both tools with one click.
+The last saved settings are restored when the GUI opens; routing and mirroring
+start only when you press **저장하고 시작**. Closing the GUI stops the tools it launched.
+
+After building, double-click `target\desktop-control\debug\desktop-control.exe`. Keep
+`audio-output-router.exe` and `display-relay.exe` beside it when copying the app.
+Settings are stored in `%LOCALAPPDATA%\DesktopEnvironment\presets.json`.
+See [the GUI guide](docs/desktop-control.md) for details.
 
 ## Environment setup
 

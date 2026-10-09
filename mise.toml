@@ -10,6 +10,10 @@ RUST_BACKTRACE = "1"
 description = "Install the workspace toolchain declared in mise.toml"
 run = "mise install"
 
+[tasks.desktop-control]
+description = "Build both tools and open the saved-settings GUI"
+run = "just desktop-control"
+
 [tasks.fmt]
 description = "Format the entire workspace"
 run = "cargo fmt --all"

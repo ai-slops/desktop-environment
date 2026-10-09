@@ -24,7 +24,9 @@ Use `just audio-devices` to list outputs without starting the repeater.
 
 After building, you can also run `target\debug\audio-output-router.exe` from a terminal.
 Press Ctrl+C to stop. The source continues playing while the target receives a copy.
-This is a terminal interface; there is no graphical control window yet.
+For graphical device selection, saved presets, and start/stop controls, run
+`just desktop-control`. See [Desktop Control](desktop-control.md). The interactive
+terminal interface remains available through `just audio-repeater`.
 
 List audio output devices:
 

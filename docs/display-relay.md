@@ -29,6 +29,10 @@ Keeping those concerns separate makes it easier to reuse the platform crates lat
 
 ## Usage
 
+For graphical display selection, fullscreen/FPS/capture-timeout controls, and saved
+presets shared with the audio router, run `just desktop-control`.
+See [Desktop Control](desktop-control.md).
+
 List available desktop-attached outputs:
 
 ```powershell
