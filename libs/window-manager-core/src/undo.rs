@@ -122,19 +122,18 @@ impl UndoRecord {
                 .and_then(|_| (prior.visible != current.visible).then_some(prior.visible));
             let move_only = prior.frame.width == current.frame.width
                 && prior.frame.height == current.frame.height;
+            let protection = crate::effective_protection(config, runtime, window, None, None);
             if geometry.is_some()
-                && (reference.protection.geometry_lock
+                && (protection.geometry_lock
                     || !current.can_move
                     || (!move_only && !current.can_resize)
                     || current.show_state != ShowState::Normal)
                 || visible == Some(false)
-                    && (reference.protection.maintain_visible
+                    && (protection.maintain_visible
                         || !reference.allow_hide
                         || !current.can_hide
                         || current.has_owned_dialog)
-                || geometry.is_some()
-                    && reference.protection.keep_monitor
-                    && prior.display != current.display
+                || geometry.is_some() && protection.keep_monitor && prior.display != current.display
             {
                 return Err(Error::new(
                     ErrorCode::UnsatisfiableConstraints,
@@ -146,10 +145,8 @@ impl UndoRecord {
                 for (other, observed) in &snapshot.windows {
                     if other != window
                         && observed.visible
-                        && config
-                            .windows
-                            .get(other)
-                            .is_some_and(|reference| reference.protection.maintain_visible)
+                        && crate::effective_protection(config, runtime, other, None, None)
+                            .maintain_visible
                         && frame.overlaps(observed.frame)
                     {
                         return Err(Error::new(

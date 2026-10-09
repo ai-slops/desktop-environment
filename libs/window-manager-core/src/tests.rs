@@ -14,6 +14,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
             application_hint: None,
             allow_hide: true,
             protection: Protection::default(),
+            output_protection: OutputProtection::None,
         },
     );
     let slot = DisplaySlot {
@@ -56,6 +57,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
     };
     let snapshot = Snapshot {
         focused: None,
+        now_ms: 1000,
         topology_revision: 1,
         displays: BTreeMap::from([(
             "monitor".into(),
@@ -589,6 +591,7 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             selected_tabs: BTreeMap::new(),
             variants: BTreeMap::new(),
             overrides: BTreeMap::new(),
+            protection: Protection::default(),
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;
@@ -754,4 +757,134 @@ fn manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception
             .is_none()
     );
     Ok(())
+}
+
+#[test]
+fn output_provider_expiry_disconnect_and_capability_scope_are_enforced() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    config
+        .windows
+        .get_mut("preview")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
+        .output_protection = OutputProtection::RequireVerifiedPrivate;
+    let mut runtime = Runtime::default();
+    let request = Request::open(&config, target);
+    assert_eq!(
+        plan(&config, &runtime, &snapshot, &request).err().map(|error| error.code),
+        Some(ErrorCode::OutputStateUnknown)
+    );
+    runtime.providers.register(
+        "fixture-provider".into(),
+        "session".into(),
+        BTreeSet::from(["preview".into()]),
+        true,
+        true,
+    )?;
+    let message = ProviderMessage {
+        provider: "fixture-provider".into(),
+        session: "session".into(),
+        sequence: 1,
+        window: "preview".into(),
+        observed_ms: 1000,
+        ttl_ms: 100,
+        output: Some(OutputState::VerifiedPrivate),
+        attention: Some(AttentionKind::ApprovalNeeded),
+    };
+    runtime.providers.accept(message.clone(), 1000)?;
+    let transition = plan(&config, &runtime, &snapshot, &request)?;
+    assert!(runtime.providers.accept(message.clone(), 1000).is_err());
+    let mut malicious = message;
+    malicious.sequence = 2;
+    malicious.window = "ungranted".into();
+    assert!(runtime.providers.accept(malicious, 1000).is_err());
+    snapshot.now_ms = 1100;
+    assert_eq!(runtime.providers.output("preview", 1100), OutputState::Unknown);
+    assert_eq!(
+        transition.revalidate(&config, &runtime, &snapshot).err().map(|error| error.code),
+        Some(ErrorCode::OutputStateUnknown)
+    );
+    snapshot.now_ms = 1000;
+    runtime.providers.disconnect("fixture-provider");
+    assert_eq!(runtime.providers.output("preview", 1000), OutputState::Unknown);
+    assert!(runtime.providers.attention(1000).is_empty());
+    Ok(())
+}
+
+#[test]
+fn group_and_visit_protections_have_independent_lifetimes_and_attention_is_scoped() -> Result<()> {
+    let (mut config, snapshot, target) = fixture();
+    group_mut(&mut config, &target)?.protection.geometry_lock = true;
+    let mut runtime = Runtime::default();
+    let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    assert!(transition.mutations.is_empty());
+    assert_eq!(transition.desired["preview"].frame, snapshot.windows["preview"].frame);
+    transition.commit(&mut runtime);
+    runtime
+        .presentations
+        .get_mut("work")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "work"))?
+        .protection
+        .prohibit_focus = true;
+    assert!(effective_protection(&config, &runtime, "preview", None, None).prohibit_focus);
+    runtime.attention_targets.insert("preview".into(), target.clone());
+    let attention = attention_request(&config, &runtime, "preview")?;
+    assert_eq!(attention.scope, BTreeSet::from(["work".into()]));
+    assert!(attention.focus.is_none());
+    let copy = config.copy_view(&target.view, "another visit".into())?;
+    let replacement = Target { view: copy, roots: target.roots };
+    let next = plan(&config, &runtime, &snapshot, &Request::open(&config, replacement))?;
+    next.commit(&mut runtime);
+    assert!(!runtime.presentations["work"].protection.prohibit_focus);
+    Ok(())
+}
+
+#[test]
+fn manual_minimization_is_not_undone_by_force_restore() -> Result<()> {
+    let (mut config, mut snapshot, target) = fixture();
+    config
+        .windows
+        .get_mut("preview")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
+        .protection
+        .maintain_visible = true;
+    let mut runtime = Runtime::default();
+    plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?
+        .commit(&mut runtime);
+    snapshot
+        .windows
+        .get_mut("preview")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
+        .show_state = ShowState::Minimized;
+    let mut request = Request::open(&config, target);
+    request.mode = TransitionMode::Restore;
+    let transition = plan(&config, &runtime, &snapshot, &request)?;
+    assert!(transition.mutations.is_empty());
+    assert!(transition.diagnostics.iter().any(|item| item.contains("user-minimized")));
+    Ok(())
+}
+
+#[test]
+fn control_fallback_never_uses_public_intersections_or_changes_saved_topology() {
+    let (mut config, mut snapshot, _) = fixture();
+    assert!(control_bounds(&config, &snapshot).is_some());
+    let mut public = config.slots["work"].clone();
+    public.id = "public".into();
+    public.designated_public = true;
+    config.slots.insert(public.id.clone(), public);
+    assert!(control_bounds(&config, &snapshot).is_none());
+    let mut private = config.slots["work"].clone();
+    private.id = "private-control".into();
+    private.display = "private-monitor".into();
+    config.slots.insert(private.id.clone(), private);
+    let mut display = snapshot.displays["monitor"].clone();
+    display.id = "private-monitor".into();
+    display.work_area.x = -2000;
+    snapshot.displays.insert(display.id.clone(), display.clone());
+    let expected = control_bounds(&config, &snapshot);
+    assert!(expected.is_some_and(|bounds| bounds.x < 0));
+    snapshot.displays.remove("private-monitor");
+    assert!(control_bounds(&config, &snapshot).is_none());
+    assert_eq!(config.slots["private-control"].display, "private-monitor");
+    snapshot.displays.insert(display.id.clone(), display);
+    assert_eq!(control_bounds(&config, &snapshot), expected);
 }

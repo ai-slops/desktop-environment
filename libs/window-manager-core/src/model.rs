@@ -123,6 +123,26 @@ pub struct Protection {
     pub keep_monitor: bool,
     pub prohibit_focus: bool,
 }
+impl Protection {
+    #[must_use]
+    pub const fn union(&self, other: &Self) -> Self {
+        Self {
+            geometry_lock: self.geometry_lock || other.geometry_lock,
+            maintain_visible: self.maintain_visible || other.maintain_visible,
+            keep_monitor: self.keep_monitor || other.keep_monitor,
+            prohibit_focus: self.prohibit_focus || other.prohibit_focus,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputProtection {
+    #[default]
+    None,
+    RequireVerifiedPrivate,
+    FreezeWhileLinkedOrUnknown,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -141,6 +161,8 @@ pub struct WindowRef {
     /// Hide is opt-in per reference after compatibility testing, not inferred from the executable.
     pub allow_hide: bool,
     pub protection: Protection,
+    #[serde(default)]
+    pub output_protection: OutputProtection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,6 +263,8 @@ pub struct Placement {
     pub role: String,
     pub preferences: BTreeMap<String, Preference>,
     pub minimum_client: Option<[f64; 2]>,
+    #[serde(default)]
+    pub protection: Protection,
 }
 
 impl Placement {
@@ -252,6 +276,7 @@ impl Placement {
             role,
             preferences: BTreeMap::new(),
             minimum_client: None,
+            protection: Protection::default(),
         }
     }
 }
@@ -294,6 +319,8 @@ pub struct Group {
     pub preserve_child_sizes: bool,
     #[serde(default)]
     pub membership: Option<Membership>,
+    #[serde(default)]
+    pub protection: Protection,
 }
 
 impl Group {
@@ -310,6 +337,7 @@ impl Group {
             variants: Vec::new(),
             preserve_child_sizes: false,
             membership: None,
+            protection: Protection::default(),
         }
     }
 }
@@ -403,6 +431,8 @@ pub struct Composition {
     pub id: Id,
     pub name: String,
     pub targets: Vec<Target>,
+    #[serde(default)]
+    pub protection: Protection,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -505,6 +535,7 @@ pub struct Snapshot {
     pub displays: BTreeMap<Id, Display>,
     pub windows: BTreeMap<Id, ObservedWindow>,
     pub focused: Option<Id>,
+    pub now_ms: u64,
 }
 
 #[must_use]

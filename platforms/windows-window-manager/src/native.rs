@@ -48,6 +48,75 @@ pub fn foreground_handle() -> u64 {
     // SAFETY: foreground query does not change activation.
     unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow().0 as usize as u64 }
 }
+/// Only this process's own manager surface is relocated. No managed app's geometry is involved.
+pub fn position_control(area: Rect) -> Result<()> {
+    unsafe extern "system" fn find(hwnd: HWND, data: LPARAM) -> BOOL {
+        let mut process = 0;
+        // SAFETY: callback receives a live enumerated HWND and our writable output pointer.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&raw mut process));
+        }
+        if process == std::process::id() {
+            let mut title = [0; 256];
+            let len = unsafe { GetWindowTextW(hwnd, &mut title) };
+            if len > 0 && string(&title) == "Window Manager" {
+                unsafe {
+                    *(data.0 as *mut HWND) = hwnd;
+                }
+                return BOOL(0);
+            }
+        }
+        BOOL(1)
+    }
+    area.validate()?;
+    let _dpi = DpiGuard::new();
+    let mut hwnd = HWND::default();
+    // SAFETY: callback output outlives the synchronous enumeration.
+    let _ = unsafe { EnumWindows(Some(find), LPARAM((&raw mut hwnd) as isize)) };
+    if hwnd.0.is_null() {
+        return Err(Error::new(
+            ErrorCode::TargetMissing,
+            "Control window not available",
+            "control",
+        ));
+    }
+    let mut frame = RECT::default();
+    unsafe { GetWindowRect(hwnd, &raw mut frame) }
+        .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "control", error))?;
+    let frame = rect(frame);
+    let width = frame.width.min(area.width);
+    let height = frame.height.min(area.height);
+    let x = area.x + (area.width - width) / 2;
+    let y = area.y + (area.height - height) / 2;
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+        )
+    }
+    .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "control", error))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(900);
+    loop {
+        let mut actual = RECT::default();
+        // SAFETY: only the previously located window in this manager process is observed.
+        if unsafe { GetWindowRect(hwnd, &raw mut actual) }.is_ok() && area.contains(rect(actual)) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(Error::new(
+                ErrorCode::ApplicationTimeout,
+                "Control could not fit private-designated area; content stays redacted",
+                "control",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
 fn string(value: &[u16]) -> String {
     String::from_utf16_lossy(
         &value[..value.iter().position(|unit| *unit == 0).unwrap_or(value.len())],

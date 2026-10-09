@@ -20,6 +20,9 @@ pub enum Command {
     Apply(Configuration, Plan),
     Undo(Id),
     Promote(Id, Id, bool, bool),
+    ProtectPresentation(Id, window_manager_core::Protection),
+    PlaceControl(window_manager_core::Rect),
+    AttentionTarget(Id, window_manager_core::Target),
     Pause(bool),
     Recover,
     Shutdown,
@@ -34,6 +37,7 @@ pub enum Event {
     Error(Error),
     Notice(String),
     ManualEdit(ManualEdit),
+    ControlReady(window_manager_core::Rect, bool),
 }
 
 pub struct Worker {
@@ -83,6 +87,13 @@ impl State {
             self.snapshot.displays = displays;
         }
         self.snapshot.windows.clear();
+        self.snapshot.now_ms = u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX);
         let foreground = windows_window_manager::foreground_handle();
         self.snapshot.focused = self
             .bindings
@@ -437,6 +448,27 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                 state.runtime.promote_properties(&slot, &window, position, size);
                 state.publish();
                 Ok(())
+            }
+            Command::ProtectPresentation(slot, protection) => {
+                if let Some(presentation) = state.runtime.presentations.get_mut(&slot) {
+                    presentation.protection = protection;
+                    *state.runtime.generations.entry(slot).or_default() += 1;
+                    state.publish();
+                    Ok(())
+                } else {
+                    Err(Error::new(ErrorCode::TargetMissing, "Presentation is not active", slot))
+                }
+            }
+            Command::PlaceControl(bounds) => {
+                let result = windows_window_manager::position_control(bounds);
+                let _ = state.events.send(Event::ControlReady(bounds, result.is_ok()));
+                result
+            }
+            Command::AttentionTarget(window, target) => {
+                state.config.validate_target(&target).map(|()| {
+                    state.runtime.attention_targets.insert(window, target);
+                    state.publish();
+                })
             }
             Command::Pause(paused) => {
                 state.runtime.paused = paused;

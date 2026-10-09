@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use window_manager_core::{
     Collection, Composition, Configuration, Desired, DisplaySlot, Group, Id, Membership, Node,
-    ObservedWindow, Placement, Plan, Protection, Query, Request, Runtime, Shortcut, Snapshot,
+    ObservedWindow, Placement, Plan, Protection, Query, Rect, Request, Runtime, Shortcut, Snapshot,
     Status, Strategy, Tag, Target, TransitionMode, TransitionResult, Variant, View, WindowRef,
     Workspace, context_key, new_id, slot_bounds,
 };
@@ -92,6 +92,8 @@ struct Manager {
     inventory: Vec<Candidate>,
     selected_view: Id,
     selected_root: String,
+    control_position: Option<Rect>,
+    settled_control: Option<Rect>,
     selected_slot: Id,
     selected_group: Id,
     selected_window: Option<Id>,
@@ -178,7 +180,7 @@ impl Manager {
             .and_then(|view| view.roots.keys().next())
             .cloned()
             .unwrap_or_default();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
@@ -215,58 +217,131 @@ impl Manager {
             }
         }
     }
-    fn poll(&mut self) {
-        while let Ok(event) = self.worker.receiver.try_recv() {
-            match event {
-                Event::ManualEdit(edit) => {
-                    if self.safe_mode.is_some()
-                        || self.runtime.claims.get(&edit.window).is_none_or(|claim| {
-                            claim.slot != edit.slot || claim.placement != edit.placement
-                        })
-                    {
-                        continue;
+    fn show_attention(&mut self, ui: &mut egui::Ui) {
+        let attention: Vec<_> =
+            self.runtime.providers.attention(self.snapshot.now_ms).into_iter().cloned().collect();
+        for event in attention {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{} · {:?} · {}",
+                    event.provider,
+                    event.attention,
+                    self.config
+                        .windows
+                        .get(&event.window)
+                        .map_or("누락", |window| window.alias.as_str())
+                ));
+                if ui.button("해당 작업 영역 보기").clicked() {
+                    match window_manager_core::attention_request(
+                        &self.config,
+                        &self.runtime,
+                        &event.window,
+                    ) {
+                        Ok(request) => self.request_preview(request, true),
+                        Err(error) => self.error = Some(error.to_string()),
                     }
-                    let mut saved = self.config.clone();
-                    match saved.save_properties(
+                }
+            });
+        }
+    }
+    fn guard_control(&mut self, ctx: &egui::Context) -> bool {
+        if !self.config.slots.is_empty()
+            && (window_manager_core::control_bounds(&self.config, &self.snapshot)
+                .is_none_or(|bounds| self.settled_control != Some(bounds)))
+        {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.heading("비공개 제어 영역을 사용할 수 없습니다");
+                ui.label("제어 내용은 가려져 있습니다. 사용할 화면을 비공개 제어 영역으로 명시적으로 지정하세요.");
+                let displays: Vec<_> = self.snapshot.displays.values().cloned().collect();
+                for display in displays {
+                    if ui.button(format!("{} → 공개 지정을 해제하고 제어 영역 지정", display.name)).clicked() {
+                        let mut draft = self.config.clone();
+                        for slot in draft.slots.values_mut() { if slot.display == display.id { slot.designated_public = false; } }
+                        let id = new_id("slot");
+                        draft.slots.insert(id.clone(), DisplaySlot { id, name: "비공개 제어".into(), display: display.id, region: [0.0, 0.0, 1.0, 1.0], designated_public: false });
+                        self.control_position = None;
+                        self.commit(draft);
+                    }
+                }
+                if ui.button("숨긴 창 복구").clicked() { self.send(Command::Recover); }
+            });
+            ctx.request_repaint_after(Duration::from_millis(200));
+            return false;
+        }
+        true
+    }
+    fn manual_edit(&mut self, edit: window_manager_core::ManualEdit) {
+        if self.safe_mode.is_some()
+            || self
+                .runtime
+                .claims
+                .get(&edit.window)
+                .is_none_or(|claim| claim.slot != edit.slot || claim.placement != edit.placement)
+        {
+            return;
+        }
+        let mut saved = self.config.clone();
+        match saved.save_properties(
+            &edit.view,
+            &edit.placement,
+            &edit.context,
+            edit.position,
+            edit.size,
+        ) {
+            Ok(()) => {
+                // Merge addressed properties into the editor draft without discarding unrelated typing.
+                let mut pending_draft = self.draft.clone();
+                let merged = pending_draft
+                    .save_properties(
                         &edit.view,
                         &edit.placement,
                         &edit.context,
                         edit.position,
                         edit.size,
-                    ) {
-                        Ok(()) => {
-                            // Merge addressed properties into the editor draft without discarding unrelated typing.
-                            let mut pending_draft = self.draft.clone();
-                            let merged = pending_draft
-                                .save_properties(
-                                    &edit.view,
-                                    &edit.placement,
-                                    &edit.context,
-                                    edit.position,
-                                    edit.size,
-                                )
-                                .is_ok();
-                            if self.commit(saved) {
-                                if merged {
-                                    pending_draft.revision = self.config.revision;
-                                    self.draft = pending_draft;
-                                }
-                                self.send(Command::Promote(
-                                    edit.slot,
-                                    edit.window,
-                                    edit.position.is_some(),
-                                    edit.size.is_some(),
-                                ));
-                                self.notice = "사용자 드래그에서 바뀐 위치·크기만 이 배치 문맥에 저장했습니다.".into();
-                            }
-                        }
-                        Err(error) => self.error = Some(error.to_string()),
+                    )
+                    .is_ok();
+                if self.commit(saved) {
+                    if merged {
+                        pending_draft.revision = self.config.revision;
+                        self.draft = pending_draft;
+                    }
+                    self.send(Command::Promote(
+                        edit.slot,
+                        edit.window,
+                        edit.position.is_some(),
+                        edit.size.is_some(),
+                    ));
+                    self.notice =
+                        "사용자 드래그에서 바뀐 위치·크기만 이 배치 문맥에 저장했습니다.".into();
+                }
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+    }
+    fn poll(&mut self) {
+        while let Ok(event) = self.worker.receiver.try_recv() {
+            match event {
+                Event::ManualEdit(edit) => self.manual_edit(edit),
+                Event::ControlReady(bounds, ready) => {
+                    if self.control_position == Some(bounds) {
+                        self.settled_control = ready.then_some(bounds);
                     }
                 }
                 Event::Inventory(inventory) => self.inventory = inventory,
                 Event::State(snapshot, runtime) => {
                     self.snapshot = snapshot;
                     self.runtime = runtime;
+                    if let Some(bounds) =
+                        window_manager_core::control_bounds(&self.config, &self.snapshot)
+                    {
+                        if self.control_position != Some(bounds) {
+                            self.control_position = Some(bounds);
+                            self.settled_control = None;
+                            self.send(Command::PlaceControl(bounds));
+                        }
+                    } else {
+                        self.settled_control = None;
+                    }
                     if self.display_choice.is_empty() {
                         self.display_choice =
                             self.snapshot.displays.keys().next().cloned().unwrap_or_default();
@@ -576,6 +651,22 @@ impl Manager {
                 ui.checkbox(&mut edit.protection.keep_monitor, "모니터 유지");
                 ui.checkbox(&mut edit.protection.prohibit_focus, "포커스 요청 금지");
             });
+            egui::ComboBox::from_id_salt("output-protection")
+                .selected_text(format!("출력 보호: {:?}", edit.output_protection))
+                .show_ui(ui, |ui| {
+                    for policy in [
+                        window_manager_core::OutputProtection::None,
+                        window_manager_core::OutputProtection::RequireVerifiedPrivate,
+                        window_manager_core::OutputProtection::FreezeWhileLinkedOrUnknown,
+                    ] {
+                        ui.selectable_value(
+                            &mut edit.output_protection,
+                            policy,
+                            format!("{policy:?}"),
+                        );
+                    }
+                });
+            ui.small("비공개 지정은 캡처 안전 증명이 아닙니다. 검증 공급자가 없으면 출력 증거는 unknown입니다.");
             ui.checkbox(&mut edit.allow_hide, "이 앱의 숨김/복구 호환성을 확인했음 (숨김 허용)");
             ui.horizontal(|ui| {
                 ui.label("태그");
@@ -589,6 +680,12 @@ impl Manager {
                         .collect();
                 }
             });
+        }
+        if ui.button("선택 창의 알림 이동 대상 = 현재 배치·루트·영역").clicked()
+            && let Some(window) = &self.selected_window
+            && let Some(target) = self.target()
+        {
+            self.send(Command::AttentionTarget(window.clone(), target));
         }
         if ui.button("참조 설정 저장").clicked() {
             self.commit(self.draft.clone());
@@ -613,6 +710,7 @@ impl Manager {
             application_hint: Some(candidate.class.clone()),
             allow_hide: false,
             protection: Protection::default(),
+            output_protection: window_manager_core::OutputProtection::None,
         });
         let Some(view) = draft.views.get_mut(&self.selected_view) else {
             return;
@@ -717,16 +815,26 @@ impl Manager {
             self.commit(self.draft.clone());
         }
         ui.heading("현재 화면 구성");
-        for (slot, presentation) in &self.runtime.presentations {
+        let presentations: Vec<_> = self
+            .runtime
+            .presentations
+            .iter()
+            .map(|(id, value)| (id.clone(), value.clone()))
+            .collect();
+        for (slot, mut presentation) in presentations {
             ui.label(format!(
                 "{} → {} · 임시 유지 {}개",
-                self.config.slots.get(slot).map_or(slot.as_str(), |slot| slot.name.as_str()),
+                self.config.slots.get(&slot).map_or(slot.as_str(), |slot| slot.name.as_str()),
                 self.config
                     .views
                     .get(&presentation.view)
                     .map_or(presentation.view.as_str(), |view| view.name.as_str()),
                 presentation.overrides.len()
             ));
+            protection_editor(ui, &mut presentation.protection);
+            if ui.button("현재 방문 동안 보호 적용").clicked() {
+                self.send(Command::ProtectPresentation(slot, presentation.protection));
+            }
         }
         if ui.button("현재 구성 저장").clicked() {
             let targets = self
@@ -750,12 +858,13 @@ impl Manager {
                         self.name.clone()
                     },
                     targets,
+                    protection: Protection::default(),
                 },
             );
             self.commit(draft);
         }
         let compositions: Vec<_> = self.config.compositions.values().cloned().collect();
-        for composition in compositions {
+        for mut composition in compositions {
             ui.horizontal(|ui| {
                 ui.label(&composition.name);
                 if ui.button("구성 미리보기").clicked() {
@@ -778,6 +887,12 @@ impl Manager {
                     );
                 }
             });
+            protection_editor(ui, &mut composition.protection);
+            if ui.button("구성 보호 저장").clicked() {
+                let mut draft = self.config.clone();
+                draft.compositions.insert(composition.id.clone(), composition);
+                self.commit(draft);
+            }
         }
     }
     fn editor(&mut self, ui: &mut egui::Ui) {
@@ -1034,6 +1149,9 @@ impl Manager {
 impl eframe::App for Manager {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
+        if !self.guard_control(ctx) {
+            return;
+        }
         ctx.request_repaint_after(Duration::from_millis(200));
         #[cfg(feature = "ui-smoke")]
         self.capture_smoke(ctx);
@@ -1092,6 +1210,7 @@ impl eframe::App for Manager {
                 ui.colored_label(Color32::LIGHT_RED, error);
             }
             ui.small(&self.notice);
+            self.show_attention(ui);
         });
         egui::SidePanel::left("workspace")
             .resizable(true)
@@ -1141,6 +1260,14 @@ fn optional_pair(ui: &mut egui::Ui, label: &str, value: &mut Option<[f64; 2]>, d
                 ui.add(egui::DragValue::new(axis).speed(1.0));
             }
         }
+    });
+}
+fn protection_editor(ui: &mut egui::Ui, protection: &mut Protection) {
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut protection.geometry_lock, "위치·크기 잠금");
+        ui.checkbox(&mut protection.maintain_visible, "계속 표시");
+        ui.checkbox(&mut protection.keep_monitor, "모니터 유지");
+        ui.checkbox(&mut protection.prohibit_focus, "포커스 금지");
     });
 }
 fn optional_number(ui: &mut egui::Ui, label: &str, value: &mut Option<f64>, default: f64) {
@@ -1211,6 +1338,7 @@ fn tree_editor(
 ) {
     match node {
         Node::Placement(placement) => {
+            protection_editor(ui, &mut placement.protection);
             ui.horizontal(|ui| {
                 ui.label("창 역할");
                 ui.text_edit_singleline(&mut placement.role);
@@ -1255,6 +1383,7 @@ fn tree_editor(
                 .id_salt(&group.id)
                 .default_open(depth < 3)
                 .show(ui, |ui| {
+                    protection_editor(ui, &mut group.protection);
                     ui.horizontal(|ui| {
                         if ui.selectable_label(selected == &group.id, "이 그룹 선택").clicked()
                         {

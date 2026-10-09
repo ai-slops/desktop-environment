@@ -8,7 +8,8 @@
 )]
 use crate::{
     Binding, Configuration, DisplaySlot, Error, ErrorCode, Group, Id, Node, ObservedWindow,
-    Placement, Rect, Result, ShowState, Snapshot, Strategy, Target, context_key, evaluate, new_id,
+    OutputProtection, OutputState, Placement, Rect, Result, ShowState, Snapshot, Strategy, Target,
+    context_key, effective_protection, evaluate, new_id,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -79,6 +80,7 @@ pub struct Presentation {
     pub selected_tabs: BTreeMap<Id, Id>,
     pub variants: BTreeMap<Id, Id>,
     pub overrides: BTreeMap<Id, VisitOverride>,
+    pub protection: crate::Protection,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -90,6 +92,8 @@ pub struct Runtime {
     pub paused: bool,
     /// Failed components require explicit resumption; other slots remain available.
     pub suspended: BTreeSet<Id>,
+    pub providers: crate::ProviderRegistry,
+    pub attention_targets: BTreeMap<Id, Target>,
 }
 
 #[derive(Clone, Debug)]
@@ -371,6 +375,7 @@ pub fn plan(
             selected_tabs: BTreeMap::new(),
             variants: BTreeMap::new(),
             overrides: BTreeMap::new(),
+            protection: crate::Protection::default(),
         });
         if request.mode == TransitionMode::Restore {
             presentation.overrides.clear();
@@ -419,6 +424,7 @@ pub fn plan(
         let monitor_dpi = snapshot.displays[&slot.display].dpi;
         let mut evaluator = Evaluator {
             config,
+            runtime,
             snapshot,
             slot,
             dpi: monitor_dpi,
@@ -441,7 +447,15 @@ pub fn plan(
             }
         }
         for placement in &leaves {
-            if config.windows[&placement.window].protection.geometry_lock {
+            if effective_protection(
+                config,
+                runtime,
+                &placement.window,
+                Some(&placement.id),
+                Some(slot_id),
+            )
+            .geometry_lock
+            {
                 let observed = snapshot.windows.get(&placement.window).ok_or_else(|| {
                     Error::new(
                         ErrorCode::StaleBinding,
@@ -511,6 +525,8 @@ pub fn plan(
             &request.id,
         ));
     }
+    let mut planned_runtime = runtime.clone();
+    result.commit(&mut planned_runtime);
     for (window, desired) in &result.desired {
         if runtime.claims.get(window).is_some_and(|claim| !request.scope.contains(&claim.slot)) {
             return Err(Error::new(
@@ -524,9 +540,37 @@ pub fn plan(
             continue;
         };
         let reference = &config.windows[window];
-        if reference.protection.keep_monitor
-            && observed.display != config.slots[&desired.slot].display
+        let protection = effective_protection(
+            config,
+            &planned_runtime,
+            window,
+            Some(&desired.placement),
+            Some(&desired.slot),
+        );
+        let output = runtime.providers.output(window, snapshot.now_ms);
+        if reference.output_protection == OutputProtection::RequireVerifiedPrivate
+            && (output != OutputState::VerifiedPrivate
+                || config.slots[&desired.slot].designated_public)
         {
+            return Err(Error::new(
+                ErrorCode::OutputStateUnknown,
+                "Private placement requires fresh provider verification and a private-designated slot",
+                window,
+            ));
+        }
+        if reference.output_protection == OutputProtection::FreezeWhileLinkedOrUnknown
+            && output != OutputState::VerifiedPrivate
+            && (desired.frame != observed.frame
+                || !observed.visible
+                || request.focus.as_ref() == Some(window))
+        {
+            return Err(Error::new(
+                ErrorCode::OutputStateUnknown,
+                "Output is linked or unknown; dependent mutation is blocked",
+                window,
+            ));
+        }
+        if protection.keep_monitor && observed.display != config.slots[&desired.slot].display {
             return Err(conflict(window, "Keep-monitor protection prevents transfer"));
         }
         if observed.show_state != ShowState::Normal && desired.frame != observed.frame {
@@ -549,13 +593,13 @@ pub fn plan(
         if desired.strict_size && !move_only {
             return Err(conflict(window, "Strict preserved size would resize the source"));
         }
-        if reference.protection.geometry_lock && geometry.is_some() {
+        if protection.geometry_lock && geometry.is_some() {
             return Err(conflict(window, "Geometry protection prevents mutation"));
         }
         let visible =
             (!observed.visible && observed.show_state != ShowState::Minimized).then_some(true);
         let focus = request.focus.as_ref() == Some(window);
-        if focus && reference.protection.prohibit_focus {
+        if focus && protection.prohibit_focus {
             return Err(Error::new(
                 ErrorCode::PermissionDenied,
                 "Focus requests prohibited",
@@ -594,13 +638,28 @@ pub fn plan(
             continue;
         }
         let reference = &config.windows[window];
-        if reference.protection.maintain_visible {
+        if effective_protection(config, runtime, window, Some(&claim.placement), Some(&claim.slot))
+            .maintain_visible
+            && snapshot
+                .windows
+                .get(window)
+                .is_some_and(|observed| observed.show_state != ShowState::Minimized)
+        {
             return Err(conflict(window, "Maintain-visible target would leave its allocation"));
         }
         if let Some(observed) = snapshot.windows.get(window)
             && observed.visible
             && observed.show_state != ShowState::Minimized
         {
+            if reference.output_protection != OutputProtection::None
+                && runtime.providers.output(window, snapshot.now_ms) != OutputState::VerifiedPrivate
+            {
+                return Err(Error::new(
+                    ErrorCode::OutputStateUnknown,
+                    "Output protection prevents hiding while linked or unknown",
+                    window,
+                ));
+            }
             if reference.allow_hide && observed.can_hide && !observed.has_owned_dialog {
                 result.expected.insert(window.clone(), observed.clone());
                 result.impact.hidden += 1;
@@ -628,7 +687,7 @@ pub fn plan(
     }
     // No intended geometry may cover any protected live content in any active scope.
     for (window, observed) in &snapshot.windows {
-        if config.windows.get(window).is_some_and(|reference| reference.protection.maintain_visible)
+        if effective_protection(config, runtime, window, None, None).maintain_visible
             && observed.visible
         {
             result.expected.insert(window.clone(), observed.clone());
@@ -690,6 +749,17 @@ impl Plan {
             }
         }
         for mutation in &self.mutations {
+            if let Some(reference) = config.windows.get(&mutation.window)
+                && reference.output_protection != OutputProtection::None
+                && runtime.providers.output(&mutation.window, snapshot.now_ms)
+                    != OutputState::VerifiedPrivate
+            {
+                return Err(Error::new(
+                    ErrorCode::OutputStateUnknown,
+                    "Output evidence expired or disconnected after preview",
+                    &mutation.window,
+                ));
+            }
             if runtime
                 .claims
                 .get(&mutation.window)
@@ -753,6 +823,7 @@ impl Plan {
 
 struct Evaluator<'a> {
     config: &'a Configuration,
+    runtime: &'a Runtime,
     snapshot: &'a Snapshot,
     slot: &'a DisplaySlot,
     dpi: u32,
@@ -835,10 +906,17 @@ impl Evaluator<'_> {
                 if sibling.id() != child.id() {
                     let mut leaves = Vec::new();
                     sibling.placements(&mut leaves);
-                    if leaves
-                        .iter()
-                        .any(|leaf| self.config.windows[&leaf.window].protection.maintain_visible)
-                    {
+                    if leaves.iter().any(|leaf| {
+                        effective_protection(
+                            self.config,
+                            self.runtime,
+                            &leaf.window,
+                            Some(&leaf.id),
+                            Some(&self.slot.id),
+                        )
+                        .union(&self.presentation.protection)
+                        .maintain_visible
+                    }) {
                         return Err(conflict(
                             &group.id,
                             "Tab selection would hide a maintained-visible descendant",
@@ -918,7 +996,15 @@ impl Evaluator<'_> {
             .iter()
             .map(|node| match node {
                 Node::Placement(placement) => {
-                    self.config.windows[&placement.window].protection.geometry_lock
+                    effective_protection(
+                        self.config,
+                        self.runtime,
+                        &placement.window,
+                        Some(&placement.id),
+                        Some(&self.slot.id),
+                    )
+                    .union(&self.presentation.protection)
+                    .geometry_lock
                         || self
                             .presentation
                             .overrides
@@ -1016,6 +1102,11 @@ impl Evaluator<'_> {
             self.diagnostics.push(format!("{}: missing binding", placement.id));
             return Ok(());
         };
+        if observed.show_state == ShowState::Minimized {
+            self.diagnostics
+                .push(format!("{}: user-minimized; visibility intent suspended", placement.id));
+            return Ok(());
+        }
         let scale = f64::from(self.dpi) / 96.0;
         let decoration =
             [observed.frame.width - observed.client[0], observed.frame.height - observed.client[1]];
@@ -1057,7 +1148,15 @@ impl Evaluator<'_> {
             }
         }
         let exception = self.presentation.overrides.get(&placement.window);
-        let locked = self.config.windows[&placement.window].protection.geometry_lock;
+        let locked = effective_protection(
+            self.config,
+            self.runtime,
+            &placement.window,
+            Some(&placement.id),
+            Some(&self.slot.id),
+        )
+        .union(&self.presentation.protection)
+        .geometry_lock;
         let strict_size =
             exception.is_some_and(|exception| exception.preserve_size) || preserve || locked;
         if let Some(exception) = exception {

@@ -5,6 +5,8 @@ mod formula;
 mod membership;
 mod model;
 mod planner;
+mod protection;
+mod providers;
 mod store;
 mod undo;
 
@@ -13,6 +15,8 @@ pub use formula::*;
 pub use membership::*;
 pub use model::*;
 pub use planner::*;
+pub use protection::*;
+pub use providers::*;
 pub use store::*;
 pub use undo::*;
 
