@@ -1523,12 +1523,15 @@ impl Evaluator<'_> {
                     leaves.iter().any(|leaf| &leaf.window == window)
                 })
             });
-            let selected = self
-                .presentation
-                .selected_tabs
-                .get(&group.id)
-                .and_then(|id| group.children.iter().find(|child| child.id() == id));
+            let selected_id = self.presentation.selected_tabs.get(&group.id).cloned();
+            let selected = selected_id
+                .as_ref()
+                .and_then(|id| group.children.iter().find(|child| child.find(id).is_some()));
             let child = focused_child.or(selected).unwrap_or(&group.children[0]);
+            if let Some(id) = selected_id.filter(|id| child.id() != id && child.find(id).is_some())
+            {
+                select_node_path(child, &id, &mut self.presentation.selected_tabs);
+            }
             for sibling in &group.children {
                 if sibling.id() != child.id() {
                     let mut leaves = Vec::new();
@@ -1933,6 +1936,15 @@ impl Evaluator<'_> {
             },
         );
         Ok(())
+    }
+}
+
+fn select_node_path(node: &Node, selected: &str, tabs: &mut BTreeMap<Id, Id>) {
+    if let Node::Group(group) = node
+        && let Some(child) = group.children.iter().find(|child| child.find(selected).is_some())
+    {
+        tabs.insert(group.id.clone(), child.id().into());
+        select_node_path(child, selected, tabs);
     }
 }
 

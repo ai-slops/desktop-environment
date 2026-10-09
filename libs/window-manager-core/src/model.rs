@@ -220,6 +220,7 @@ pub enum Query {
     All,
     Tag(String),
     Application(String),
+    Alias(String),
     Private,
     Not(Box<Self>),
     And(Vec<Self>),
@@ -231,6 +232,13 @@ impl Query {
     pub fn matches(&self, window: &WindowRef) -> Truth {
         match self {
             Self::All => Truth::Yes,
+            Self::Alias(alias) => {
+                if window.alias.contains(alias) {
+                    Truth::Yes
+                } else {
+                    Truth::No
+                }
+            }
             Self::Tag(tag) => {
                 if window.tags.iter().any(|item| &item.name == tag) {
                     Truth::Yes

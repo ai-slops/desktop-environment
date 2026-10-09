@@ -79,6 +79,13 @@ fn configure_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum DragMode {
+    #[default]
+    Move,
+    Copy,
+}
+
 struct Manager {
     path: PathBuf,
     _lock: std::fs::File,
@@ -126,6 +133,9 @@ struct Manager {
     package_path: String,
     package_mappings: BTreeMap<String, Id>,
     package_placeholders: BTreeSet<String>,
+    drag_mode: DragMode,
+    spatial_selection: BTreeSet<Id>,
+    structure_preview: Option<(String, Configuration, String)>,
     monitor_epoch: Id,
     monitor_inventory: Vec<windows_window_manager::MonitorIdentity>,
     monitor_alias: Id,
@@ -212,6 +222,7 @@ impl Manager {
             expansion_node: String::new(),
             expansion_slots: BTreeSet::new(),
             parameter_group: String::new(), parameter_text: String::new(), simulation: None, simulation_report: None, package: None, package_path, package_mappings: BTreeMap::new(), package_placeholders: BTreeSet::new(),
+            drag_mode: DragMode::Move, spatial_selection: BTreeSet::new(), structure_preview: None,
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
         }
@@ -1086,6 +1097,7 @@ impl Manager {
         self.structural_tools(ui);
         self.expansion_tools(ui);
         self.formula_tools(ui);
+        self.spatial_tools(ui);
         if ui.button("배치 구조 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -1149,6 +1161,54 @@ impl Manager {
                 }
             });
             ui.label("확장은 저장된 구조를 바꾸지 않습니다. 미리보기의 범위와 숨김 영향을 확인한 뒤 적용하세요.");
+        });
+    }
+
+    #[allow(clippy::too_many_lines)] // Drag previews expose addressed source/target paths before changing a draft.
+    fn spatial_tools(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("창·그룹·탭 드래그 / 선택 묶기").show(ui, |ui| {
+            ui.label("아래 항목 전체를 대상 그룹에 드래그합니다. 드롭은 검토할 구조 초안만 준비합니다.");
+            let mut copy = self.drag_mode == DragMode::Copy; if ui.checkbox(&mut copy, "드롭으로 독립 복사 (기본은 이동)").changed() { self.drag_mode = if copy { DragMode::Copy } else { DragMode::Move }; }
+            let mut nodes = Vec::new();
+            for view in self.draft.views.values() { for (role, root) in &view.roots { collect_nodes(root, &view.id, &format!("{} / {role}", view.name), &mut nodes); } }
+            let mut proposed = None;
+            for (address, path, is_placement) in &nodes {
+                ui.dnd_drag_source(egui::Id::new(("subtree-drag", &address.node)), address.clone(), |ui| { ui.label(format!("↕ {path} · {}", if *is_placement { "이 창 배치" } else { "전체 하위 트리" })); });
+                if !is_placement {
+                    let (_, dropped) = ui.dnd_drop_zone::<window_manager_core::NodeAddress, _>(egui::Frame::group(ui.style()), |ui| { ui.small(format!("드롭 대상: {path} / 마지막 자식")); });
+                    if let Some(source) = dropped {
+                        let destination = window_manager_core::NodeDestination { view: address.view.clone(), group: address.node.clone(), index: None };
+                        let source_path = nodes.iter().find(|(address, _, _)| address.node == source.node).map_or(source.node.as_str(), |(_, path, _)| path.as_str());
+                        let action = if self.drag_mode == DragMode::Copy { window_manager_core::StructureAction::Copy { source: (*source).clone(), destination } } else { window_manager_core::StructureAction::Move { source: (*source).clone(), destination } };
+                        proposed = Some((action, format!("{}: {source_path} → {path} / 마지막 자식", if self.drag_mode == DragMode::Copy { "독립 복사" } else { "전체 하위 트리 이동" })));
+                    }
+                    if ui.small_button(format!("조상 그룹 선택: {path}")).clicked() { self.select_view(address.view.clone()); self.selected_group.clone_from(&address.node); }
+                }
+            }
+            let parent = self.draft.views.get(&self.selected_view).and_then(|view| view.roots.values().find_map(|root| root.find(&self.selected_group))).cloned();
+            if let Some(Node::Group(group)) = parent {
+                ui.label(format!("선택 묶기의 부모: {} ({})", group.name, group.id));
+                for child in &group.children { let mut selected = self.spatial_selection.contains(child.id()); if ui.checkbox(&mut selected, format!("자식 {}", child.id())).changed() { if selected { self.spatial_selection.insert(child.id().into()); } else { self.spatial_selection.remove(child.id()); } } }
+                if ui.button("선택한 직접 자식을 새 그룹으로 묶기 검토").clicked() { let children = self.spatial_selection.intersection(&group.children.iter().map(|child| child.id().to_owned()).collect()).cloned().collect(); proposed = Some((window_manager_core::StructureAction::Wrap { view: self.selected_view.clone(), parent: group.id.clone(), children, name: "묶은 그룹".into(), strategy: Strategy::Horizontal }, format!("그룹 {}의 선택한 직접 자식을 묶습니다. ID와 각 자식의 설정을 유지합니다.", group.name))); }
+            }
+            if let Some(source) = self.structure_source.clone() {
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("선택 원본 그룹 풀기 검토").clicked() { proposed = Some((window_manager_core::StructureAction::Unwrap { source: source.clone() }, format!("원본 {} 그룹을 풀어 자식을 부모에 올립니다.", source.node))); }
+                    if ui.button("선택 원본의 배치 참조 제거 검토").clicked() { proposed = Some((window_manager_core::StructureAction::Remove { source: source.clone() }, format!("원본 {} 배치 참조만 제거합니다. 앱 실행 상태는 유지됩니다.", source.node))); }
+                });
+            }
+            if let Some((action, description)) = proposed {
+                match self.draft.edit_structure(&window_manager_core::StructureEdit { expected_revision: self.draft.revision, action }) { Ok(after) => { self.structure_preview = Some((serde_json::to_string(&self.draft).unwrap_or_default(), after, description)); }, Err(error) => { self.structure_preview = None; self.error = Some(error.to_string()); } }
+            }
+            let mut apply = false; let mut cancel = false;
+            if let Some((_, _, description)) = &self.structure_preview {
+                ui.separator(); ui.label(description); ui.label("표시한 원본·대상에 구조 변경을 적용합니다. 실제 창 이동은 구조 저장 후 전환 미리보기에서 별도로 적용합니다.");
+                ui.horizontal(|ui| { apply = ui.button("검토한 구조를 초안에 반영").clicked(); cancel = ui.button("취소").clicked(); });
+            }
+            if cancel { self.structure_preview = None; }
+            if apply && let Some((before, after, _)) = self.structure_preview.take() {
+                if serde_json::to_string(&self.draft).unwrap_or_default() == before { self.draft = after; self.spatial_selection.clear(); self.notice = "검토한 구조를 초안에 반영했습니다. 구조 저장으로 확정하세요.".into(); } else { self.error = Some("검토 후 초안이 변경되었습니다. 드롭/묶기 검토를 다시 실행하세요.".into()); }
+            }
         });
     }
 
@@ -1868,24 +1928,89 @@ fn optional_formula(ui: &mut egui::Ui, label: &str, value: &mut Option<String>) 
     });
 }
 fn query_editor(ui: &mut egui::Ui, query: &mut Query) {
+    query_node(ui, query, 0);
+}
+fn query_node(ui: &mut egui::Ui, query: &mut Query, depth: usize) {
+    if depth >= 32 {
+        ui.colored_label(Color32::LIGHT_RED, "조건 깊이 한도: 하위 조건을 더 추가할 수 없습니다.");
+        return;
+    }
+    let original = match query {
+        Query::All => 0,
+        Query::Tag(_) => 1,
+        Query::Application(_) => 2,
+        Query::Alias(_) => 3,
+        Query::Private => 4,
+        Query::Not(_) => 5,
+        Query::And(_) => 6,
+        Query::Or(_) => 7,
+    };
+    let mut kind = original;
+    egui::ComboBox::from_id_salt("query-kind")
+        .selected_text(
+            ["전체", "태그", "앱 힌트", "별칭 포함", "개인 분류", "NOT", "AND", "OR"][kind],
+        )
+        .show_ui(ui, |ui| {
+            for (index, label) in
+                ["전체", "태그", "앱 힌트", "별칭 포함", "개인 분류", "NOT", "AND", "OR"]
+                    .iter()
+                    .enumerate()
+            {
+                ui.selectable_value(&mut kind, index, *label);
+            }
+        });
+    if kind != original {
+        *query = match kind {
+            1 => Query::Tag(String::new()),
+            2 => Query::Application(String::new()),
+            3 => Query::Alias(String::new()),
+            4 => Query::Private,
+            5 => Query::Not(Box::new(query.clone())),
+            6 => Query::And(vec![query.clone()]),
+            7 => Query::Or(vec![query.clone()]),
+            _ => Query::All,
+        };
+    }
     match query {
-        Query::Tag(value) | Query::Application(value) => {
+        Query::Tag(value) | Query::Application(value) | Query::Alias(value) => {
             ui.text_edit_singleline(value);
         }
         Query::Not(inner) => {
-            ui.label("NOT (unknown은 그대로 unknown)");
-            query_editor(ui, inner);
+            ui.small("NOT: unknown은 unknown으로 유지");
+            ui.indent("query-not", |ui| query_node(ui, inner, depth + 1));
         }
         Query::And(queries) | Query::Or(queries) => {
-            for query in queries {
-                query_editor(ui, query);
+            let mut remove = None;
+            for (index, child) in queries.iter_mut().enumerate() {
+                ui.push_id(index, |ui| {
+                    egui::Frame::group(ui.style()).show(ui, |ui| {
+                        query_node(ui, child, depth + 1);
+                        if ui.small_button("이 하위 조건 제거").clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                });
+            }
+            if let Some(index) = remove {
+                queries.remove(index);
+            }
+            if ui.add_enabled(queries.len() < 256, egui::Button::new("+ 하위 태그 조건")).clicked()
+            {
+                queries.push(Query::Tag(String::new()));
+            }
+            if queries.is_empty() {
+                ui.small(if kind == 6 {
+                    "빈 AND는 전체를 선택합니다."
+                } else {
+                    "빈 OR는 아무 창도 선택하지 않습니다."
+                });
             }
         }
         Query::All => {
             ui.label("등록된 모든 창");
         }
         Query::Private => {
-            ui.label("공급자 증거 없음: unknown");
+            ui.label("공급자 분류 증거 없음: unknown");
         }
     }
 }

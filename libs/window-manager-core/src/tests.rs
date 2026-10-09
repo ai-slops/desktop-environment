@@ -158,6 +158,70 @@ fn scoped_parameters_conditions_and_sorting_are_bounded_and_keep_authored_order(
 }
 
 #[test]
+fn wrapping_and_unwrapping_keep_child_identity_and_removal_never_removes_resources() -> Result<()> {
+    let (mut config, _, target) = two_window_fixture()?;
+    let group = group_mut(&mut config, &target)?;
+    group.ratios = vec![2.0, 3.0];
+    let parent = group.id.clone();
+    let children =
+        group.children.iter().map(|child| child.id().to_owned()).collect::<BTreeSet<_>>();
+    let wrap = StructureEdit {
+        expected_revision: config.revision,
+        action: StructureAction::Wrap {
+            view: target.view.clone(),
+            parent: parent.clone(),
+            children: children.clone(),
+            name: "nested tab".into(),
+            strategy: Strategy::SemanticTabs,
+        },
+    };
+    let mut wrapped = config.edit_structure(&wrap)?;
+    let root = group_mut(&mut wrapped, &target)?;
+    assert_eq!(root.ratios, vec![5.0]);
+    let Node::Group(group) = &root.children[0] else {
+        return Err(Error::new(ErrorCode::InvalidConfiguration, "Expected wrapped Group", "test"));
+    };
+    assert_eq!(
+        group.children.iter().map(|child| child.id().to_owned()).collect::<BTreeSet<_>>(),
+        children
+    );
+    assert_eq!(group.ratios, vec![2.0, 3.0]);
+    let source = NodeAddress { view: target.view.clone(), node: group.id.clone() };
+    let unwrapped = wrapped.edit_structure(&StructureEdit {
+        expected_revision: wrapped.revision,
+        action: StructureAction::Unwrap { source },
+    })?;
+    let root = &unwrapped.views[&target.view].roots["main"];
+    let mut leaves = Vec::new();
+    root.placements(&mut leaves);
+    assert_eq!(leaves.iter().map(|leaf| leaf.id.clone()).collect::<BTreeSet<_>>(), children);
+    let removed = unwrapped.edit_structure(&StructureEdit {
+        expected_revision: unwrapped.revision,
+        action: StructureAction::Remove {
+            source: NodeAddress { view: target.view.clone(), node: root.id().into() },
+        },
+    })?;
+    assert_eq!(removed.windows.len(), config.windows.len());
+    assert!(removed.views[&target.view].roots["main"].find(&parent).is_none());
+    assert!(
+        config
+            .edit_structure(&StructureEdit {
+                expected_revision: config.revision,
+                action: StructureAction::Wrap {
+                    view: target.view,
+                    parent,
+                    children: BTreeSet::from(["missing".into()]),
+                    name: "invalid".into(),
+                    strategy: Strategy::Grid
+                }
+            })
+            .is_err()
+    );
+    assert_eq!(Query::Alias("view".into()).matches(&config.windows["preview"]), Truth::Yes);
+    Ok(())
+}
+
+#[test]
 fn simulations_never_produce_executable_plans_and_cover_missing_fixed_and_minimum_cases()
 -> Result<()> {
     let (config, _, target) = two_window_fixture()?;

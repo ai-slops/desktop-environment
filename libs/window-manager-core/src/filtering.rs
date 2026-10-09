@@ -24,7 +24,9 @@ pub fn validate_filter(query: &Query) -> Result<()> {
                 }
                 pending.extend(children.iter().map(|child| (child, depth + 1)));
             }
-            Query::Tag(name) | Query::Application(name) if name.len() > 200 => {
+            Query::Tag(name) | Query::Application(name) | Query::Alias(name)
+                if name.len() > 200 =>
+            {
                 return Err(Error::new(
                     ErrorCode::InvalidConfiguration,
                     "Query text budget exceeded",

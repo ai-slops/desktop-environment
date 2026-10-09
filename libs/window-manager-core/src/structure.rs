@@ -1,6 +1,6 @@
 use crate::{Configuration, Error, ErrorCode, Group, Id, Node, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +20,19 @@ pub struct NodeDestination {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StructureAction {
+    Wrap {
+        view: Id,
+        parent: Id,
+        children: BTreeSet<Id>,
+        name: String,
+        strategy: crate::Strategy,
+    },
+    Unwrap {
+        source: NodeAddress,
+    },
+    Remove {
+        source: NodeAddress,
+    },
     Move {
         source: NodeAddress,
         destination: NodeDestination,
@@ -130,6 +143,11 @@ impl Configuration {
         }
         let mut draft = self.clone();
         match &edit.action {
+            StructureAction::Wrap { view, parent, children, name, strategy } => {
+                wrap_children(&mut draft, view, parent, children, name, *strategy)?;
+            }
+            StructureAction::Unwrap { source } => unwrap_group(&mut draft, source)?,
+            StructureAction::Remove { source } => remove_reference(&mut draft, source)?,
             StructureAction::Move { source, destination }
             | StructureAction::Copy { source, destination } => {
                 let original = self.node(source)?;
@@ -211,6 +229,21 @@ impl Configuration {
     }
 }
 
+fn parent_location(config: &Configuration, address: &NodeAddress) -> Option<(Id, usize)> {
+    fn find(node: &Node, target: &str) -> Option<(Id, usize)> {
+        let Node::Group(group) = node else {
+            return None;
+        };
+        group
+            .children
+            .iter()
+            .position(|child| child.id() == target)
+            .map(|index| (group.id.clone(), index))
+            .or_else(|| group.children.iter().find_map(|child| find(child, target)))
+    }
+    config.views.get(&address.view)?.roots.values().find_map(|root| find(root, &address.node))
+}
+
 fn take(config: &mut Configuration, address: &NodeAddress) -> Result<(Node, ChildWeights)> {
     fn remove(node: &mut Node, id: &str) -> Option<(Node, ChildWeights)> {
         let Node::Group(group) = node else {
@@ -245,4 +278,102 @@ fn take(config: &mut Configuration, address: &NodeAddress) -> Result<(Node, Chil
         .values_mut()
         .find_map(|root| remove(root, &address.node))
         .ok_or_else(|| missing(&address.node))
+}
+
+fn wrap_children(
+    config: &mut Configuration,
+    view: &Id,
+    parent: &Id,
+    children: &BTreeSet<Id>,
+    name: &str,
+    strategy: crate::Strategy,
+) -> Result<()> {
+    let group = config
+        .views
+        .get_mut(view)
+        .and_then(|view| view.roots.values_mut().find_map(|root| root.group_mut(parent)))
+        .ok_or_else(|| missing(parent))?;
+    if children.is_empty()
+        || children.len() > 256
+        || children.iter().any(|id| !group.children.iter().any(|child| child.id() == id))
+    {
+        return Err(Error::new(
+            ErrorCode::OutOfScope,
+            "Wrap selects existing immediate children of one parent Group",
+            parent,
+        ));
+    }
+    let index = group
+        .children
+        .iter()
+        .position(|child| children.contains(child.id()))
+        .ok_or_else(|| missing(parent))?;
+    let ordered = group
+        .children
+        .iter()
+        .filter(|child| children.contains(child.id()))
+        .map(|child| child.id().to_owned())
+        .collect::<Vec<_>>();
+    let mut wrapped = Group::new(name.to_owned());
+    wrapped.strategy = strategy;
+    let mut outer = ChildWeights::default();
+    for id in ordered {
+        let (node, weights) = take(config, &NodeAddress { view: view.clone(), node: id })?;
+        if let Some(value) = weights.base {
+            *outer.base.get_or_insert(0.0) += value;
+        }
+        for (variant, value) in &weights.variants {
+            *outer.variants.entry(variant.clone()).or_default() += value;
+        }
+        wrapped.insert_child(wrapped.children.len(), node, &weights);
+    }
+    let group = config
+        .views
+        .get_mut(view)
+        .and_then(|view| view.roots.values_mut().find_map(|root| root.group_mut(parent)))
+        .ok_or_else(|| missing(parent))?;
+    group.insert_child(index, Node::Group(wrapped), &outer);
+    Ok(())
+}
+
+fn unwrap_group(config: &mut Configuration, source: &NodeAddress) -> Result<()> {
+    let (parent, index) = parent_location(config, source).ok_or_else(|| {
+        Error::new(
+            ErrorCode::OutOfScope,
+            "Unwrap requires a Group with one explicit parent",
+            &source.node,
+        )
+    })?;
+    let (node, weights) = take(config, source)?;
+    let Node::Group(mut nested) = node else {
+        return Err(Error::new(
+            ErrorCode::InvalidConfiguration,
+            "Unwrap addresses a Group",
+            &source.node,
+        ));
+    };
+    let weights = weights.divided(nested.children.len());
+    let group = config
+        .views
+        .get_mut(&source.view)
+        .and_then(|view| view.roots.values_mut().find_map(|root| root.group_mut(&parent)))
+        .ok_or_else(|| missing(&parent))?;
+    for (offset, node) in std::mem::take(&mut nested.children).into_iter().enumerate() {
+        group.insert_child(index + offset, node, &weights);
+    }
+    Ok(())
+}
+
+fn remove_reference(config: &mut Configuration, source: &NodeAddress) -> Result<()> {
+    let role = config.views.get(&source.view).and_then(|view| {
+        view.roots.iter().find(|(_, node)| node.id() == source.node).map(|(role, _)| role.clone())
+    });
+    take(config, source)?;
+    if let Some(role) = role
+        && let Some(view) = config.views.get_mut(&source.view)
+        && view.roots.is_empty()
+    {
+        view.roots.insert(role, Node::Group(Group::new("Empty root".into())));
+    }
+    Ok(())
 }
