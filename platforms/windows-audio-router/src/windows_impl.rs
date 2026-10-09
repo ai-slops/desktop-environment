@@ -92,10 +92,10 @@ fn run_audio_session(
     unsafe { render_stream.client.Start() }.context("failed to start render client")?;
     unsafe { capture_stream.client.Start() }.context("failed to start capture client")?;
     debug!("Started source capture and target render streams");
-    if !*started_once {
-        *started_once = true;
-    } else {
+    if *started_once {
         info!("Audio routing resumed from {} to {}", source.friendly_name, target.friendly_name);
+    } else {
+        *started_once = true;
     }
 
     loop {
