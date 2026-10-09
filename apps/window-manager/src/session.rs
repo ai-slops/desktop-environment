@@ -519,7 +519,7 @@ pub fn run(path: &Path, control: bool, providers: bool) -> anyhow::Result<()> {
         if u64::try_from(count).unwrap_or(u64::MAX) > MAX_LINE {
             anyhow::bail!("Session line exceeds 64 KiB");
         }
-        let response = match serde_json::from_slice::<Envelope>(&line) {
+        let response = match window_manager_core::decode_json::<Envelope>(&line) {
             Ok(envelope) if !envelope.id.is_empty() && envelope.id.len() <= 200 => {
                 session.receive(envelope)
             }

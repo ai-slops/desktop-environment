@@ -2527,3 +2527,25 @@ fn approved_resize_removes_only_addressed_split_sizes_and_fits_flow() -> Result<
     assert_eq!(fitted.desired["preview"].frame.height, 250);
     Ok(())
 }
+
+#[test]
+fn duplicate_configuration_maps_are_not_normalized_or_saved_over_last_good_state()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("configuration.json");
+    let config = Configuration::default();
+    config.save(&path)?;
+    let before = std::fs::read(&path)?;
+    let json = String::from_utf8(before)?;
+    let duplicate = json.replace("\"slots\": {}", "\"slots\": {}, \"slots\": {}");
+    assert_ne!(duplicate, json);
+    std::fs::write(&path, duplicate.as_bytes())?;
+    assert_eq!(
+        Configuration::load(&path).err().map(|error| error.code),
+        Some(ErrorCode::InvalidConfiguration)
+    );
+    assert!(config.save(&path).is_err());
+    assert_eq!(std::fs::read(&path)?, duplicate.as_bytes());
+    assert!(!backup_path(&path).exists());
+    Ok(())
+}

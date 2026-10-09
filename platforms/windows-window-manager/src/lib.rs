@@ -48,33 +48,28 @@ pub use unsupported::*;
 /// Journal writes precede hiding. A failed write prevents the native hide.
 impl Journal {
     pub fn load(path: &std::path::Path) -> window_manager_core::Result<Self> {
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.len() <= 4 * 1024 * 1024 => {
-                let journal: Self = serde_json::from_slice(&bytes).map_err(|error| {
-                    window_manager_core::Error::new(
-                        window_manager_core::ErrorCode::StorageFailure,
-                        error.to_string(),
-                        "journal",
-                    )
-                })?;
-                if journal.version != 1 {
-                    return Err(window_manager_core::Error::new(
-                        window_manager_core::ErrorCode::InvalidConfiguration,
-                        "Unsupported journal version",
-                        "journal",
-                    ));
-                }
-                Ok(journal)
-            }
+        match std::fs::metadata(path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(Self { version: 1, entries: Vec::new() })
+                return Ok(Self { version: 1, entries: Vec::new() });
             }
-            _ => Err(window_manager_core::Error::new(
-                window_manager_core::ErrorCode::StorageFailure,
-                "Cannot read recovery journal",
-                "journal",
-            )),
+            Err(error) => {
+                return Err(window_manager_core::Error::new(
+                    window_manager_core::ErrorCode::StorageFailure,
+                    error.to_string(),
+                    "journal",
+                ));
+            }
+            Ok(_) => {}
         }
+        let journal: Self = window_manager_core::read_json(path)?;
+        if journal.version != 1 {
+            return Err(window_manager_core::Error::new(
+                window_manager_core::ErrorCode::InvalidConfiguration,
+                "Unsupported journal version",
+                "journal",
+            ));
+        }
+        Ok(journal)
     }
 
     pub fn save(&self, path: &std::path::Path) -> window_manager_core::Result<()> {
@@ -85,6 +80,13 @@ impl Journal {
                 "journal",
             )
         })?;
+        if bytes.len() as u64 > window_manager_core::MAX_CONFIGURATION_BYTES {
+            return Err(window_manager_core::Error::new(
+                window_manager_core::ErrorCode::InvalidConfiguration,
+                "Recovery journal size budget exceeded",
+                "journal",
+            ));
+        }
         window_manager_core::atomic_write(path, &bytes)
     }
 }

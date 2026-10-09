@@ -1389,7 +1389,7 @@ impl Manager {
                 ui.label("이름 → 수식으로 매개변수를 선언합니다. 예: {\"gutter\": \"8\", \"compact_limit\": \"gutter * 100\"}");
                 ui.add(egui::TextEdit::multiline(&mut self.parameter_text).code_editor().desired_rows(4));
                 if ui.button("이 그룹의 매개변수를 초안에 반영").clicked() {
-                    let parsed = serde_json::from_str::<BTreeMap<String, String>>(&self.parameter_text);
+                    let parsed = window_manager_core::decode_json::<BTreeMap<String, String>>(self.parameter_text.as_bytes());
                     match parsed { Ok(parameters) => { let mut draft = self.draft.clone(); if let Some(group) = draft.views.get_mut(&self.selected_view).and_then(|view| view.roots.values_mut().find_map(|root| root.group_mut(&self.selected_group))) { group.parameters = parameters; } match draft.validate() { Ok(()) => { self.draft = draft; self.notice = "매개변수를 초안에 반영했습니다. 구조 저장 후 실제 배치를 미리볼 수 있습니다.".into(); }, Err(error) => self.error = Some(error.to_string()) } }, Err(error) => self.error = Some(error.to_string()) }
                 }
             }
@@ -1450,7 +1450,7 @@ impl Manager {
                         "패키지 크기 한도를 초과했습니다."
                     );
                     let package: window_manager_core::LayoutPackage =
-                        serde_json::from_reader(std::fs::File::open(path)?)?;
+                        window_manager_core::read_json(path)?;
                     package.validate()?;
                     Ok(package)
                 })();

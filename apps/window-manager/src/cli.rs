@@ -174,7 +174,7 @@ pub fn execute(arguments: Arguments, path: PathBuf) -> Result<()> {
             if std::fs::metadata(&package_path)?.len() > MAX_CONFIGURATION_BYTES {
                 bail!("Package exceeds 4 MiB budget");
             }
-            let package: LayoutPackage = serde_json::from_slice(&std::fs::read(package_path)?)?;
+            let package: LayoutPackage = window_manager_core::read_json(&package_path)?;
             let workspace = arguments
                 .workspace
                 .context("--import requires --workspace and explicit --map for every role")?;

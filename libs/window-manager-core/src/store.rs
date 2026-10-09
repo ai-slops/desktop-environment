@@ -140,8 +140,7 @@ impl Configuration {
             }
             Ok(_) => {}
         }
-        let file = std::fs::File::open(path).map_err(storage)?;
-        let config: Self = serde_json::from_reader(file).map_err(storage)?;
+        let config: Self = crate::read_json(path)?;
         config.validate()?;
         Ok(config)
     }

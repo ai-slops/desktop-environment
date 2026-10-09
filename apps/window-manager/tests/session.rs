@@ -87,17 +87,24 @@ fn inherited_pipe_session_is_read_only_strict_and_privacy_preserving()
         "{\"id\":\"provider\",\"command\":{\"kind\":\"provider_disconnect\",\"provider\":\"p\"}}\n",
         "{\"id\":\"widen\",\"command\":{\"kind\":\"snapshot\",\"allow_control\":true}}\n"
     ).as_bytes())?;
+    input.write_all(br#"{"id":"duplicate","command":{"kind":"snapshot","kind":"recover"}}
+{"id":"duplicate-roots","command":{"kind":"recall","target":{"kind":"view","target":{"view":"v","roots":{"main":"a","main":"b"}}}}}
+"#)?;
     drop(input);
     let output = child.wait_with_output()?;
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let output = String::from_utf8(output.stdout)?;
     let replies: Vec<serde_json::Value> =
         output.lines().map(serde_json::from_str).collect::<std::result::Result<_, _>>()?;
-    assert_eq!(replies.len(), 4);
+    assert_eq!(replies.len(), 6);
     assert_eq!(replies[0]["result"]["revision"], 0);
     assert_eq!(replies[1]["error"]["code"], "PERMISSION_DENIED");
     assert_eq!(replies[2]["error"]["code"], "PERMISSION_DENIED");
     assert_eq!(replies[3]["error"]["code"], "INVALID_CONFIGURATION");
+    for reply in &replies[4..] {
+        assert_eq!(reply["error"]["code"], "INVALID_CONFIGURATION");
+        assert!(reply["id"].is_null());
+    }
     for forbidden in ["handle", "binding", "token_property", "process_started", "title"] {
         assert!(!output.contains(forbidden));
     }
