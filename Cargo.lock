@@ -3370,6 +3370,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "image",
+ "serde",
  "serde_json",
  "tempfile",
  "window-manager-core",

@@ -16,6 +16,7 @@ pub enum Action {
     Watch(u32, u64),
     Export(String, PathBuf),
     Import(PathBuf),
+    Session,
     Help,
 }
 
@@ -24,17 +25,27 @@ pub struct Arguments {
     pub action: Action,
     pub workspace: Option<String>,
     pub mappings: BTreeMap<String, String>,
+    pub allow_control: bool,
+    pub allow_providers: bool,
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Arguments> {
     let mut args = args.into_iter();
-    let mut result =
-        Arguments { path: None, action: Action::Gui, workspace: None, mappings: BTreeMap::new() };
+    let mut result = Arguments {
+        path: None,
+        action: Action::Gui,
+        workspace: None,
+        mappings: BTreeMap::new(),
+        allow_control: false,
+        allow_providers: false,
+    };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" => {
                 result.path = Some(PathBuf::from(args.next().context("--config requires a path")?));
             }
+            "--allow-control" if !result.allow_control => result.allow_control = true,
+            "--allow-providers" if !result.allow_providers => result.allow_providers = true,
             "--workspace" => {
                 result.workspace = Some(args.next().context("--workspace requires a stable ID")?);
             }
@@ -55,6 +66,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Arguments> {
                 }
                 result.action = match flag {
                     "--check" => Action::Check,
+                    "--session" => Action::Session,
                     "--init" => Action::Initialize,
                     "--recover" => Action::Recover,
                     "--restore-backup" => Action::RestoreBackup,
@@ -80,6 +92,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Arguments> {
     {
         bail!("Role mappings and Workspace apply only to import");
     }
+    if (result.allow_control || result.allow_providers) && !matches!(result.action, Action::Session)
+    {
+        bail!("Capability grants apply only to --session");
+    }
     Ok(result)
 }
 
@@ -100,6 +116,9 @@ pub fn lock_configuration(path: &Path) -> Result<std::fs::File> {
 pub fn execute(arguments: Arguments, path: PathBuf) -> Result<()> {
     match arguments.action {
         Action::Gui => crate::ui::run(path),
+        Action::Session => {
+            crate::session::run(&path, arguments.allow_control, arguments.allow_providers)
+        }
         Action::Check => {
             let config = Configuration::load(&path)?;
             println!("{}", serde_json::to_string_pretty(&config)?);
@@ -167,7 +186,7 @@ pub fn execute(arguments: Arguments, path: PathBuf) -> Result<()> {
         }
         Action::Help => {
             println!(
-                "Window Manager\n  window-manager [--config <file>]\n  window-manager --init | --check | --recover | --restore-backup [--config <file>]\n  window-manager --export <view-id> <package.json> [--config <file>]\n  window-manager --import <package.json> --workspace <id> --map <role>=<window-id> [--config <file>]\n\nGUI startup never applies layouts. Import never moves windows. Recovery only reveals manager-hidden windows."
+                "Window Manager\n  window-manager [--config <file>]\n  window-manager --init | --check | --recover | --restore-backup [--config <file>]\n  window-manager --export <view-id> <package.json> [--config <file>]\n  window-manager --import <package.json> --workspace <id> --map <role>=<window-id> [--config <file>]\n  window-manager --session [--allow-control] [--allow-providers] [--config <file>]\n\nSession uses JSON Lines over stdin/stdout and is read-only by default. GUI startup never applies layouts. Import never moves windows. Recovery only reveals manager-hidden windows."
             );
             Ok(())
         }

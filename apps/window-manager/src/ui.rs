@@ -42,7 +42,7 @@ pub fn run(path: PathBuf) -> anyhow::Result<()> {
     .map_err(|error| anyhow::anyhow!("창 관리 앱을 열 수 없습니다: {error}"))
 }
 
-fn start_watchdog(path: &std::path::Path) -> anyhow::Result<std::process::Child> {
+pub fn start_watchdog(path: &std::path::Path) -> anyhow::Result<std::process::Child> {
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .arg("--watch-parent")
@@ -218,8 +218,13 @@ impl Manager {
         }
     }
     fn show_attention(&mut self, ui: &mut egui::Ui) {
-        let attention: Vec<_> =
-            self.runtime.providers.attention(self.snapshot.now_ms).into_iter().cloned().collect();
+        let attention: Vec<_> = self
+            .runtime
+            .providers
+            .attention(window_manager_core::unix_millis())
+            .into_iter()
+            .cloned()
+            .collect();
         for event in attention {
             ui.horizontal(|ui| {
                 ui.label(format!(
@@ -388,6 +393,7 @@ impl Manager {
                     self.apply_when_previewed = false;
                 }
                 Event::Notice(notice) => self.notice = notice,
+                Event::Barrier(_) => {}
             }
         }
     }

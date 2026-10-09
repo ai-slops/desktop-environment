@@ -4,6 +4,7 @@
 
 mod cli;
 mod service;
+mod session;
 mod ui;
 
 use anyhow::{Context, Result};

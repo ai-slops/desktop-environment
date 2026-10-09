@@ -102,7 +102,7 @@ pub struct Runtime {
     pub geometry: BTreeMap<Id, Desired>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Desired {
     pub window: Id,
     pub placement: Id,

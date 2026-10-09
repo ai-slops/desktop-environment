@@ -26,7 +26,15 @@ pub enum Command {
     AttentionTarget(Id, window_manager_core::Target),
     Pause(bool),
     Recover,
+    Provider(ProviderCommand),
+    Barrier(Id),
     Shutdown,
+}
+
+pub enum ProviderCommand {
+    Register(Id, Id, std::collections::BTreeSet<Id>, bool, bool),
+    Publish(window_manager_core::ProviderMessage),
+    Disconnect(Id),
 }
 
 pub enum Event {
@@ -39,6 +47,7 @@ pub enum Event {
     Notice(String),
     ManualEdit(ManualEdit),
     ControlReady(window_manager_core::Rect, bool),
+    Barrier(Id),
 }
 
 pub struct Worker {
@@ -49,11 +58,24 @@ pub struct Worker {
 
 impl Worker {
     pub fn start(path: PathBuf, config: Configuration) -> Self {
+        Self::start_with_hotkeys(path, config, true, true)
+    }
+
+    pub fn start_session(path: PathBuf, config: Configuration, recover_on_exit: bool) -> Self {
+        Self::start_with_hotkeys(path, config, false, recover_on_exit)
+    }
+
+    fn start_with_hotkeys(
+        path: PathBuf,
+        config: Configuration,
+        hotkeys: bool,
+        recover_on_exit: bool,
+    ) -> Self {
         let (sender, commands) = mpsc::channel();
         let (events, receiver) = mpsc::channel();
         let (done, finished) = mpsc::channel();
         std::thread::spawn(move || {
-            run(&path, config, &commands, events);
+            run(&path, config, &commands, events, hotkeys, recover_on_exit);
             let _ = done.send(());
         });
         Self { sender, receiver, finished }
@@ -282,7 +304,14 @@ impl State {
 }
 
 #[allow(clippy::too_many_lines)] // This dispatch loop owns the complete worker lifecycle.
-fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events: Sender<Event>) {
+fn run(
+    path: &Path,
+    config: Configuration,
+    commands: &Receiver<Command>,
+    events: Sender<Event>,
+    hotkeys: bool,
+    recover_on_exit: bool,
+) {
     let journal_path = journal_path(path);
     let journal = match Journal::load(&journal_path) {
         Ok(journal) => journal,
@@ -298,7 +327,8 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
         .filter(|entry| config.windows.contains_key(&entry.window))
         .map(|entry| (entry.window.clone(), entry.prior.binding.clone()))
         .collect();
-    let shortcuts: Vec<_> = config.shortcuts.iter().map(|shortcut| shortcut.number).collect();
+    let shortcuts: Vec<_> =
+        config.shortcuts.iter().filter(|_| hotkeys).map(|shortcut| shortcut.number).collect();
     let native_events = windows_window_manager::event_stream(&shortcuts);
     let mut state = State {
         config,
@@ -510,13 +540,44 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                     Ok(())
                 })
             }
+            Command::Provider(command) => {
+                let result = match command {
+                    ProviderCommand::Register(id, session, resources, output, attention) => {
+                        if resources.iter().any(|id| !state.config.windows.contains_key(id)) {
+                            Err(Error::new(
+                                ErrorCode::TargetMissing,
+                                "Provider resource missing",
+                                id,
+                            ))
+                        } else {
+                            state
+                                .runtime
+                                .providers
+                                .register(id, session, resources, output, attention)
+                        }
+                    }
+                    ProviderCommand::Publish(message) => {
+                        state.runtime.providers.accept(message, window_manager_core::unix_millis())
+                    }
+                    ProviderCommand::Disconnect(id) => {
+                        state.runtime.providers.disconnect(&id);
+                        Ok(())
+                    }
+                };
+                state.publish();
+                result
+            }
+            Command::Barrier(id) => {
+                let _ = state.events.send(Event::Barrier(id));
+                Ok(())
+            }
             Command::Shutdown => break,
         };
         if let Err(error) = result {
             let _ = state.events.send(Event::Error(error));
         }
     }
-    if let Err(error) = windows_window_manager::recover(&state.path) {
+    if recover_on_exit && let Err(error) = windows_window_manager::recover(&state.path) {
         let _ = state.events.send(Event::Error(error));
     }
 }

@@ -15,6 +15,7 @@ ui-smoke = ["dep:image"]
 [dependencies]
 anyhow.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 window-manager-core = { path = "../../libs/window-manager-core" }
 windows-window-manager = { path = "../../platforms/windows-window-manager" }
 eframe = { version = "0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }

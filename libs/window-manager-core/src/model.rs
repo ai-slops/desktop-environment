@@ -566,7 +566,7 @@ pub struct ObservedWindow {
     pub has_owned_dialog: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Display {
     pub id: Id,
     pub name: String,
