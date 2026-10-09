@@ -54,16 +54,51 @@ impl Default for DisplaySettings {
     }
 }
 
+impl DisplaySettings {
+    pub fn validate(&self) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.display.trim().is_empty() {
+            bail!("미러링할 디스플레이를 선택하세요.");
+        }
+        if !(1..=240).contains(&self.fps) {
+            bail!("FPS는 1~240 사이여야 합니다.");
+        }
+        if !(1..=1000).contains(&self.timeout_ms) {
+            bail!("캡처 대기 시간은 1~1000ms 사이여야 합니다.");
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn args(&self) -> Vec<String> {
+        let mut args = vec![
+            "mirror".into(),
+            self.display.clone(),
+            "--fps".into(),
+            self.fps.to_string(),
+            "--timeout-ms".into(),
+            self.timeout_ms.to_string(),
+        ];
+        if self.fullscreen {
+            args.push("--fullscreen".into());
+        }
+        args
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub audio: AudioSettings,
     pub display: DisplaySettings,
+    pub additional_displays: Vec<DisplaySettings>,
 }
 
 impl Settings {
     pub fn validate(&self) -> Result<()> {
-        if !self.audio.enabled && !self.display.enabled {
+        if !self.audio.enabled && !self.displays().any(|display| display.enabled) {
             bail!("오디오 또는 디스플레이 중 하나 이상을 선택하세요.");
         }
         if self.audio.enabled {
@@ -74,16 +109,8 @@ impl Settings {
                 bail!("오디오 원본과 대상은 서로 달라야 합니다.");
             }
         }
-        if self.display.enabled {
-            if self.display.display.trim().is_empty() {
-                bail!("미러링할 디스플레이를 선택하세요.");
-            }
-            if !(1..=240).contains(&self.display.fps) {
-                bail!("FPS는 1~240 사이여야 합니다.");
-            }
-            if !(1..=1000).contains(&self.display.timeout_ms) {
-                bail!("캡처 대기 시간은 1~1000ms 사이여야 합니다.");
-            }
+        for display in self.displays() {
+            display.validate()?;
         }
         Ok(())
     }
@@ -95,18 +122,23 @@ impl Settings {
 
     #[must_use]
     pub fn display_args(&self) -> Vec<String> {
-        let mut args = vec![
-            "mirror".into(),
-            self.display.display.clone(),
-            "--fps".into(),
-            self.display.fps.to_string(),
-            "--timeout-ms".into(),
-            self.display.timeout_ms.to_string(),
-        ];
-        if self.display.fullscreen {
-            args.push("--fullscreen".into());
+        self.display.args()
+    }
+
+    pub fn displays(&self) -> impl Iterator<Item = &DisplaySettings> {
+        std::iter::once(&self.display).chain(&self.additional_displays)
+    }
+
+    pub fn display_at(&self, index: usize) -> Option<&DisplaySettings> {
+        self.displays().nth(index)
+    }
+
+    pub fn display_at_mut(&mut self, index: usize) -> Option<&mut DisplaySettings> {
+        if index == 0 {
+            Some(&mut self.display)
+        } else {
+            self.additional_displays.get_mut(index - 1)
         }
-        args
     }
 }
 
@@ -270,6 +302,35 @@ mod tests {
         settings.display.fps = 60;
         settings.display.timeout_ms = 1001;
         assert!(settings.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_presets_and_multiple_mirrors_round_trip() -> Result<()> {
+        let mut settings: Settings = serde_json::from_str(
+            r#"{"audio":{"enabled":false},"display":{"enabled":true,"display":"DISPLAY1"}}"#,
+        )?;
+        assert!(settings.additional_displays.is_empty());
+        settings.additional_displays.push(DisplaySettings {
+            enabled: true,
+            display: "DISPLAY2".into(),
+            fps: 120,
+            ..DisplaySettings::default()
+        });
+        settings.additional_displays.push(settings.display.clone());
+        settings.validate()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("presets.json");
+        let mut store = PresetStore::default();
+        store.add("여러 창", settings.clone())?;
+        store.last_used = settings.clone();
+        store.save(&path)?;
+        assert_eq!(PresetStore::load(&path)?, store);
+        assert_eq!(settings.displays().count(), 3);
+        settings.additional_displays[0].fps = 0;
+        assert!(settings.validate().is_err());
+        settings.additional_displays[0].enabled = false;
+        settings.validate()?;
         Ok(())
     }
 }
