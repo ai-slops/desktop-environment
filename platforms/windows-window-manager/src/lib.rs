@@ -14,6 +14,7 @@ pub struct Candidate {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveryEntry {
     pub window: Id,
     pub prior: ObservedWindow,
@@ -21,6 +22,7 @@ pub struct RecoveryEntry {
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Journal {
     pub version: u32,
     pub entries: Vec<RecoveryEntry>,

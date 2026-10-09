@@ -70,6 +70,79 @@ fn fixture() -> (Configuration, Snapshot, Target) {
     (config, snapshot, Target { view, roots: BTreeMap::from([("main".into(), "work".into())]) })
 }
 
+fn settled_snapshot(plan: &Plan, snapshot: &Snapshot) -> Snapshot {
+    let mut settled = snapshot.clone();
+    for mutation in &plan.mutations {
+        if let Some(observed) = settled.windows.get_mut(&mutation.window) {
+            if let Some(frame) = mutation.geometry {
+                observed.client[0] += frame.width - observed.frame.width;
+                observed.client[1] += frame.height - observed.frame.height;
+                observed.frame = frame;
+            }
+            if let Some(visible) = mutation.visible {
+                observed.visible = visible;
+            }
+        }
+    }
+    settled
+}
+
+#[test]
+fn native_undo_is_scoped_and_revalidates_new_owners_and_manual_changes() -> Result<()> {
+    let (config, snapshot, target) = fixture();
+    let prior = Runtime::default();
+    let transition = plan(&config, &prior, &snapshot, &Request::open(&config, target))?;
+    let after = settled_snapshot(&transition, &snapshot);
+    let mut runtime = prior.clone();
+    transition.commit(&mut runtime);
+    let undo = UndoRecord::capture(&transition, &prior, &after, &runtime);
+    runtime.generations.insert("unrelated".into(), 100);
+    let reverse = undo.reverse(&config, &runtime, &after)?;
+    assert_eq!(reverse.mutations[0].geometry, Some(snapshot.windows["preview"].frame));
+    assert!(reverse.mutations.iter().all(|mutation| !mutation.focus));
+    let mut moved = after.clone();
+    if let Some(window) = moved.windows.get_mut("preview") {
+        window.frame.x += 1;
+    }
+    assert_eq!(
+        undo.reverse(&config, &runtime, &moved).err().map(|error| error.code),
+        Some(ErrorCode::StaleBinding)
+    );
+    runtime
+        .claims
+        .insert("preview".into(), Claim { slot: "other".into(), placement: "new".into() });
+    assert_eq!(
+        undo.reverse(&config, &runtime, &after).err().map(|error| error.code),
+        Some(ErrorCode::ClaimConflict)
+    );
+    runtime.claims.remove("preview");
+    reverse.commit(&mut runtime);
+    assert!(runtime.presentations.is_empty());
+    assert!(runtime.claims.is_empty());
+    assert_eq!(runtime.generations["unrelated"], 100);
+    Ok(())
+}
+
+#[test]
+fn suspended_failure_does_not_block_disjoint_work() -> Result<()> {
+    let (config, snapshot, target) = fixture();
+    let mut runtime = Runtime::default();
+    runtime.suspended.insert("failed".into());
+    let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
+    let component = transition.component("work", &runtime);
+    assert_eq!(component.scope, BTreeSet::from(["work".into()]));
+    component.commit(&mut runtime);
+    assert!(runtime.suspended.contains("failed"));
+    runtime.suspended.insert("work".into());
+    assert_eq!(
+        plan(&config, &runtime, &snapshot, &Request::open(&config, target))
+            .err()
+            .map(|error| error.code),
+        Some(ErrorCode::PermissionDenied)
+    );
+    Ok(())
+}
+
 #[test]
 fn preserved_size_is_visit_local_and_idempotent_recall_keeps_it() -> Result<()> {
     let (config, snapshot, target) = fixture();

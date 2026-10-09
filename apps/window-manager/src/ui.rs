@@ -899,6 +899,20 @@ impl eframe::App for Manager {
                     self.send(Command::Recover);
                 }
                 if ui
+                    .add_enabled(!self.applying, egui::Button::new("창 배치 되돌리기 미리보기"))
+                    .clicked()
+                {
+                    let id = new_id("undo");
+                    self.latest_request = Some(id.clone());
+                    self.preview = None;
+                    self.apply_when_previewed = false;
+                    self.send(Command::Undo(id));
+                }
+                if !self.runtime.suspended.is_empty() && ui.button("실패 영역 관리 재개").clicked()
+                {
+                    self.send(Command::Pause(false));
+                }
+                if ui
                     .add_enabled(!self.undo.is_empty(), egui::Button::new("설정 편집 되돌리기"))
                     .clicked()
                     && let Some(mut previous) = self.undo.pop()
@@ -947,7 +961,7 @@ impl eframe::App for Manager {
         });
     }
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
-        let _ = self.worker.sender.send(Command::Shutdown);
+        self.worker.shutdown();
     }
 }
 

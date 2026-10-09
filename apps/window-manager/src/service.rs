@@ -4,7 +4,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 use window_manager_core::{
     Binding, Configuration, Error, ErrorCode, Id, Plan, Request, Result, Runtime, Snapshot, Status,
-    TransitionResult, WindowResult, atomic_write, plan,
+    TransitionResult, UndoRecord, WindowResult, atomic_write, plan,
 };
 use windows_window_manager::{Candidate, Journal, NativeEvent, RecoveryEntry};
 
@@ -17,6 +17,7 @@ pub enum Command {
     Bind(Configuration, Id, Candidate),
     Preview(Configuration, Request),
     Apply(Configuration, Plan),
+    Undo(Id),
     Pause(bool),
     Recover,
     Shutdown,
@@ -35,14 +36,25 @@ pub enum Event {
 pub struct Worker {
     pub sender: Sender<Command>,
     pub receiver: Receiver<Event>,
+    finished: Receiver<()>,
 }
 
 impl Worker {
     pub fn start(path: PathBuf, config: Configuration) -> Self {
         let (sender, commands) = mpsc::channel();
         let (events, receiver) = mpsc::channel();
-        std::thread::spawn(move || run(&path, config, &commands, events));
-        Self { sender, receiver }
+        let (done, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            run(&path, config, &commands, events);
+            let _ = done.send(());
+        });
+        Self { sender, receiver, finished }
+    }
+
+    pub fn shutdown(&self) {
+        let _ = self.sender.send(Command::Shutdown);
+        // Recovery normally completes before GUI exit; the watchdog remains the crash fallback.
+        let _ = self.finished.recv_timeout(Duration::from_secs(2));
     }
 }
 
@@ -54,6 +66,8 @@ struct State {
     journal: Journal,
     path: PathBuf,
     events: Sender<Event>,
+    undo: Vec<UndoRecord>,
+    undoing: Option<Id>,
 }
 
 impl State {
@@ -82,6 +96,7 @@ impl State {
     fn apply(&mut self, plan: &Plan) -> Result<()> {
         self.refresh()?;
         plan.revalidate(&self.config, &self.runtime, &self.snapshot)?;
+        let prior_runtime = self.runtime.clone();
         if plan.idempotent {
             let _ = self.events.send(Event::Result(TransitionResult {
                 request: plan.id.clone(),
@@ -153,12 +168,40 @@ impl State {
                 ));
             }
         }
+        let mut failed_windows = std::collections::BTreeSet::new();
+        for slot in &plan.scope {
+            let component = plan.component(slot, &prior_runtime);
+            let component_settled = component.mutations.iter().all(|mutation| {
+                outcomes.iter().any(|outcome| outcome.window == mutation.window && outcome.settled)
+            });
+            if component_settled {
+                component.commit(&mut self.runtime);
+                if self.undoing.as_ref() != Some(&plan.id) {
+                    self.undo.push(UndoRecord::capture(
+                        &component,
+                        &prior_runtime,
+                        &self.snapshot,
+                        &self.runtime,
+                    ));
+                    if self.undo.len() > 50 {
+                        self.undo.remove(0);
+                    }
+                }
+            } else {
+                self.runtime.suspended.insert(slot.clone());
+                self.runtime.claims.retain(|_, claim| &claim.slot != slot);
+                self.runtime.presentations.remove(slot);
+                *self.runtime.generations.entry(slot.clone()).or_default() += 1;
+                failed_windows
+                    .extend(component.mutations.iter().map(|mutation| mutation.window.clone()));
+            }
+        }
         if settled {
-            plan.commit(&mut self.runtime);
-            // Foreground intent is reported separately; denied focus does not undo settled geometry.
-            for (mutation, outcome) in plan.mutations.iter().zip(&mut outcomes) {
-                if mutation.focus {
-                    outcome.error = windows_window_manager::focus(&mutation.binding).err();
+            if self.undoing.as_ref() == Some(&plan.id) {
+                self.undo.pop();
+                self.undoing = None;
+                if let Some(record) = self.undo.last_mut() {
+                    record.rebase_after_undo(&self.runtime, &self.snapshot);
                 }
             }
             self.journal.entries.retain(|entry| {
@@ -166,12 +209,15 @@ impl State {
             });
             self.journal.save(&self.path)?;
         } else {
-            // Real-window effects cannot be rolled back atomically. Release affected claims and expose failure.
-            self.runtime.paused = true;
-            self.runtime.claims.retain(|_, claim| !plan.scope.contains(&claim.slot));
-            self.runtime.presentations.retain(|slot, _| !plan.scope.contains(slot));
-            let _ = windows_window_manager::recover(&self.path);
+            // Failed slots are suspended independently; successful slots retain their claims.
+            let _ = windows_window_manager::recover_selected(&self.path, Some(&failed_windows));
             self.journal = Journal::load(&self.path)?;
+        }
+        // Focus succeeds independently of unrelated failed components.
+        for (mutation, outcome) in plan.mutations.iter().zip(&mut outcomes) {
+            if mutation.focus && outcome.settled {
+                outcome.error = windows_window_manager::focus(&mutation.binding).err();
+            }
         }
         let result = TransitionResult {
             request: plan.id.clone(),
@@ -226,6 +272,8 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
         journal,
         path: journal_path,
         events,
+        undo: Vec::new(),
+        undoing: None,
     };
     if let Err(error) = state.refresh() {
         let _ = state.events.send(Event::Error(error));
@@ -316,8 +364,22 @@ fn run(path: &Path, config: Configuration, commands: &Receiver<Command>, events:
                 state.config = config;
                 state.apply(&plan)
             }
+            Command::Undo(id) => state.refresh().and_then(|()| {
+                let record = state.undo.last().ok_or_else(|| {
+                    Error::new(ErrorCode::TargetMissing, "No native transition to undo", &id)
+                })?;
+                let mut reversed =
+                    record.reverse(&state.config, &state.runtime, &state.snapshot)?;
+                reversed.id.clone_from(&id);
+                state.undoing = Some(id);
+                let _ = state.events.send(Event::Preview(Box::new(reversed)));
+                Ok(())
+            }),
             Command::Pause(paused) => {
                 state.runtime.paused = paused;
+                if !paused {
+                    state.runtime.suspended.clear();
+                }
                 state.publish();
                 Ok(())
             }

@@ -377,10 +377,22 @@ pub fn focus(binding: &Binding) -> Result<()> {
 
 /// Independent recovery restores visibility only, never historical geometry or user-minimized windows.
 pub fn recover(path: &Path) -> Result<Vec<String>> {
+    recover_selected(path, None)
+}
+
+/// Failed components reveal only their own windows; other hidden tabs stay hidden.
+pub fn recover_selected(
+    path: &Path,
+    selected: Option<&std::collections::BTreeSet<Id>>,
+) -> Result<Vec<String>> {
     let mut journal = Journal::load(path)?;
     let mut diagnostics = Vec::new();
     let mut keep = Vec::new();
     for entry in journal.entries {
+        if selected.is_some_and(|windows| !windows.contains(&entry.window)) {
+            keep.push(entry);
+            continue;
+        }
         match observe(&entry.prior.binding, true) {
             Ok(current)
                 if !current.visible

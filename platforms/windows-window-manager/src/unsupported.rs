@@ -37,6 +37,12 @@ pub fn focus(_: &Binding) -> Result<()> {
 pub fn recover(_: &Path) -> Result<Vec<String>> {
     unsupported()
 }
+pub fn recover_selected(
+    _: &Path,
+    _: Option<&std::collections::BTreeSet<Id>>,
+) -> Result<Vec<String>> {
+    unsupported()
+}
 #[must_use]
 pub const fn parent_alive(_: u32, _: u64) -> bool {
     false

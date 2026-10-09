@@ -86,6 +86,8 @@ pub struct Runtime {
     pub generations: BTreeMap<Id, u64>,
     pub completed: BTreeSet<Id>,
     pub paused: bool,
+    /// Failed components require explicit resumption; other slots remain available.
+    pub suspended: BTreeSet<Id>,
 }
 
 #[derive(Clone, Debug)]
@@ -243,7 +245,7 @@ pub fn plan(
             &request.id,
         ));
     }
-    if runtime.paused {
+    if runtime.paused || !runtime.suspended.is_disjoint(&request.scope) {
         return Err(Error::new(
             ErrorCode::PermissionDenied,
             "Management is paused; resume before applying a transition",
@@ -649,8 +651,10 @@ impl Plan {
         snapshot: &Snapshot,
     ) -> Result<()> {
         validate_binding_uniqueness(snapshot)?;
+        let revision_changed = self.config_revision != config.revision;
         if runtime.paused
-            || self.config_revision != config.revision
+            || !runtime.suspended.is_disjoint(&self.scope)
+            || revision_changed
             || self.topology_revision != snapshot.topology_revision
             || self.generations.iter().any(|(slot, generation)| {
                 runtime.generations.get(slot).copied().unwrap_or_default() != *generation
@@ -680,6 +684,19 @@ impl Plan {
                 ));
             }
         }
+        for mutation in &self.mutations {
+            if runtime
+                .claims
+                .get(&mutation.window)
+                .is_some_and(|claim| !self.scope.contains(&claim.slot))
+            {
+                return Err(Error::new(
+                    ErrorCode::ClaimConflict,
+                    "A newer owner prevents mutation",
+                    &mutation.window,
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -689,6 +706,7 @@ impl Plan {
             return;
         }
         runtime.claims.retain(|_, claim| !self.scope.contains(&claim.slot));
+        runtime.presentations.retain(|slot, _| !self.scope.contains(slot));
         for (window, desired) in &self.desired {
             if self.expected.contains_key(window) {
                 runtime.claims.insert(
@@ -699,12 +717,32 @@ impl Plan {
         }
         for (slot, presentation) in &self.presentations {
             runtime.presentations.insert(slot.clone(), presentation.clone());
+        }
+        for slot in &self.scope {
             *runtime.generations.entry(slot.clone()).or_default() += 1;
         }
         if runtime.completed.len() >= 256 {
             runtime.completed.clear();
         }
         runtime.completed.insert(self.id.clone());
+    }
+
+    /// Slots are independent unless they share a real window, which planning rejects.
+    /// Keep external protection observations as revalidation dependencies.
+    #[must_use]
+    pub fn component(&self, slot: &str, runtime: &Runtime) -> Self {
+        let mut result = self.clone();
+        result.scope = BTreeSet::from([slot.into()]);
+        result.generations.retain(|id, _| id == slot);
+        result.presentations.retain(|id, _| id == slot);
+        result.desired.retain(|_, desired| desired.slot == slot);
+        result.mutations.retain(|mutation| {
+            self.desired.get(&mutation.window).map_or_else(
+                || runtime.claims.get(&mutation.window).is_some_and(|claim| claim.slot == slot),
+                |desired| desired.slot == slot,
+            )
+        });
+        result
     }
 }
 

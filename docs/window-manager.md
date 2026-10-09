@@ -51,7 +51,7 @@ Configuration edits are revisioned and written through flushed temporary-file re
 target\debug\window-manager.exe --restore-backup --config .\my-layouts.json
 ```
 
-GUI instances and configuration-writing CLI commands share an exclusive same-store lock. Structural configuration edits have a bounded 50-action undo history. Native geometry undo and arbitrary user-drag autosave remain work for P1.
+GUI instances and configuration-writing CLI commands share an exclusive same-store lock. Structural configuration edits have a bounded 50-action undo history. **창 배치 되돌리기 미리보기** reverses a settled native transition as one scoped operation, revalidating identities, topology, generations, newer ownership, manual changes, and current protections. Focus is not restored. Failed slots are suspended independently; successful slots keep their presentations. **실패 영역 관리 재개** explicitly clears suspension. Graceful exit waits briefly for worker recovery, with the independent helper as the crash fallback. Arbitrary user-drag autosave remains work for P1.
 
 ## Formulas and packages
 
@@ -91,7 +91,7 @@ Remaining release gates / P1 work:
 
 - Real editor/browser/terminal/game/broadcaster matrix; elevated windows, Korean IME/modal interaction, mixed DPI, hotkey collision, hung-app and rapid supersession measurements, and load/performance distributions.
 - Capability-selected show-state changes, explicit off-screen rescue, robust topology fallback/reconnect restoration, and monitor identity confirmation when Windows cannot identify a monitor uniquely. Current behavior blocks unavailable/ambiguous mappings and never overwrites saved topology preferences.
-- Full scoped native undo, manual-drag provenance/autosave, independent protection lifetimes, focus-prioritized responsive folding, more flexible preserve-size fitting/wrapping, all three Group-preservation modes, and independent partial-component application. Current executor uses bounded asynchronous per-window final submission; batched `DeferWindowPos` is not implemented.
+- Manual-drag provenance/autosave, independent protection lifetimes, focus-prioritized responsive folding, more flexible preserve-size fitting/wrapping, and all three Group-preservation modes. Runtime application and undo operate independently per slot; finer dependent-subtree isolation remains. Current executor uses bounded asynchronous per-window final submission; batched `DeferWindowPos` is not implemented.
 - Dynamic Collection/selector materialization and staged membership changes, richer inline property/variant/package editors, Workspace remembered-target recall, all exact-scope expansion/drag/copy/reveal commands, and public CLI transition/session/event interfaces. Collection query and independent include/exclude semantics are present in the core model; they do not currently automate Group membership.
 - Private-designated control-window placement/fallback and provider-based attention/output protection contracts. Current public designation is informational; there is no verified capture protection, broadcast integration, reliable AI task-state inference, or automatic application control.
 
