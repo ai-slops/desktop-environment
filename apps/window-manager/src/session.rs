@@ -26,6 +26,9 @@ struct Envelope {
 enum SessionCommand {
     Snapshot {},
     Configuration {},
+    Simulate {
+        input: window_manager_core::Simulation,
+    },
     Inventory {},
     MonitorInventory {},
     ConfirmMonitor {
@@ -85,6 +88,7 @@ impl SessionCommand {
     fn authorize(&self, control: bool, providers: bool) -> Result<()> {
         let permitted = match self {
             Self::Snapshot {}
+            | Self::Simulate { .. }
             | Self::Configuration {}
             | Self::Inventory {}
             | Self::MonitorInventory {}
@@ -202,6 +206,9 @@ impl Session {
             SessionCommand::Snapshot {} => {
                 self.exchange(Command::Refresh(self.config.clone()))?;
                 Ok(self.public_snapshot())
+            }
+            SessionCommand::Simulate { input } => {
+                Ok(json!(window_manager_core::simulate(&self.config, &input)?))
             }
             SessionCommand::Events { cursor } => {
                 self.exchange(Command::Barrier(new_id("poll")))?;

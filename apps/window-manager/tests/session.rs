@@ -6,6 +6,68 @@ use std::process::{Command, Stdio};
 use window_manager_core::Configuration;
 
 #[test]
+fn read_only_session_simulates_without_native_authority_or_configuration_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("config.json");
+    let mut config = Configuration::default();
+    config.slots.insert(
+        "source-slot".into(),
+        window_manager_core::DisplaySlot {
+            id: "source-slot".into(),
+            name: "simulation source".into(),
+            display: "absent-real-display".into(),
+            region: [0.0, 0.0, 1.0, 1.0],
+            designated_public: false,
+            fallback_displays: Vec::new(),
+        },
+    );
+    let view = config.views.keys().next().ok_or("view missing")?.clone();
+    config.save(&path)?;
+    let before = std::fs::read(&path)?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_window-manager"))
+        .args(["--session", "--config"])
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input = window_manager_core::Simulation {
+        target: window_manager_core::Target {
+            view,
+            roots: std::collections::BTreeMap::from([("main".into(), "source-slot".into())]),
+        },
+        width: 1600,
+        height: 900,
+        dpi: 96,
+        group: None,
+        count: Some(4),
+        minimum: None,
+        fixed_children: false,
+        missing: std::collections::BTreeSet::new(),
+        display_present: true,
+    };
+    let mut stdin = child.stdin.take().ok_or("stdin missing")?;
+    serde_json::to_writer(
+        &mut stdin,
+        &serde_json::json!({"id":"simulation","command":{"kind":"simulate","input":input}}),
+    )?;
+    stdin.write_all(b"\n")?;
+    drop(stdin);
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    assert!(reply["result"]["error"].is_null());
+    assert_eq!(reply["result"]["desired"].as_object().ok_or("desired missing")?.len(), 4);
+    for field in ["binding", "mutations", "token_property"] {
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(field));
+    }
+    assert_eq!(std::fs::read(&path)?, before);
+    assert!(!path.with_extension("recovery.json").exists());
+    Ok(())
+}
+
+#[test]
 fn inherited_pipe_session_is_read_only_strict_and_privacy_preserving()
 -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempfile::tempdir()?;

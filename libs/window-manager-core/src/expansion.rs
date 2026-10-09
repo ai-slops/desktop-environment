@@ -22,7 +22,7 @@ pub struct Expansion {
     pub borrow_slots: BTreeSet<Id>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExpansionMemory {
     pub selected_tabs: BTreeMap<Id, Id>,
     pub variants: BTreeMap<Id, Id>,

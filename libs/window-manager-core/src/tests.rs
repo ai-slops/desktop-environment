@@ -96,6 +96,146 @@ fn settled_snapshot(plan: &Plan, snapshot: &Snapshot) -> Snapshot {
 }
 
 #[test]
+fn scoped_parameters_conditions_and_sorting_are_bounded_and_keep_authored_order() -> Result<()> {
+    let (mut config, snapshot, target) = two_window_fixture()?;
+    let group = group_mut(&mut config, &target)?;
+    group.parameters = BTreeMap::from([
+        ("gutter".into(), "8".into()),
+        ("compact_limit".into(), "gutter * 100".into()),
+    ]);
+    group.gap = "gutter".into();
+    group.sort_formula = Some("-child_index".into());
+    group.ratios = vec![2.0, 1.0];
+    let original = group.children.iter().map(|node| node.id().to_owned()).collect::<Vec<_>>();
+    group.variants.push(Variant {
+        id: "formula-compact".into(),
+        below_width: None,
+        below_height: None,
+        hysteresis: 0.0,
+        strategy: Strategy::ResponsiveTabs,
+        ratios: Vec::new(),
+        condition: Some("available_width < compact_limit && count > 1".into()),
+    });
+    let wide =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert!(wide.desired["second"].frame.x < wide.desired["preview"].frame.x);
+    assert!(wide.desired["preview"].frame.width > wide.desired["second"].frame.width);
+    assert_eq!(
+        group_mut(&mut config, &target)?
+            .children
+            .iter()
+            .map(|node| node.id().to_owned())
+            .collect::<Vec<_>>(),
+        original
+    );
+    config
+        .slots
+        .get_mut("work")
+        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "work"))?
+        .region[2] = 0.35;
+    let compact =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert_eq!(compact.desired.len(), 1);
+    let group = group_mut(&mut config, &target)?;
+    group.parameters.insert("gutter".into(), "compact_limit".into());
+    assert_eq!(config.validate().err().map(|error| error.code), Some(ErrorCode::FormulaInvalid));
+    let mut parameters = BTreeMap::new();
+    for index in 0..33 {
+        parameters.insert(format!("p{index}"), "1".into());
+    }
+    assert_eq!(
+        parameter_order(&parameters, &BTreeSet::new()).err().map(|error| error.code),
+        Some(ErrorCode::FormulaBudgetExceeded)
+    );
+    assert!(
+        parameter_order(
+            &BTreeMap::from([("available_width".into(), "1".into())]),
+            &BTreeSet::new()
+        )
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn simulations_never_produce_executable_plans_and_cover_missing_fixed_and_minimum_cases()
+-> Result<()> {
+    let (config, _, target) = two_window_fixture()?;
+    let before = serde_json::to_string(&config).unwrap_or_default();
+    let mut input = Simulation {
+        target,
+        width: 2000,
+        height: 1200,
+        dpi: 96,
+        group: None,
+        count: Some(3),
+        minimum: None,
+        fixed_children: false,
+        missing: BTreeSet::new(),
+        display_present: true,
+    };
+    let landscape = simulate(&config, &input)?;
+    assert!(landscape.error.is_none());
+    assert_eq!(landscape.desired.len(), 3);
+    let report = serde_json::to_string(&landscape).unwrap_or_default();
+    assert!(!report.contains("token_property"));
+    assert!(!report.contains("mutations"));
+    input.missing.insert("preview".into());
+    assert_eq!(simulate(&config, &input)?.desired.len(), 2);
+    input.minimum = Some([4000.0, 200.0]);
+    assert!(simulate(&config, &input)?.error.is_some());
+    input.minimum = None;
+    input.width = 400;
+    input.height = 1200;
+    input.fixed_children = true;
+    assert!(simulate(&config, &input)?.error.is_some());
+    input.display_present = false;
+    assert_eq!(
+        simulate(&config, &input)?.error.map(|error| error.code),
+        Some(ErrorCode::TargetMissing)
+    );
+    assert_eq!(serde_json::to_string(&config).unwrap_or_default(), before);
+    Ok(())
+}
+
+#[test]
+fn package_contract_declares_parameters_strategies_and_rejects_executable_dependencies()
+-> Result<()> {
+    let (mut config, _, target) = fixture();
+    group_mut(&mut config, &target)?.parameters.insert("gap_size".into(), "8".into());
+    group_mut(&mut config, &target)?.gap = "gap_size".into();
+    if let Node::Placement(placement) = &mut group_mut(&mut config, &target)?.children[0] {
+        placement
+            .preferences
+            .values_mut()
+            .for_each(|preference| preference.width_formula = Some("available_width * 0.5".into()));
+    }
+    let mut package = LayoutPackage::from_view(&config.views[&target.view]);
+    assert_eq!(package.required_parameters.len(), 1);
+    assert!(!package.supported_strategies.is_empty());
+    let mut leaves = Vec::new();
+    for root in package.roots.values() {
+        root.placements(&mut leaves);
+    }
+    assert_eq!(
+        leaves[0].default_preference.width_formula.as_deref(),
+        Some("available_width * 0.5")
+    );
+    assert!(leaves[0].default_preference.client_size.is_none());
+    let workspace = config.views[&target.view].workspace.clone();
+    let mappings = BTreeMap::from([(package.required_roles[0].clone(), "preview".into())]);
+    package.install(&mut config, &workspace, &mappings)?;
+    let before = config.revision;
+    package.dependencies = vec!["process:run".into()];
+    assert_eq!(
+        package.install(&mut config, &workspace, &mappings).err().map(|error| error.code),
+        Some(ErrorCode::UnsupportedOperation)
+    );
+    assert_eq!(config.revision, before);
+    Ok(())
+}
+
+#[test]
 fn group_expansion_leaves_other_groups_untouched_and_collapse_restores() -> Result<()> {
     let (mut config, mut snapshot, target) = two_window_fixture()?;
     let mut third = config.windows["second"].clone();
@@ -960,6 +1100,7 @@ fn responsive_folding_restores_wide_ratios_and_variant_preferences() -> Result<(
     group.children.push(Node::Placement(Placement::new("tools".into(), "tools".into())));
     group.variants.push(Variant {
         id: "compact".into(),
+        condition: None,
         below_width: Some(720.0),
         below_height: None,
         hysteresis: 24.0,
@@ -1134,6 +1275,7 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             before_filter: None,
             expansion: None,
             before_expansion: None,
+            group_inputs: BTreeMap::new(),
         },
     );
     let result = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;

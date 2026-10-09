@@ -68,6 +68,7 @@ impl Configuration {
             for root in view.roots.values() {
                 validate_node(root, &self.windows, &mut add, 0)?;
                 validate_membership_sources(root, self)?;
+                crate::validate_rules(root, &BTreeSet::new())?;
             }
         }
         for (key, slot) in &self.slots {
@@ -146,38 +147,6 @@ impl Configuration {
     #[allow(clippy::items_after_statements)] // Formula validation is local to the atomic commit boundary.
     pub fn save(&self, path: &Path) -> Result<()> {
         self.validate()?;
-        fn formulas(node: &Node) -> Result<()> {
-            match node {
-                Node::Placement(placement) => {
-                    for preference in placement.preferences.values() {
-                        for expression in [&preference.width_formula, &preference.height_formula]
-                            .into_iter()
-                            .flatten()
-                        {
-                            crate::validate_property_formula(expression, 1.0, 65_536.0, false)?;
-                        }
-                    }
-                }
-                Node::Group(group) => {
-                    crate::validate_property_formula(&group.gap, 0.0, 4096.0, false)?;
-                    crate::validate_property_formula(&group.columns, 1.0, 256.0, true)?;
-                    for child in &group.children {
-                        formulas(child)?;
-                    }
-                    if let Some(membership) = &group.membership {
-                        for placement in membership.retired.values() {
-                            formulas(&Node::Placement(placement.clone()))?;
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-        for view in self.views.values() {
-            for root in view.roots.values() {
-                formulas(root)?;
-            }
-        }
         let bytes = serde_json::to_vec_pretty(self).map_err(storage)?;
         if bytes.len() as u64 > MAX_CONFIGURATION_BYTES {
             return Err(invalid("configuration", "Configuration size budget exceeded"));
@@ -280,7 +249,9 @@ fn validate_node(
             }) {
                 return Err(invalid(&placement.id, "Invalid minimum client size"));
             }
-            for preference in placement.preferences.values() {
+            for preference in
+                std::iter::once(&placement.default_preference).chain(placement.preferences.values())
+            {
                 for position in
                     [preference.position, preference.position_override].into_iter().flatten()
                 {
@@ -420,6 +391,32 @@ pub struct LayoutPackage {
     pub name: String,
     pub required_roles: Vec<String>,
     pub roots: std::collections::BTreeMap<String, Node>,
+    #[serde(default)]
+    pub required_parameters: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub supported_strategies: BTreeSet<crate::Strategy>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+}
+
+fn package_strategies(
+    roots: &std::collections::BTreeMap<String, Node>,
+) -> BTreeSet<crate::Strategy> {
+    fn collect(node: &Node, strategies: &mut BTreeSet<crate::Strategy>) {
+        if let Node::Group(group) = node {
+            strategies.insert(group.strategy);
+            strategies.extend(group.variants.iter().map(|variant| variant.strategy));
+            strategies.extend(&group.allowed_fallbacks);
+            for child in &group.children {
+                collect(child, strategies);
+            }
+        }
+    }
+    let mut strategies = BTreeSet::new();
+    for root in roots.values() {
+        collect(root, &mut strategies);
+    }
+    strategies
 }
 
 impl LayoutPackage {
@@ -446,6 +443,38 @@ impl LayoutPackage {
                         candidate
                     });
                     placement.window.clone_from(role);
+                    let common = |values: Vec<Option<String>>| {
+                        let mut values = values.into_iter();
+                        let first = values.next()??;
+                        values.all(|value| value.as_ref() == Some(&first)).then_some(first)
+                    };
+                    placement.default_preference = crate::Preference {
+                        width_formula: placement.default_preference.width_formula.clone().or_else(
+                            || {
+                                common(
+                                    placement
+                                        .preferences
+                                        .values()
+                                        .map(|preference| preference.width_formula.clone())
+                                        .collect(),
+                                )
+                            },
+                        ),
+                        height_formula: placement
+                            .default_preference
+                            .height_formula
+                            .clone()
+                            .or_else(|| {
+                                common(
+                                    placement
+                                        .preferences
+                                        .values()
+                                        .map(|preference| preference.height_formula.clone())
+                                        .collect(),
+                                )
+                            }),
+                        ..crate::Preference::default()
+                    };
                     placement.preferences.clear();
                 }
                 Node::Group(group) => {
@@ -470,20 +499,43 @@ impl LayoutPackage {
             id: new_id("package"),
             name: "Layout package".into(),
             required_roles: roles.into_iter().collect(),
+            required_parameters: crate::declared_parameters(&roots),
+            supported_strategies: package_strategies(&roots),
+            dependencies: vec!["expression-language:1".into()],
             roots,
         }
     }
 
-    /// Explicit role mapping is mandatory. Import installs a copy and never applies windows.
-    #[allow(clippy::items_after_statements)] // The mapping helper is local to the installation transaction.
-    pub fn install(
-        &self,
-        config: &mut Configuration,
-        workspace: &str,
-        mappings: &std::collections::BTreeMap<String, Id>,
-    ) -> Result<Id> {
+    #[allow(clippy::items_after_statements)] // Validate package content before resolving any local resource.
+    pub fn validate(&self) -> Result<()> {
         if self.version != 1 || self.language_version != 1 {
             return Err(invalid(&self.id, "Unsupported package/language version"));
+        }
+        if self.id.is_empty()
+            || self.id.len() > 200
+            || self.name.is_empty()
+            || self.name.len() > 200
+            || self.roots.is_empty()
+        {
+            return Err(invalid(&self.id, "Invalid package identity/name/roots"));
+        }
+        if self.dependencies.len() > 1
+            || self.dependencies.iter().any(|dependency| dependency != "expression-language:1")
+        {
+            return Err(Error::new(
+                ErrorCode::UnsupportedOperation,
+                "Package declares an unavailable dependency; installation has no executable capabilities",
+                &self.id,
+            ));
+        }
+        if self.required_parameters != crate::declared_parameters(&self.roots)
+            || !self.supported_strategies.is_empty()
+                && self.supported_strategies != package_strategies(&self.roots)
+        {
+            return Err(invalid(
+                &self.id,
+                "Declared package parameters or strategies differ from content",
+            ));
         }
         fn inspect(
             node: &Node,
@@ -511,8 +563,7 @@ impl LayoutPackage {
                             "Packages must map roles explicitly; local selectors cannot be imported",
                         ));
                     }
-                    crate::validate_formula(&group.gap)?;
-                    crate::validate_formula(&group.columns)?;
+
                     for child in &group.children {
                         inspect(child, ids, roles, depth + 1)?;
                     }
@@ -524,12 +575,44 @@ impl LayoutPackage {
         let mut roles = BTreeSet::new();
         for root in self.roots.values() {
             inspect(root, &mut ids, &mut roles, 0)?;
+            crate::validate_rules(root, &BTreeSet::new())?;
         }
         if roles != self.required_roles.iter().cloned().collect()
             || roles.len() != self.required_roles.len()
-            || roles != mappings.keys().cloned().collect()
         {
             return Err(invalid(&self.id, "Declared roles differ from package placeholders"));
+        }
+        let windows = roles
+            .iter()
+            .map(|role| (role.clone(), WindowRef::unbound(role.clone(), role.clone())))
+            .collect();
+        let mut node_ids = BTreeSet::new();
+        let mut add = |id: &str| {
+            if id.is_empty() || id.len() > 200 || !node_ids.insert(id.to_owned()) {
+                Err(invalid(id, "Invalid package node ID"))
+            } else {
+                Ok(())
+            }
+        };
+        for root in self.roots.values() {
+            validate_node(root, &windows, &mut add, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Explicit role mapping is mandatory. Import installs a copy and never applies windows.
+    #[allow(clippy::items_after_statements)] // The mapping helper is local to the installation transaction.
+    pub fn install(
+        &self,
+        config: &mut Configuration,
+        workspace: &str,
+        mappings: &std::collections::BTreeMap<String, Id>,
+    ) -> Result<Id> {
+        self.validate()?;
+        if self.required_roles.iter().cloned().collect::<BTreeSet<_>>()
+            != mappings.keys().cloned().collect()
+        {
+            return Err(invalid(&self.id, "Mapping must exactly match required roles"));
         }
         for role in &self.required_roles {
             if mappings.get(role).is_none_or(|window| !config.windows.contains_key(window)) {

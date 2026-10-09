@@ -180,6 +180,22 @@ pub struct WindowRef {
     pub capabilities: CapabilityProfile,
 }
 
+impl WindowRef {
+    #[must_use]
+    pub fn unbound(id: Id, alias: String) -> Self {
+        Self {
+            id,
+            alias,
+            tags: Vec::new(),
+            application_hint: None,
+            allow_hide: false,
+            protection: Protection::default(),
+            output_protection: OutputProtection::None,
+            capabilities: CapabilityProfile::default(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Truth {
     Yes,
@@ -280,6 +296,8 @@ pub struct Placement {
     pub minimum_client: Option<[f64; 2]>,
     #[serde(default)]
     pub protection: Protection,
+    #[serde(default)]
+    pub default_preference: Preference,
 }
 
 impl Placement {
@@ -292,11 +310,12 @@ impl Placement {
             preferences: BTreeMap::new(),
             minimum_client: None,
             protection: Protection::default(),
+            default_preference: Preference::default(),
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Strategy {
     Horizontal,
@@ -336,6 +355,8 @@ pub struct Variant {
     pub hysteresis: f64,
     pub strategy: Strategy,
     pub ratios: Vec<f64>,
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -360,6 +381,10 @@ pub struct Group {
     pub allowed_fallbacks: Vec<Strategy>,
     #[serde(default)]
     pub alignment: Alignment,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
+    #[serde(default)]
+    pub sort_formula: Option<String>,
 }
 
 impl Group {
@@ -380,6 +405,8 @@ impl Group {
             preservation: GroupPreservation::Fill,
             allowed_fallbacks: Vec::new(),
             alignment: Alignment::Start,
+            parameters: BTreeMap::new(),
+            sort_formula: None,
         }
     }
 }

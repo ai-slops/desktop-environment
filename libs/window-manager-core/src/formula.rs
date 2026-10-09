@@ -1,5 +1,5 @@
 use crate::{Error, ErrorCode, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_SOURCE: usize = 4096;
 const MAX_TOKENS: usize = 512;
@@ -58,24 +58,37 @@ fn budget() -> Error {
 /// Pure numeric expression evaluation; unknown names and non-finite values are errors.
 /// Comparisons/Boolean logic and lazy conditional expressions are available inside formulas.
 pub fn evaluate(source: &str, context: &BTreeMap<String, f64>) -> Result<f64> {
+    expression_value(source, context)?.number()
+}
+
+pub fn evaluate_condition(source: &str, context: &BTreeMap<String, f64>) -> Result<bool> {
+    expression_value(source, context)?.boolean()
+}
+
+fn expression_value(source: &str, context: &BTreeMap<String, f64>) -> Result<Value> {
     let tokens = tokenize(source)?;
     let mut parser = Parser { tokens, index: 0 };
     let expression = parser.parse(0, 0)?;
     if parser.peek() != &Token::End {
         return Err(invalid("Unexpected trailing input"));
     }
-    evaluate_expr(&expression, context, 0)?.number()
+    evaluate_expr(&expression, context, 0)
 }
 
 /// Parse every branch before committing a draft. Evaluation still uses actual local inputs.
 #[allow(clippy::items_after_statements)] // The AST validator belongs to this parse/validate boundary.
 pub fn validate_formula(source: &str) -> Result<()> {
+    validate_formula_inputs(source, &BTreeSet::new())
+}
+
+#[allow(clippy::items_after_statements)] // AST validation is bounded and shared by scoped declarations.
+pub fn validate_formula_inputs(source: &str, inputs: &BTreeSet<String>) -> Result<()> {
     let mut parser = Parser { tokens: tokenize(source)?, index: 0 };
     let expression = parser.parse(0, 0)?;
     if parser.peek() != &Token::End {
         return Err(invalid("Unexpected trailing input"));
     }
-    fn validate(expr: &Expr, depth: usize) -> Result<()> {
+    fn validate(expr: &Expr, depth: usize, inputs: &BTreeSet<String>) -> Result<()> {
         if depth > MAX_DEPTH {
             return Err(budget());
         }
@@ -84,19 +97,20 @@ pub fn validate_formula(source: &str) -> Result<()> {
             Expr::Name(name) => {
                 if !["available_width", "available_height", "count", "true", "false"]
                     .contains(&name.as_str())
+                    && !inputs.contains(name)
                 {
                     return Err(invalid(&format!("Unknown input: {name}")));
                 }
             }
-            Expr::Unary(_, value) => validate(value, depth + 1)?,
+            Expr::Unary(_, value) => validate(value, depth + 1, inputs)?,
             Expr::Binary(_, a, b) => {
-                validate(a, depth + 1)?;
-                validate(b, depth + 1)?;
+                validate(a, depth + 1, inputs)?;
+                validate(b, depth + 1, inputs)?;
             }
             Expr::If(a, b, c) => {
-                validate(a, depth + 1)?;
-                validate(b, depth + 1)?;
-                validate(c, depth + 1)?;
+                validate(a, depth + 1, inputs)?;
+                validate(b, depth + 1, inputs)?;
+                validate(c, depth + 1, inputs)?;
             }
             Expr::Call(name, args) => {
                 let arity = match name.as_str() {
@@ -110,13 +124,13 @@ pub fn validate_formula(source: &str) -> Result<()> {
                     return Err(invalid("Invalid function argument count"));
                 }
                 for arg in args {
-                    validate(arg, depth + 1)?;
+                    validate(arg, depth + 1, inputs)?;
                 }
             }
         }
         Ok(())
     }
-    validate(&expression, 0)
+    validate(&expression, 0, inputs)
 }
 
 /// Reject invalid constants before persistence; context-dependent values are checked at planning.
@@ -126,7 +140,17 @@ pub fn validate_property_formula(
     maximum: f64,
     integer: bool,
 ) -> Result<()> {
-    validate_formula(source)?;
+    validate_property_formula_inputs(source, minimum, maximum, integer, &BTreeSet::new())
+}
+
+pub fn validate_property_formula_inputs(
+    source: &str,
+    minimum: f64,
+    maximum: f64,
+    integer: bool,
+    inputs: &BTreeSet<String>,
+) -> Result<()> {
+    validate_formula_inputs(source, inputs)?;
     match evaluate(source, &BTreeMap::new()) {
         Ok(value) if value < minimum || value > maximum || (integer && value.fract() != 0.0) => {
             Err(invalid("Constant result is outside this property's bounds"))
@@ -192,6 +216,22 @@ fn tokenize(source: &str) -> Result<Vec<Token>> {
     }
     tokens.push(Token::End);
     Ok(tokens)
+}
+
+pub fn formula_dependencies(source: &str) -> Result<BTreeSet<String>> {
+    let tokens = tokenize(source)?;
+    Ok(tokens
+        .windows(2)
+        .filter_map(|pair| match &pair[0] {
+            Token::Name(name)
+                if !matches!(&pair[1], Token::Op(op) if op == "(")
+                    && !["true", "false"].contains(&name.as_str()) =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect())
 }
 
 struct Parser {

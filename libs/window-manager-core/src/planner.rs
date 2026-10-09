@@ -81,7 +81,7 @@ pub struct VisitOverride {
     pub preserve_size: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Presentation {
     pub view: Id,
     pub root: String,
@@ -100,6 +100,7 @@ pub struct Presentation {
     pub before_filter: Option<FilterMemory>,
     pub expansion: Option<crate::Expansion>,
     pub before_expansion: Option<Box<crate::ExpansionMemory>>,
+    pub group_inputs: BTreeMap<Id, BTreeMap<String, f64>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -552,6 +553,7 @@ pub fn plan(
             before_filter: None,
             expansion: None,
             before_expansion: None,
+            group_inputs: BTreeMap::new(),
         });
         if presentation.expansion.is_some() && request.expansion.is_none() {
             if let Some(memory) = presentation.before_expansion.take() {
@@ -631,6 +633,18 @@ pub fn plan(
             }
         }
         let monitor_dpi = snapshot.displays[&slot.display].dpi;
+        let parameters = if let Some(expansion) = &request.expansion {
+            crate::ancestor_parameters(
+                authored_root,
+                &expansion.node,
+                area,
+                monitor_dpi,
+                (expansion.area == crate::ExpansionArea::Group)
+                    .then_some(&presentation.group_bounds),
+            )?
+        } else {
+            BTreeMap::new()
+        };
         let mut evaluator = Evaluator {
             config,
             runtime,
@@ -642,6 +656,7 @@ pub fn plan(
             diagnostics: &mut result.diagnostics,
             reservations: Vec::new(),
             explicit_tabs: &request.selected_tabs,
+            parameters,
         };
         // Reserve immutable geometry before allocating any siblings.
         for (window_id, exception) in &evaluator.presentation.overrides {
@@ -1168,6 +1183,7 @@ struct Evaluator<'a> {
     diagnostics: &'a mut Vec<String>,
     reservations: Vec<Rect>,
     explicit_tabs: &'a BTreeMap<Id, Id>,
+    parameters: BTreeMap<String, f64>,
 }
 
 impl Evaluator<'_> {
@@ -1198,13 +1214,19 @@ impl Evaluator<'_> {
     ) -> Result<()> {
         match node {
             Node::Placement(placement) => self.place(placement, allocated, variant, preserve),
-            Node::Group(group) => self.group(group, allocated, preserve),
+            Node::Group(group) => {
+                let parameters = self.parameters.clone();
+                let result = self.group(group, allocated, preserve);
+                self.parameters = parameters;
+                result
+            }
         }
     }
 
     fn group(&mut self, group: &Group, area: Rect, preserve: bool) -> Result<()> {
         let desired = self.desired.clone();
         let presentation = self.presentation.clone();
+        let parameters = self.parameters.clone();
         let diagnostics = self.diagnostics.len();
         match self.group_layout(group, area, preserve) {
             Ok(()) => Ok(()),
@@ -1213,6 +1235,7 @@ impl Evaluator<'_> {
                 *self.presentation = presentation.clone();
                 self.diagnostics.truncate(diagnostics);
                 for strategy in &group.allowed_fallbacks {
+                    self.parameters.clone_from(&parameters);
                     let mut fallback = group.clone();
                     fallback.strategy = *strategy;
                     fallback.variants.clear();
@@ -1386,14 +1409,95 @@ impl Evaluator<'_> {
         let preserve = preserve || group.preservation == crate::GroupPreservation::Children;
         self.presentation.group_bounds.insert(group.id.clone(), area);
         let scale = f64::from(self.dpi) / 96.0;
+        let mut context = self.parameters.clone();
+        context.extend([
+            ("available_width".into(), f64::from(area.width) / scale),
+            ("available_height".into(), f64::from(area.height) / scale),
+            ("count".into(), group.children.len() as f64),
+        ]);
+        let annotate = |mut error: Error| {
+            error.objects.insert(0, group.id.clone());
+            error
+        };
+        let context = crate::resolve_parameters(&group.parameters, &context).map_err(annotate)?;
+        self.parameters = context.clone();
+        self.presentation.group_inputs.insert(group.id.clone(), context.clone());
+        let ordered = if let Some(formula) = &group.sort_formula {
+            let mut scored = Vec::new();
+            for (index, child) in group.children.iter().enumerate() {
+                let mut inputs = context.clone();
+                inputs.insert("child_index".into(), index as f64);
+                let mut leaves = Vec::new();
+                child.placements(&mut leaves);
+                let frames: Vec<_> = leaves
+                    .iter()
+                    .filter_map(|leaf| self.snapshot.windows.get(&leaf.window))
+                    .collect();
+                if !frames.is_empty() {
+                    inputs.insert(
+                        "preferred_width".into(),
+                        f64::from(
+                            frames.iter().map(|window| window.client[0]).max().unwrap_or_default(),
+                        ) / scale,
+                    );
+                    inputs.insert(
+                        "preferred_height".into(),
+                        f64::from(
+                            frames.iter().map(|window| window.client[1]).max().unwrap_or_default(),
+                        ) / scale,
+                    );
+                }
+                let value = evaluate(formula, &inputs).map_err(annotate)?;
+                if value.abs() > 1_000_000.0 {
+                    return Err(conflict(&group.id, "Sort priority exceeds bounds"));
+                }
+                scored.push((value, index));
+            }
+            scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            let mut ordered = group.clone();
+            ordered.children =
+                scored.iter().map(|(_, index)| group.children[*index].clone()).collect();
+            if !group.ratios.is_empty() {
+                ordered.ratios = scored
+                    .iter()
+                    .map(|(_, index)| group.ratios.get(*index).copied().unwrap_or(1.0))
+                    .collect();
+            }
+            for (new, old) in ordered.variants.iter_mut().zip(&group.variants) {
+                if !old.ratios.is_empty() {
+                    new.ratios = scored
+                        .iter()
+                        .map(|(_, index)| old.ratios.get(*index).copied().unwrap_or(1.0))
+                        .collect();
+                }
+            }
+            Some(ordered)
+        } else {
+            None
+        };
+        let group = ordered.as_ref().unwrap_or(group);
         let prior_variant = self.presentation.variants.get(&group.id);
-        let selected_variant = group.variants.iter().find(|variant| {
+        let mut selected_variant = None;
+        for variant in &group.variants {
             let margin = if prior_variant == Some(&variant.id) { variant.hysteresis } else { 0.0 };
-            variant.below_width.is_some_and(|width| f64::from(area.width) / scale < width + margin)
+            let dimension = variant
+                .below_width
+                .is_some_and(|width| f64::from(area.width) / scale < width + margin)
                 || variant
                     .below_height
-                    .is_some_and(|height| f64::from(area.height) / scale < height + margin)
-        });
+                    .is_some_and(|height| f64::from(area.height) / scale < height + margin);
+            let condition = variant
+                .condition
+                .as_ref()
+                .map(|expression| crate::evaluate_condition(expression, &context))
+                .transpose()
+                .map_err(annotate)?
+                .unwrap_or(false);
+            if dimension || condition {
+                selected_variant = Some(variant);
+                break;
+            }
+        }
         let variant_id = selected_variant.map_or("base", |variant| variant.id.as_str());
         let strategy = if group.strategy == Strategy::SemanticTabs {
             Strategy::SemanticTabs
@@ -1402,15 +1506,6 @@ impl Evaluator<'_> {
         };
         self.presentation.variants.insert(group.id.clone(), variant_id.into());
         let ratios = selected_variant.map_or(&group.ratios, |variant| &variant.ratios);
-        let context = BTreeMap::from([
-            ("available_width".into(), f64::from(area.width) / scale),
-            ("available_height".into(), f64::from(area.height) / scale),
-            ("count".into(), group.children.len() as f64),
-        ]);
-        let annotate = |mut error: Error| {
-            error.objects = vec![group.id.clone()];
-            error
-        };
         let gap = evaluate(&group.gap, &context).map_err(annotate)?;
         if !(0.0..=4096.0).contains(&gap) {
             return Err(conflict(&group.id, "Gap must be between 0 and 4096 logical units"));
@@ -1689,7 +1784,7 @@ impl Evaluator<'_> {
             .get(&key)
             .or_else(|| placement.preferences.get(&self.context("base")))
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_else(|| placement.default_preference.clone());
         let Some(observed) = self.snapshot.windows.get(&placement.window) else {
             self.diagnostics.push(format!("{}: missing binding", placement.id));
             return Ok(());
@@ -1702,7 +1797,8 @@ impl Evaluator<'_> {
         let scale = f64::from(self.dpi) / 96.0;
         let decoration =
             [observed.frame.width - observed.client[0], observed.frame.height - observed.client[1]];
-        let context = BTreeMap::from([
+        let mut context = self.parameters.clone();
+        context.extend([
             ("available_width".into(), f64::from(area.width - decoration[0]) / scale),
             ("available_height".into(), f64::from(area.height - decoration[1]) / scale),
             ("count".into(), 1.0),

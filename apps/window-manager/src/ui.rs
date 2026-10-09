@@ -118,6 +118,14 @@ struct Manager {
     transient_filter: Option<Query>,
     expansion_node: Id,
     expansion_slots: BTreeSet<Id>,
+    parameter_group: Id,
+    parameter_text: String,
+    simulation: Option<window_manager_core::Simulation>,
+    simulation_report: Option<window_manager_core::SimulationReport>,
+    package: Option<window_manager_core::LayoutPackage>,
+    package_path: String,
+    package_mappings: BTreeMap<String, Id>,
+    package_placeholders: BTreeSet<String>,
     monitor_epoch: Id,
     monitor_inventory: Vec<windows_window_manager::MonitorIdentity>,
     monitor_alias: Id,
@@ -189,10 +197,21 @@ impl Manager {
             .and_then(|view| view.roots.keys().next())
             .cloned()
             .unwrap_or_default();
-        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page: 0, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        #[cfg(feature = "ui-smoke")]
+        let page = std::env::var("WINDOW_MANAGER_SMOKE_PAGE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|page| *page <= 3)
+            .unwrap_or_default();
+        #[cfg(not(feature = "ui-smoke"))]
+        let page = 0;
+        let package_path =
+            path.with_file_name("layout-package.json").to_string_lossy().into_owned();
+        Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             expansion_node: String::new(),
             expansion_slots: BTreeSet::new(),
+            parameter_group: String::new(), parameter_text: String::new(), simulation: None, simulation_report: None, package: None, package_path, package_mappings: BTreeMap::new(), package_placeholders: BTreeSet::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("WINDOW_MANAGER_SCREENSHOT").map(|path| (PathBuf::from(path), std::time::Instant::now(), false)),
         }
@@ -1066,6 +1085,7 @@ impl Manager {
         self.collections_editor(ui);
         self.structural_tools(ui);
         self.expansion_tools(ui);
+        self.formula_tools(ui);
         if ui.button("배치 구조 저장").clicked() {
             self.commit(self.draft.clone());
         }
@@ -1130,6 +1150,220 @@ impl Manager {
             });
             ui.label("확장은 저장된 구조를 바꾸지 않습니다. 미리보기의 범위와 숨김 영향을 확인한 뒤 적용하세요.");
         });
+    }
+
+    #[allow(clippy::too_many_lines)] // Scoped declarations and synthetic inputs share an explicit no-native commit boundary.
+    fn formula_tools(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("수식 문맥·매개변수·합성 미리보기").show(ui, |ui| {
+            let mut nodes = Vec::new();
+            if let Some(view) = self.draft.views.get(&self.selected_view) { for (role, root) in &view.roots { collect_nodes(root, &view.id, role, &mut nodes); } }
+            ui.label(format!("편집 범위: {}", nodes.iter().find(|(address, _, _)| address.node == self.selected_group).map_or("그룹을 선택하세요", |(_, path, _)| path.as_str())));
+            let group = self.draft.views.get(&self.selected_view).and_then(|view| view.roots.values().find_map(|root| root.find(&self.selected_group))).and_then(|node| if let Node::Group(group) = node { Some(group) } else { None });
+            if let Some(group) = group {
+                if self.parameter_group != self.selected_group { self.parameter_group.clone_from(&self.selected_group); self.parameter_text = serde_json::to_string_pretty(&group.parameters).unwrap_or_default(); }
+                let mut leaves = Vec::new(); for child in &group.children { child.placements(&mut leaves); }
+                ui.label(format!("직접 자식 {}개 · 후보 {}개 · logical 단위 (96 DPI), 위치는 상위 그룹 기준", group.children.len(), leaves.len()));
+                ui.small(leaves.iter().map(|leaf| format!("{} ({})", self.draft.windows.get(&leaf.window).map_or("미연결", |window| window.alias.as_str()), leaf.id)).collect::<Vec<_>>().join(", "));
+                let active = self.preview.as_ref().and_then(|plan| plan.presentations.get(&self.selected_slot)).or_else(|| self.runtime.presentations.get(&self.selected_slot));
+                if let Some(active) = active.filter(|active| active.view == self.selected_view) {
+                    ui.label(format!("현재 문맥: {} DPI · 그룹 할당 {:?}", active.context_dpi, active.group_bounds.get(&self.selected_group)));
+                    if let Some(inputs) = active.group_inputs.get(&self.selected_group) { ui.monospace(serde_json::to_string_pretty(inputs).unwrap_or_default()); }
+                }
+                ui.label("이름 → 수식으로 매개변수를 선언합니다. 예: {\"gutter\": \"8\", \"compact_limit\": \"gutter * 100\"}");
+                ui.add(egui::TextEdit::multiline(&mut self.parameter_text).code_editor().desired_rows(4));
+                if ui.button("이 그룹의 매개변수를 초안에 반영").clicked() {
+                    let parsed = serde_json::from_str::<BTreeMap<String, String>>(&self.parameter_text);
+                    match parsed { Ok(parameters) => { let mut draft = self.draft.clone(); if let Some(group) = draft.views.get_mut(&self.selected_view).and_then(|view| view.roots.values_mut().find_map(|root| root.group_mut(&self.selected_group))) { group.parameters = parameters; } match draft.validate() { Ok(()) => { self.draft = draft; self.notice = "매개변수를 초안에 반영했습니다. 구조 저장 후 실제 배치를 미리볼 수 있습니다.".into(); }, Err(error) => self.error = Some(error.to_string()) } }, Err(error) => self.error = Some(error.to_string()) }
+                }
+            }
+            ui.separator();
+            ui.label("합성 미리보기 — 실제 창에 명령을 보내지 않습니다.");
+            if self.simulation.is_none() && let Some(target) = self.target() { self.simulation = Some(window_manager_core::Simulation { target, width: 1600, height: 900, dpi: 96, group: None, count: None, minimum: None, fixed_children: false, missing: BTreeSet::new(), display_present: true }); }
+            if let Some(input) = self.simulation.as_mut() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("물리 너비 / 높이 / DPI"); ui.add(egui::DragValue::new(&mut input.width).range(1..=65_536)); ui.add(egui::DragValue::new(&mut input.height).range(1..=65_536)); ui.add(egui::DragValue::new(&mut input.dpi).range(48..=768));
+                    if ui.button("가로 화면").clicked() { input.width = 1600; input.height = 900; }
+                    if ui.button("세로 화면").clicked() { input.width = 900; input.height = 1600; }
+                });
+                let mut count_enabled = input.count.is_some(); if ui.checkbox(&mut count_enabled, "선택 그룹의 후보 수 변경").changed() { input.count = count_enabled.then_some(4); }
+                if let Some(count) = input.count.as_mut() { ui.add(egui::DragValue::new(count).range(0..=256)); }
+                optional_pair(ui, "전체 최소 클라이언트 크기", &mut input.minimum, [640.0, 480.0]);
+                ui.checkbox(&mut input.fixed_children, "자식 크기 고정"); ui.checkbox(&mut input.display_present, "디스플레이 있음");
+                if let Some(window) = &self.selected_window { let mut missing = input.missing.contains(window); if ui.checkbox(&mut missing, "선택한 창의 바인딩 없음").changed() { if missing { input.missing.insert(window.clone()); } else { input.missing.remove(window); } } }
+            }
+            if ui.button("초안을 합성 평가").clicked() && let Some(target) = self.target() && let Some(input) = self.simulation.as_mut() {
+                input.target = target; input.group = Some(self.selected_group.clone());
+                match window_manager_core::simulate(&self.draft, input) { Ok(report) => self.simulation_report = Some(report), Err(error) => { self.simulation_report = None; self.error = Some(error.to_string()); } }
+            }
+            if let Some(report) = &self.simulation_report {
+                draw_rectangles(ui, &[report.area], report.desired.values(), &self.draft);
+                if let Some(error) = &report.error { ui.colored_label(Color32::LIGHT_RED, error.to_string()); }
+                ui.label(format!("이동 {} · 크기 변경 {} · 숨김 {} · 그대로 {}", report.impact.moved, report.impact.resized, report.impact.hidden, report.impact.unchanged));
+                ui.monospace(serde_json::to_string_pretty(&report.group_inputs).unwrap_or_default());
+                for diagnostic in &report.diagnostics { ui.label(diagnostic); }
+            }
+        });
+    }
+
+    #[allow(clippy::too_many_lines)] // File import, explicit mapping, and independent installation remain distinct user actions.
+    fn library(&mut self, ui: &mut egui::Ui) {
+        ui.heading("레이아웃 라이브러리");
+        ui.label("내보내기는 창 핸들·제목·태그·화면 ID·개인 크기 문맥을 제외합니다. 가져오기는 독립 복사이며 창을 이동하지 않습니다.");
+        ui.horizontal(|ui| {
+            ui.label("패키지 JSON 경로");
+            ui.text_edit_singleline(&mut self.package_path);
+        });
+        ui.horizontal(|ui| {
+            if ui.button("현재 배치의 내보내기 준비").clicked()
+                && let Some(view) = self.config.views.get(&self.selected_view)
+            {
+                self.package = Some(window_manager_core::LayoutPackage::from_view(view));
+                self.package_mappings.clear();
+                self.package_placeholders.clear();
+            }
+            if ui.button("파일 읽기").clicked() {
+                self.package = None;
+                self.package_mappings.clear();
+                self.package_placeholders.clear();
+                let loaded = (|| -> anyhow::Result<window_manager_core::LayoutPackage> {
+                    let path = std::path::Path::new(&self.package_path);
+                    anyhow::ensure!(
+                        std::fs::metadata(path)?.len()
+                            <= window_manager_core::MAX_CONFIGURATION_BYTES,
+                        "패키지 크기 한도를 초과했습니다."
+                    );
+                    let package: window_manager_core::LayoutPackage =
+                        serde_json::from_reader(std::fs::File::open(path)?)?;
+                    package.validate()?;
+                    Ok(package)
+                })();
+                match loaded {
+                    Ok(package) => self.package = Some(package),
+                    Err(error) => self.error = Some(error.to_string()),
+                }
+            }
+        });
+        if let Some(package) = self.package.as_mut() {
+            ui.horizontal(|ui| {
+                ui.label("패키지 이름");
+                ui.text_edit_singleline(&mut package.name);
+            });
+            ui.small(format!(
+                "ID {} · schema {} · expression {} · 전략 {:?} · 의존성 {:?}",
+                package.id,
+                package.version,
+                package.language_version,
+                package.supported_strategies,
+                package.dependencies
+            ));
+            for (key, expression) in &mut package.required_parameters {
+                ui.horizontal(|ui| {
+                    ui.label(key);
+                    if ui.text_edit_singleline(expression).changed()
+                        && let Some((group_id, parameter)) = key.rsplit_once(':')
+                    {
+                        for root in package.roots.values_mut() {
+                            if let Some(group) = root.group_mut(group_id) {
+                                group.parameters.insert(parameter.into(), expression.clone());
+                            }
+                        }
+                    }
+                });
+            }
+            for role in &package.required_roles {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!("역할: {role}"));
+                    let mapping = self.package_mappings.entry(role.clone()).or_default();
+                    egui::ComboBox::from_id_salt(("package-role", role))
+                        .selected_text(
+                            self.config
+                                .windows
+                                .get(mapping)
+                                .map_or("명시적으로 창 선택", |window| {
+                                    window.alias.as_str()
+                                }),
+                        )
+                        .show_ui(ui, |ui| {
+                            for window in self.config.windows.values() {
+                                ui.selectable_value(mapping, window.id.clone(), &window.alias);
+                            }
+                        });
+                    let mut placeholder = self.package_placeholders.contains(role);
+                    if ui.checkbox(&mut placeholder, "미연결 자리표시자로 설치").changed()
+                    {
+                        if placeholder {
+                            self.package_placeholders.insert(role.clone());
+                        } else {
+                            self.package_placeholders.remove(role);
+                        }
+                    }
+                });
+            }
+            if ui.button("검증된 패키지를 파일에 저장").clicked() {
+                let validation = package.validate();
+                match validation {
+                    Ok(()) => match serde_json::to_vec_pretty(package)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|bytes| {
+                            anyhow::ensure!(
+                                bytes.len() as u64 <= window_manager_core::MAX_CONFIGURATION_BYTES,
+                                "패키지 크기 한도를 초과했습니다."
+                            );
+                            window_manager_core::atomic_write(
+                                std::path::Path::new(&self.package_path),
+                                &bytes,
+                            )
+                            .map_err(anyhow::Error::from)
+                        }) {
+                        Ok(()) => {
+                            self.notice =
+                                "패키지를 저장했습니다. 실제 창은 변경되지 않았습니다.".into();
+                        }
+                        Err(error) => self.error = Some(error.to_string()),
+                    },
+                    Err(error) => self.error = Some(error.to_string()),
+                }
+            }
+            let package = package.clone();
+            if ui.button("역할 매핑을 검증하고 현재 작업공간에 독립 복사 설치").clicked()
+            {
+                let mut draft = self.config.clone();
+                let mut mappings = self.package_mappings.clone();
+                mappings.retain(|_, window| !window.is_empty());
+                for role in &self.package_placeholders {
+                    let id = new_id("unbound-window");
+                    draft.windows.insert(
+                        id.clone(),
+                        WindowRef {
+                            id: id.clone(),
+                            alias: format!("미연결 · {role}"),
+                            tags: Vec::new(),
+                            application_hint: None,
+                            allow_hide: false,
+                            protection: Protection::default(),
+                            output_protection: window_manager_core::OutputProtection::None,
+                            capabilities: window_manager_core::CapabilityProfile::default(),
+                        },
+                    );
+                    mappings.insert(role.clone(), id);
+                }
+                if let Some(workspace) =
+                    self.config.views.get(&self.selected_view).map(|view| view.workspace.clone())
+                {
+                    match package.install(&mut draft, &workspace, &mappings) {
+                        Ok(view) => {
+                            if self.commit(draft) {
+                                self.select_view(view);
+                                self.notice =
+                                    "독립 복사를 설치했습니다. 영역 매핑 후 미리보기로 적용하세요."
+                                        .into();
+                            }
+                        }
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines)] // Source selection and addressed draft operations share one inspectable editor panel.
@@ -1557,7 +1791,8 @@ impl eframe::App for Manager {
             .show(ctx, |ui| self.sidebar(ui));
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
-                for (index, label) in ["창 목록", "배치 / 그룹", "화면 / 영역"].iter().enumerate()
+                for (index, label) in
+                    ["창 목록", "배치 / 그룹", "화면 / 영역", "라이브러리"].iter().enumerate()
                 {
                     ui.selectable_value(&mut self.page, index, *label);
                 }
@@ -1567,6 +1802,7 @@ impl eframe::App for Manager {
                 match self.page {
                     1 => self.editor(ui),
                     2 => self.slots(ui),
+                    3 => self.library(ui),
                     _ => self.inventory(ui),
                 }
                 ui.separator();
@@ -1798,6 +2034,11 @@ fn tree_editor(
                             };
                         }
                     }
+                    optional_formula(
+                        ui,
+                        "자식 정렬 우선순위 (작은 값 먼저)",
+                        &mut group.sort_formula,
+                    );
                     if group.strategy == Strategy::Grid {
                         ui.horizontal(|ui| {
                             ui.label("열 수식");
@@ -1809,6 +2050,7 @@ fn tree_editor(
                     {
                         group.variants.push(Variant {
                             id: "compact".into(),
+                            condition: None,
                             below_width: Some(720.0),
                             below_height: None,
                             hysteresis: 24.0,
@@ -1822,6 +2064,16 @@ fn tree_editor(
                             ui.label(format!("반응형 문맥: {}", variant.id));
                             optional_number(ui, "너비 미만", &mut variant.below_width, 720.0);
                             optional_number(ui, "높이 미만", &mut variant.below_height, 500.0);
+                            ui.horizontal(|ui| {
+                                let mut enabled = variant.condition.is_some();
+                                if ui.checkbox(&mut enabled, "조건 수식").changed() {
+                                    variant.condition =
+                                        enabled.then(|| "available_width < 720".into());
+                                }
+                                if let Some(condition) = variant.condition.as_mut() {
+                                    ui.text_edit_singleline(condition);
+                                }
+                            });
                             ui.horizontal(|ui| {
                                 ui.label("복귀 여유");
                                 ui.add(
@@ -1933,15 +2185,25 @@ fn tree_editor(
 }
 #[allow(clippy::cast_precision_loss)] // The miniature preview is approximate; planning uses exact integer pixels.
 fn draw_preview(ui: &mut egui::Ui, plan: &Plan, config: &Configuration, snapshot: &Snapshot) {
-    let (response, painter) = ui
-        .allocate_painter(egui::vec2(ui.available_width().min(760.0), 180.0), egui::Sense::hover());
-    let rect = response.rect;
-    painter.rect_filled(rect, 6.0, Color32::from_rgb(12, 16, 23));
     let bounds: Vec<_> = plan
         .scope
         .iter()
         .filter_map(|id| config.slots.get(id).and_then(|slot| slot_bounds(slot, snapshot).ok()))
         .collect();
+    draw_rectangles(ui, &bounds, plan.desired.values(), config);
+}
+
+#[allow(clippy::cast_precision_loss)] // Geometry is an approximate UI miniature; the report retains exact pixels.
+fn draw_rectangles<'a>(
+    ui: &mut egui::Ui,
+    bounds: &[Rect],
+    desired: impl Iterator<Item = &'a Desired>,
+    config: &Configuration,
+) {
+    let (response, painter) = ui
+        .allocate_painter(egui::vec2(ui.available_width().min(760.0), 180.0), egui::Sense::hover());
+    let rect = response.rect;
+    painter.rect_filled(rect, 6.0, Color32::from_rgb(12, 16, 23));
     if bounds.is_empty() {
         return;
     }
@@ -1951,7 +2213,7 @@ fn draw_preview(ui: &mut egui::Ui, plan: &Plan, config: &Configuration, snapshot
     let max_y = bounds.iter().map(|rect| rect.y + rect.height).max().unwrap_or(1);
     let scale = ((rect.width() - 20.0) / (max_x - min_x).max(1) as f32)
         .min((rect.height() - 20.0) / (max_y - min_y).max(1) as f32);
-    for desired in plan.desired.values() {
+    for desired in desired {
         let frame = desired.frame;
         let min = rect.min
             + egui::vec2(

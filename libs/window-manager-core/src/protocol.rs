@@ -115,6 +115,7 @@ pub struct PublicPresentation {
     pub filter: Option<crate::Query>,
     pub expansion: Option<crate::Expansion>,
     pub area: crate::Rect,
+    pub group_inputs: BTreeMap<Id, BTreeMap<String, f64>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -189,6 +190,7 @@ impl PublicSnapshot {
                             filter: presentation.filter.clone(),
                             expansion: presentation.expansion.clone(),
                             area: presentation.context_area,
+                            group_inputs: presentation.group_inputs.clone(),
                         },
                     )
                 })
