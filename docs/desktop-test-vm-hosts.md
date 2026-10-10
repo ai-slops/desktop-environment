@@ -139,8 +139,10 @@ creation and startup succeeded on 2026-10-10. The owned VM reports **Running**,
 was opened for Windows installation. Windows 11 Pro build 26200 was subsequently
 installed; PowerShell Direct verified the guest model, 32 GiB RAM, 12 logical
 processors and internet access. Guest C++ Build Tools, mise 2026.9.18 and
-Rust/Cargo 1.99.0 installation completed; Desktop Control regression compilation
-is in progress. Audio fixture setup and live acceptance remain pending. Linux native libvirt definition, boot
+Rust/Cargo 1.99.0 installation completed. The guest passed 7 audio-router and 9
+preset tests with zero failures; Desktop Control GUI/tool compilation is in
+progress, followed by the queued full workspace tests. Audio fixture setup and
+live acceptance remain pending. Linux native libvirt definition, boot
 and live guest audio checks require a Linux host and remain unverified.
 
 ## Keep one scoped Hyper-V management session

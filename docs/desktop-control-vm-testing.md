@@ -67,9 +67,14 @@ indefinitely after a default change. The fix watches render/eConsole changes usi
 old streams on the routing thread, including during render-buffer waits. Epochs
 are sampled before device selection so changes during reconnection are retained.
 
-Static checks of the fix and regression test code pass. Guest regression
-compilation is in progress; completed test results and live VM acceptance remain
-**pending**. The Hyper-V test VM was created through
+Static checks of the fix and regression test code pass. On 2026-10-10 the Windows
+11 Pro guest passed all **7 windows-audio-router tests** (including default-change
+notifications, removal/reconnection and fixed-selector regressions) and all
+**9 desktop-presets tests**, with zero failures. The tested source snapshot is
+commit `77b6fc3`. Desktop Control GUI/tool compilation and the full workspace
+test run remain in progress. These synthetic callback tests do not certify live
+A/B/C audio routing; that acceptance remains **pending**.
+The Hyper-V test VM was created through
 UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console was
 opened for Windows installation. Windows 11 Pro build 26200 and the C++/mise/Rust
 toolchain are installed; audio fixture validation remains.
