@@ -232,9 +232,11 @@ fn fractional_scale_rounds_logical_preferences_and_requires_exact_settlement()
     ] {
         let (mut config, mut snapshot, target) = fixture();
         let context = context_key(&config.slots["work"], "base");
+        let initial =
+            plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
         config.save_properties(
             &target.view,
-            "preview",
+            &initial.desired["preview"].placement,
             &context,
             Some([11.0, 13.0]),
             Some([801.0, 501.0]),
@@ -349,7 +351,7 @@ fn reconnected_monitor_uses_fresh_scale_and_work_area_with_original_logical_pref
         plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
     config.save_properties(
         &target.view,
-        "preview",
+        &transition.desired["preview"].placement,
         &transition.desired["preview"].context,
         None,
         Some([440.0, 260.0]),
@@ -368,7 +370,14 @@ fn reconnected_monitor_uses_fresh_scale_and_work_area_with_original_logical_pref
     assert_eq!(desired.client_target, [Some(1200), Some(750)]);
     assert_eq!(desired.frame, Rect { x: -2560, y: 80, width: 1230, height: 810 });
     assert_eq!(desired.context, context_key(&config.slots["work"], "base"));
+    restored.commit(&mut runtime);
+    let mut current = settled_snapshot(&restored, &current);
+    let observed = current.windows.get_mut("preview").ok_or("fixture window missing")?;
+    observed.dpi = 144;
+    observed.client = [1200, 750];
+    observed.display = "monitor".into();
     current.displays.remove("monitor");
+    current.topology_revision += 1;
     let fallback_again = plan(&config, &runtime, &current, &Request::open(&config, target))?;
     assert_eq!(fallback_again.desired["preview"].client_target, [Some(440), Some(260)]);
     Ok(())
