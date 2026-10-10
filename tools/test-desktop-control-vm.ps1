@@ -95,7 +95,7 @@ try {
     Invoke-TestTool (Join-Path $binaryDirectory 'audio-output-router.exe') @('list-audio-devices')
     Write-Output "Guest binaries: $binaryDirectory"
     if (-not $DesktopControlOnly) {
-        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '-j', "$BuildJobs")
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
     }
     Write-Output 'Automated regressions passed. Live A/B/C endpoint switching still requires the VM-only acceptance procedure in docs/desktop-control-vm-testing.md.'
     $result.ok = $true

@@ -24,6 +24,9 @@ mod tests {
         CapabilityProfile, DisplaySlot, Node, OutputProtection, Placement, Preference, Protection,
         Target, WindowRef, context_key,
     };
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WINDOW_EX_STYLE,
         WS_OVERLAPPEDWINDOW,
@@ -48,6 +51,11 @@ mod tests {
         let (stop, receive) = mpsc::channel();
         let (ready, candidate) = mpsc::channel();
         let thread = std::thread::spawn(move || {
+            // SAFETY: only this disposable fixture thread changes DPI awareness.
+            // Match the native adapter so a scaled guest desktop does not turn
+            // a same-monitor stall test into an unsupported cross-DPI transfer.
+            let previous_dpi =
+                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
             // SAFETY: disposable built-in window owned and destroyed on this test thread.
             let created = unsafe {
                 CreateWindowExW(
@@ -77,6 +85,10 @@ mod tests {
                 // Deliberately do not pump messages: asynchronous native placement cannot settle.
                 let _ = receive.recv();
                 let _ = unsafe { DestroyWindow(window) };
+            }
+            if !previous_dpi.0.is_null() {
+                // SAFETY: restore the context returned on this same fixture thread.
+                unsafe { SetThreadDpiAwarenessContext(previous_dpi) };
             }
         });
         let fixture = StalledWindow { stop, thread: Some(thread) };
