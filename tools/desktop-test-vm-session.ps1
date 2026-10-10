@@ -96,7 +96,7 @@ try {
                                     if ($action -eq 'Test') {
                                         Invoke-GuestTool $mise @('exec', '--', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $source 'tools/test-desktop-control-vm.ps1'))
                                     } else {
-                                        Invoke-GuestTool $mise @('exec', '--', 'cargo', 'test', '--workspace', '--all-targets', '--all-features', '-j', '1')
+                                        Invoke-GuestTool $mise @('exec', '--', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $source 'tools/test-desktop-control-vm.ps1'))
                                     }
                                 } finally { Pop-Location }
                             }
