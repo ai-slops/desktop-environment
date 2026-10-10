@@ -1,6 +1,7 @@
 param(
     [string] $Workspace = (Join-Path $env:USERPROFILE 'DesktopEnvironment/source'),
-    [switch] $RunTests
+    [switch] $RunTests,
+    [switch] $AudioFixtures = $true
 )
 $ErrorActionPreference = 'Stop'
 
@@ -74,6 +75,17 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'mise tool installation failed.' }
     & $mise exec -- cargo --version
     if ($LASTEXITCODE -ne 0) { throw 'Guest cargo verification failed.' }
+    if ($AudioFixtures) {
+        $fixtureScript = Join-Path $Workspace 'tools/setup-desktop-test-audio.ps1'
+        $fixtureOutput = @(& $fixtureScript -Install)
+        $fixtureOutput | Where-Object { $_ -isnot [bool] } | Write-Output
+        if ($fixtureOutput | Where-Object { $_ -is [bool] -and $_ }) {
+            Write-Output 'Restarting ONLY the test guest in 15 seconds to activate its audio fixtures. Rerun setup/tests after guest boot.'
+            & "$env:WINDIR\System32\shutdown.exe" /r /t 15
+            if ($LASTEXITCODE -ne 0) { throw 'Guest restart request failed.' }
+            return
+        }
+    }
     if ($RunTests) {
         & $mise exec -- powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Workspace 'tools/test-desktop-control-vm.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'Guest regression checks failed.' }

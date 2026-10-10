@@ -103,8 +103,10 @@ shared host directory is needed.
 
 Inside Windows, the VM-guarded bootstrap installs a checksum-pinned official mise
 binary, Microsoft-signed C++ Build Tools with the recommended Windows SDK, then
-the workspace Rust/just tools via mise. It needs an Administrator PowerShell in
-the **guest** and never automatically restarts either computer:
+the workspace Rust/just tools via mise. The audio-test profile also prepares
+official publisher-signed VB-CABLE/Voicemeeter guest fixtures. It needs an Administrator PowerShell in
+the **guest**. A first audio fixture installation restarts only the guest after
+15 seconds; the host is never restarted. Use `-AudioFixtures:$false` for toolchain-only setup:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup-desktop-test-guest.ps1 -Workspace C:\path\to\extracted-source -RunTests
@@ -173,6 +175,14 @@ Native program stderr is converted to log text and failure is determined by its
 exit code. This avoids treating Cargo progress/mise update notices as remoting
 failures. The corrected forwarding was checked with actual Windows PowerShell
 subprocesses: stderr with exit 0 succeeds, while stderr with exit 7 fails.
+
+PowerShell Direct uses session 0, which lacks an interactive monitor inventory.
+The guest test runner detects this and creates a temporary Task Scheduler action
+using the current VM account's existing interactive token with `Limited` rights.
+Log into the VM desktop first. No password is saved in the scheduled task; the
+task is removed on every exit. Tests have a 45-minute ceiling and all native
+windows belong to the guest. `vm-test` now includes the full workspace tests;
+`-DesktopControlOnly` restricts it to the original audio/preset/GUI build checks.
 
 From a normal host terminal, queue operations with `mise run vm-session-status`,
 `vm-sync-source`, `vm-guest-setup`, `vm-guest-test`, `vm-guest-test-all` or

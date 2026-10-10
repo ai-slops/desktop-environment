@@ -71,8 +71,12 @@ Static checks of the fix and regression test code pass. On 2026-10-10 the Window
 11 Pro guest passed all **7 windows-audio-router tests** (including default-change
 notifications, removal/reconnection and fixed-selector regressions) and all
 **9 desktop-presets tests**, with zero failures. The tested source snapshot is
-commit `77b6fc3`. Desktop Control GUI/tool compilation and the full workspace
-test run remain in progress. These synthetic callback tests do not certify live
+commit `77b6fc3`. Desktop Control GUI/tool compilation completed. A subsequent
+interactive guest run at `f3e8efd` passed all 19 workspace test suites: **133
+passed, zero failed, 5 ignored**. Four window-manager service tests initially
+failed in PowerShell Direct's session 0 because it has no interactive monitor
+inventory; they all passed when the runner used the logged-in guest desktop.
+These synthetic callback tests do not certify live
 A/B/C audio routing; that acceptance remains **pending**.
 The Hyper-V test VM was created through
 UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console was
