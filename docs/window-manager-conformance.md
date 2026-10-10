@@ -88,7 +88,7 @@ The linked function identifies relevant evidence, not the whole acceptance scena
 | VG-04 interactions | Discoverable commands, keyboard counterparts for structure edits, exact previews, inventory/recovery, ancestor paths; static Korean GUI inspection | Full first-run, keyboard-only, drag/drop and accessibility walk-through |
 | VG-05 formulas/packages | Typed bounded formulas, acyclic parameters, sort/variants, read-only simulation, redaction/mapping/independent import | Interactive authoring/package review; P2 links excluded |
 | VG-06 authority | Shared planner/revalidation, strict local pipe capabilities, opaque single-use tokens, bounded replay, no executable layout dependency | Unsupported origin/privilege scenario matrix; remote transport excluded |
-| VG-07 native execution | One final mutation per resource, same-thread batch, async foreign-thread submissions, separate activation, bounded settlement and domain commit | Actual foreign-app operation counts and native batch failure injection |
+| VG-07 native execution | One final mutation per resource, same-thread batch, async foreign-thread submissions, separate activation, bounded settlement and domain commit | Larger foreign-app mixes; owned native Defer failure verified below |
 | VG-08 lifecycle | Manual binding; hide/show-state compatibility opt-ins; readiness unknown; own-window graceful reveal and independent crash recovery | Real minimized/modal/elevated/app-version profiles and exact HWND reuse |
 | VG-09 measurements | [Reference fixtures and timing distributions](window-manager-performance.md); redacted bounded last-result log; no thumbnail/capture cache | Idle CPU/memory distributions, game/broadcast load, foreign-app/mixed-DPI timings |
 | VG-10 API lifecycle | Strict fields/keys/scope/revision, replay collision and missed-event resync, malformed configuration/session tests | Exhaustive scenario exercise of every origin/error/capability; provider integrations excluded |
@@ -109,3 +109,7 @@ To close application gates, record application/version, privilege, monitor ident
 ## Native shortcut lifecycle follow-up
 
 The owned `Win+Ctrl+F14..F22` collision fixture passes without injecting input or replacing existing registrations. It verifies one error for duplicate requested IDs, rejects out-of-range IDs, preserves the original registration after a collision, and releases successfully registered keys on stream drop across three restarts. Observation hooks and their message-loop thread now share the same explicit shutdown lifetime; channel saturation cannot block shutdown. This exercises the production registration path with test virtual keys. Actual digit shortcuts under Korean IME/layouts remain an interactive gate.
+
+## Batch failure follow-up
+
+`native_defer_failure_leaves_prior_window_unchanged_without_end` creates two owned STATIC windows, queues the first move, destroys the second after lifetime validation, and receives a real Win32 Defer failure. End is not called; the first frame remains unchanged and the destroyed lifetime is rejected. Separate injected Begin/Defer/End return-path tests verify immediate stop, retention of each returned handle, one End at most, and no individual replay. An End failure remains an uncertain native outcome; these tests do not promise atomic rollback after End.

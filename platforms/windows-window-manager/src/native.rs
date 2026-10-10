@@ -622,10 +622,56 @@ pub fn submit_many(mutations: &[Mutation]) -> crate::SubmissionReport {
     report
 }
 
+fn defer_mutation(
+    batch: windows::Win32::UI::WindowsAndMessaging::HDWP,
+    mutation: &Mutation,
+) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HDWP> {
+    use windows::Win32::UI::WindowsAndMessaging::DeferWindowPos;
+    let mut flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER;
+    let frame = mutation.geometry.unwrap_or_default();
+    if mutation.move_only {
+        flags |= SWP_NOSIZE;
+    }
+    if mutation.geometry.is_none() {
+        flags |= SWP_NOMOVE | SWP_NOSIZE;
+    }
+    if let Some(visible) = mutation.visible {
+        flags |= if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+    }
+    // SAFETY: caller validates lifetime and supplies the most recently returned batch handle.
+    unsafe {
+        DeferWindowPos(
+            batch,
+            handle(mutation.binding.handle),
+            None,
+            frame.x,
+            frame.y,
+            frame.width,
+            frame.height,
+            flags,
+        )
+    }
+}
+
 fn submit_batch(mutations: &[&Mutation]) -> Result<()> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        BeginDeferWindowPos, DeferWindowPos, EndDeferWindowPos,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{BeginDeferWindowPos, EndDeferWindowPos};
+    submit_batch_using(
+        mutations,
+        |count| unsafe { BeginDeferWindowPos(count) },
+        defer_mutation,
+        |batch| unsafe { EndDeferWindowPos(batch) },
+    )
+}
+
+fn submit_batch_using(
+    mutations: &[&Mutation],
+    begin: impl FnOnce(i32) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HDWP>,
+    mut defer: impl FnMut(
+        windows::Win32::UI::WindowsAndMessaging::HDWP,
+        &Mutation,
+    ) -> windows::core::Result<windows::Win32::UI::WindowsAndMessaging::HDWP>,
+    end: impl FnOnce(windows::Win32::UI::WindowsAndMessaging::HDWP) -> windows::core::Result<()>,
+) -> Result<()> {
     if mutations.len() > 256 {
         return Err(Error::new(
             ErrorCode::UnsupportedOperation,
@@ -637,39 +683,15 @@ fn submit_batch(mutations: &[&Mutation]) -> Result<()> {
         validate_binding(&mutation.binding)?;
     }
     let _dpi = DpiGuard::new();
-    // SAFETY: bounded same-parent windows owned by the calling thread, validated above.
-    let mut batch = unsafe { BeginDeferWindowPos(mutations.len() as i32) }
+    let mut batch = begin(mutations.len() as i32)
         .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "batch", error))?;
     for mutation in mutations {
-        let mut flags = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER;
-        let frame = mutation.geometry.unwrap_or_default();
-        if mutation.move_only {
-            flags |= SWP_NOSIZE;
-        }
-        if mutation.geometry.is_none() {
-            flags |= SWP_NOMOVE | SWP_NOSIZE;
-        }
-        if let Some(visible) = mutation.visible {
-            flags |= if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
-        }
-        // SAFETY: always retain the returned HDWP. `?` abandons the batch on failure without End/replay.
-        batch = unsafe {
-            DeferWindowPos(
-                batch,
-                handle(mutation.binding.handle),
-                None,
-                frame.x,
-                frame.y,
-                frame.width,
-                frame.height,
-                flags,
-            )
-        }
-        .map_err(|error| native_error(ErrorCode::UnsupportedOperation, &mutation.window, error))?;
+        // Retain each returned handle. A failure abandons the batch without End or individual replay.
+        batch = defer(batch, mutation).map_err(|error| {
+            native_error(ErrorCode::UnsupportedOperation, &mutation.window, error)
+        })?;
     }
-    // SAFETY: every Defer succeeded; no foreign thread can stall this same-thread commit.
-    unsafe { EndDeferWindowPos(batch) }
-        .map_err(|error| native_error(ErrorCode::UnsupportedOperation, "batch", error))
+    end(batch).map_err(|error| native_error(ErrorCode::UnsupportedOperation, "batch", error))
 }
 
 /// Independent recovery restores visibility only, never historical geometry or user-minimized windows.
@@ -1136,6 +1158,104 @@ mod tests {
             assert_eq!(after.frame, mutations[index].geometry.unwrap_or_default());
             assert_eq!(after.client, before.client);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn batch_failure_paths_do_not_end_abandoned_batches_or_replay()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use windows::Win32::UI::WindowsAndMessaging::HDWP;
+        let window = Owned::new()?;
+        let before = bind(&window.candidate(), false)?;
+        let mutation = Mutation {
+            window: "fixture".into(),
+            binding: before.binding.clone(),
+            geometry: Some(Rect { x: before.frame.x + 20, ..before.frame }),
+            move_only: true,
+            visible: None,
+            focus: false,
+            show_state: None,
+        };
+        let failure =
+            || windows::core::Error::from_hresult(windows::core::HRESULT(0x8000_4005_u32 as i32));
+        let tokens = [0_u8; 4];
+        let token = |index: usize| HDWP((&raw const tokens[index]).cast_mut().cast());
+        for phase in 0..3 {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let result = submit_batch_using(
+                &[&mutation, &mutation],
+                |_| {
+                    calls.borrow_mut().push("begin");
+                    if phase == 0 { Err(failure()) } else { Ok(token(1)) }
+                },
+                |batch, _| {
+                    let mut calls = calls.borrow_mut();
+                    calls.push("defer");
+                    if phase == 1 {
+                        Err(failure())
+                    } else {
+                        assert_eq!(batch, token(calls.len() - 1));
+                        Ok(token(calls.len()))
+                    }
+                },
+                |batch| {
+                    assert_eq!(batch, token(3));
+                    calls.borrow_mut().push("end");
+                    Err(failure())
+                },
+            );
+            assert!(result.is_err());
+            let expected: &[&str] = match phase {
+                0 => &["begin"],
+                1 => &["begin", "defer"],
+                _ => &["begin", "defer", "defer", "end"],
+            };
+            assert_eq!(&*calls.borrow(), expected);
+            assert_eq!(observe(&before.binding, false)?.frame, before.frame);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_defer_failure_leaves_prior_window_unchanged_without_end()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use windows::Win32::UI::WindowsAndMessaging::{BeginDeferWindowPos, EndDeferWindowPos};
+        let first = Owned::new()?;
+        let second = Owned::new()?;
+        let before = [bind(&first.candidate(), false)?, bind(&second.candidate(), false)?];
+        let mutations = before
+            .iter()
+            .enumerate()
+            .map(|(index, prior)| Mutation {
+                window: format!("fixture-{index}"),
+                binding: prior.binding.clone(),
+                geometry: Some(Rect { x: prior.frame.x + 20, ..prior.frame }),
+                move_only: true,
+                visible: None,
+                focus: false,
+                show_state: None,
+            })
+            .collect::<Vec<_>>();
+        let ended = std::cell::Cell::new(false);
+        let mut second = Some(second);
+        let result = submit_batch_using(
+            &[&mutations[0], &mutations[1]],
+            |count| unsafe { BeginDeferWindowPos(count) },
+            |batch, mutation| {
+                if mutation.window == "fixture-1" {
+                    drop(second.take());
+                }
+                defer_mutation(batch, mutation)
+            },
+            |batch| {
+                ended.set(true);
+                unsafe { EndDeferWindowPos(batch) }
+            },
+        );
+        assert!(result.is_err());
+        assert!(!ended.get());
+        assert_eq!(observe(&before[0].binding, false)?.frame, before[0].frame);
+        assert!(observe(&before[1].binding, false).is_err());
         Ok(())
     }
 
