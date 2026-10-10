@@ -45,3 +45,44 @@ run = "cargo test --workspace --all-targets --all-features"
 [tasks.verify]
 description = "Run the standard local verification sequence"
 depends = ["fmt-check", "lint", "check", "test"]
+
+# Host-side VM tasks never invoke the workspace Rust tests.
+[tasks.vm-install]
+description = "Install Linux VM packages, or inspect the existing Windows Hyper-V setup"
+run = "bash tools/install-vm-linux.sh"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Plan"
+
+[tasks.vm-plan]
+description = "Preview a 32 GiB / 12 vCPU Windows test VM without changing host state"
+run = "python3 tools/desktop_test_vm_linux.py plan"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Plan"
+
+[tasks.vm-setup]
+description = "Define the owned test VM, leaving it off (Windows: Administrator shell required)"
+run = "python3 tools/desktop_test_vm_linux.py setup"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Setup"
+
+[tasks.vm-start]
+description = "Start only this workspace's owned test VM"
+run = "python3 tools/desktop_test_vm_linux.py start"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Start"
+
+[tasks.vm-status]
+description = "Read this workspace's owned test VM status"
+run = "python3 tools/desktop_test_vm_linux.py status"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Status"
+
+[tasks.vm-stop]
+description = "Request a graceful shutdown of the owned test VM"
+run = "python3 tools/desktop_test_vm_linux.py stop"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Stop"
+
+[tasks.vm-console]
+description = "Open the interactive test VM console"
+run = "python3 tools/desktop_test_vm_linux.py console"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm.ps1 -Action Console"
+
+[tasks.vm-test]
+description = "Run Desktop Control audio regression checks INSIDE the Windows guest only"
+run = "echo 'Run mise run vm-test inside the Windows guest.' && exit 1"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-desktop-control-vm.ps1"

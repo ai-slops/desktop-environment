@@ -9,6 +9,10 @@ modest resource limits or a separate test machine. Do not enable virtualization
 features, reboot the host, attach its production audio devices, or change its OBS
 configuration as part of this test.
 
+For host setup on this Windows PC or a Linux host, see
+[the VM setup guide](desktop-test-vm-hosts.md). Development defaults are 32 GiB RAM
+and 12 vCPUs. Both hosts run these acceptance checks inside a Windows guest.
+
 ## Guest setup and automated checks
 
 Use an interactive Windows guest with Rust 1.88 or newer and the MSVC linker/Windows
@@ -21,7 +25,7 @@ A guest exposing only one remote audio endpoint cannot validate this scenario.
 From the guest, run:
 
 ```powershell
-powershell -File tools/test-desktop-control-vm.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-desktop-control-vm.ps1
 ```
 
 The script checks the VM model before running tests, builds into guest-local

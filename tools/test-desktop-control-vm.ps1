@@ -5,7 +5,8 @@ $ErrorActionPreference = 'Stop'
 
 # Fail closed before running any native tests or opening any audio endpoints.
 $computer = Get-CimInstance Win32_ComputerSystem
-$isGuest = $computer.Model -match 'Virtual Machine|VirtualBox|VMware|KVM|QEMU|HVM domU|Parallels'
+$isGuest = ($computer.Model -match 'Virtual Machine|VirtualBox|VMware|KVM|QEMU|HVM domU|Parallels') -or
+    ($computer.Manufacturer -match '^QEMU$|^VMware|^innotek GmbH$')
 if (-not $isGuest) {
     throw 'Run this script inside a Windows VM. Host audio/display tests are disabled.'
 }
