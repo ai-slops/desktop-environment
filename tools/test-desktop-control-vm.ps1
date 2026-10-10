@@ -26,6 +26,35 @@ function Invoke-TestTool {
     } finally { $ErrorActionPreference = $previousPreference }
     if ($toolExitCode -ne 0) { throw "Guest test tool exited with $toolExitCode" }
 }
+function Invoke-SignalAcceptance {
+    $cargo = Get-Command cargo -ErrorAction Stop
+    $guestTarget = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target'
+    $binaryDirectory = Join-Path $guestTarget 'debug'
+    Push-Location $workspace
+    try {
+    # Real, recorded signal acceptance uses only the dedicated guest fixtures.
+    $engine = $null
+    $probeVariables = @('DESKTOP_AUDIO_VM_PROBE', 'DESKTOP_AUDIO_PROBE_OUTPUT', 'DESKTOP_AUDIO_DEFAULT_HELPER', 'DESKTOP_AUDIO_ROUTER')
+    $previousProbeEnvironment = @{}
+    foreach ($variable in $probeVariables) { $previousProbeEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable) }
+    try {
+        if (-not (Get-Process -Name voicemeeterpro,voicemeeterpro64 -ErrorAction SilentlyContinue)) {
+            $enginePath = Join-Path ${env:ProgramFiles(x86)} 'VB/Voicemeeter/voicemeeterpro.exe'
+            if (-not (Test-Path -LiteralPath $enginePath)) { throw 'Install the VM Voicemeeter Banana fixture before signal acceptance.' }
+            $engine = Start-Process -FilePath $enginePath -WindowStyle Hidden -PassThru
+            Start-Sleep -Seconds 4
+        }
+        $env:DESKTOP_AUDIO_VM_PROBE = '1'
+        $env:DESKTOP_AUDIO_PROBE_OUTPUT = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/audio-signal-tests/' + [guid]::NewGuid())
+        $env:DESKTOP_AUDIO_DEFAULT_HELPER = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-fixtures/SoundVolumeView/SoundVolumeView.exe'
+        $env:DESKTOP_AUDIO_ROUTER = Join-Path $binaryDirectory 'audio-output-router.exe'
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+    } finally {
+        foreach ($variable in $probeVariables) { [Environment]::SetEnvironmentVariable($variable, $previousProbeEnvironment[$variable]) }
+        if ($engine -and -not $engine.HasExited) { $engine.Kill(); $engine.WaitForExit() }
+    }
+    } finally { Pop-Location }
+}
 if ($sessionId -eq 0) {
     if ($InteractiveChild) { throw 'Interactive task unexpectedly started in session 0.' }
     # PowerShell Direct runs in session 0, where there is no interactive display.
@@ -65,6 +94,7 @@ if ($sessionId -eq 0) {
         if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile }
         $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
         if (-not $result.ok) { throw "Interactive guest tests failed: $($result.error)" }
+        Invoke-SignalAcceptance
         return
     } finally {
         if ($registered) {
@@ -97,27 +127,7 @@ try {
     if (-not $DesktopControlOnly) {
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
     }
-    # Real, recorded signal acceptance uses only the dedicated guest fixtures.
-    $engine = $null
-    $probeVariables = @('DESKTOP_AUDIO_VM_PROBE', 'DESKTOP_AUDIO_PROBE_OUTPUT', 'DESKTOP_AUDIO_DEFAULT_HELPER', 'DESKTOP_AUDIO_ROUTER')
-    $previousProbeEnvironment = @{}
-    foreach ($variable in $probeVariables) { $previousProbeEnvironment[$variable] = [Environment]::GetEnvironmentVariable($variable) }
-    try {
-        if (-not (Get-Process -Name voicemeeterpro,voicemeeterpro64 -ErrorAction SilentlyContinue)) {
-            $enginePath = Join-Path ${env:ProgramFiles(x86)} 'VB/Voicemeeter/voicemeeterpro.exe'
-            if (-not (Test-Path -LiteralPath $enginePath)) { throw 'Install the VM Voicemeeter Banana fixture before signal acceptance.' }
-            $engine = Start-Process -FilePath $enginePath -WindowStyle Hidden -PassThru
-            Start-Sleep -Seconds 4
-        }
-        $env:DESKTOP_AUDIO_VM_PROBE = '1'
-        $env:DESKTOP_AUDIO_PROBE_OUTPUT = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/audio-signal-tests/' + [guid]::NewGuid())
-        $env:DESKTOP_AUDIO_DEFAULT_HELPER = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-fixtures/SoundVolumeView/SoundVolumeView.exe'
-        $env:DESKTOP_AUDIO_ROUTER = Join-Path $binaryDirectory 'audio-output-router.exe'
-        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
-    } finally {
-        foreach ($variable in $probeVariables) { [Environment]::SetEnvironmentVariable($variable, $previousProbeEnvironment[$variable]) }
-        if ($engine -and -not $engine.HasExited) { $engine.Kill(); $engine.WaitForExit() }
-    }
+    if (-not $InteractiveChild) { Invoke-SignalAcceptance }
     Write-Output 'Automated regressions passed. Live A/B/C endpoint switching still requires the VM-only acceptance procedure in docs/desktop-control-vm-testing.md.'
     $result.ok = $true
 } catch {

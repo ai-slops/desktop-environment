@@ -306,6 +306,10 @@ impl ControlPanel {
     }
 
     fn start(&mut self) -> Result<()> {
+        self.poll();
+        if self.devices_pending.is_some() {
+            bail!("장치 검색이 끝날 때까지 기다려 주세요.");
+        }
         // The default may have changed since the last asynchronous GUI refresh.
         // Keep the symbolic selector, but validate against current endpoints.
         if self.draft.audio.enabled && !self.audio.is_running() {

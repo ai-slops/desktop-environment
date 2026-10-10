@@ -230,6 +230,22 @@ fn check(root: &Path, label: &str, id: &str, expected: f64, unwanted: f64) -> Re
     Ok(())
 }
 
+fn check_silent(root: &Path, label: &str, id: &str) -> Result<()> {
+    thread::sleep(Duration::from_secs(2));
+    let (samples, rate) = capture(id, 2)?;
+    save_wave(&root.join(format!("{label}.wav")), &samples, rate)?;
+    let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
+        / samples.len() as f64)
+        .sqrt();
+    let report = format!("{{\"case\":\"{label}\",\"rms\":{rms}}}");
+    std::fs::write(root.join(format!("{label}.json")), &report)?;
+    println!("{report}");
+    if rms > 0.001 {
+        bail!("{label}: output was not silent");
+    }
+    Ok(())
+}
+
 #[test]
 #[ignore = "VM-only; plays fixture tones and changes/restores the guest default"]
 fn live_default_switch_signal_acceptance() -> Result<()> {
@@ -266,8 +282,10 @@ fn live_default_switch_signal_acceptance() -> Result<()> {
     };
     let _tone_a = Tone::start(a.clone(), 440.0)?;
     let _tone_b = Tone::start(b.clone(), 880.0)?;
+    let _silence_c = Tone::start(c.clone(), 0.0)?;
     check(&root, "source-a", &a, 440.0, 880.0)?;
     check(&root, "source-b", &b, 880.0, 440.0)?;
+    check_silent(&root, "destination-baseline", &c)?;
     restore.set(&a)?;
     let router = std::env::var("DESKTOP_AUDIO_ROUTER")?;
     let mut routing = Routing {
@@ -282,10 +300,15 @@ fn live_default_switch_signal_acceptance() -> Result<()> {
     check(&root, "default-b-to-c", &c, 880.0, 440.0)?;
     restore.set(&a)?;
     check(&root, "default-back-a-to-c", &c, 440.0, 880.0)?;
+    restore.set(&c)?;
+    check_silent(&root, "feedback-paused", &c)?;
+    restore.set(&b)?;
+    check(&root, "feedback-resumed-b", &c, 880.0, 440.0)?;
     if routing.child.try_wait()?.is_some() {
         bail!("Router exited during default switching");
     }
     drop(routing);
+    check_silent(&root, "router-stopped", &c)?;
     let _fixed = Routing {
         child: command(&router)
             .args(["route", &a, &c])
@@ -295,6 +318,20 @@ fn live_default_switch_signal_acceptance() -> Result<()> {
     };
     restore.set(&b)?;
     check(&root, "fixed-a-default-b", &c, 440.0, 880.0)?;
+    drop(_fixed);
+    let _tone_c = Tone::start(c.clone(), 1320.0)?;
+    restore.set(&a)?;
+    let _target = Routing {
+        child: command(&router)
+            .args(["route", &c, "default"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+    };
+    check(&root, "default-target-a", &a, 1320.0, 880.0)?;
+    restore.set(&b)?;
+    check(&root, "default-target-b", &b, 1320.0, 440.0)?;
+    check(&root, "old-target-a-no-longer-routed", &a, 440.0, 1320.0)?;
     restore.set(&restore.original)?;
     println!("PASS: recorded signal acceptance; evidence {}", root.display());
     Ok(())
