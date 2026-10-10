@@ -67,8 +67,10 @@ indefinitely after a default change. The fix watches render/eConsole changes usi
 old streams on the routing thread, including during render-buffer waits. Epochs
 are sampled before device selection so changes during reconnection are retained.
 
-Static checks of the fix and regression test code pass. Automated test execution
-and live VM acceptance are **pending**. The Hyper-V test VM was created through
+Static checks of the fix and regression test code pass. Guest regression
+compilation is in progress; completed test results and live VM acceptance remain
+**pending**. The Hyper-V test VM was created through
 UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console was
-opened for Windows installation; guest setup and audio fixture validation remain.
+opened for Windows installation. Windows 11 Pro build 26200 and the C++/mise/Rust
+toolchain are installed; audio fixture validation remains.
 No host audio defaults, playback, or running router processes were modified.

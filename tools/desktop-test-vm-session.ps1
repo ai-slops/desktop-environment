@@ -76,21 +76,30 @@ try {
                             $ErrorActionPreference = 'Stop'
                             $computer = Get-CimInstance Win32_ComputerSystem
                             if ($computer.Model -ne 'Virtual Machine') { throw 'Expected Hyper-V Windows guest.' }
+                            function Invoke-GuestTool {
+                                param([string] $File, [string[]] $Arguments)
+                                $previousPreference = $ErrorActionPreference
+                                $ErrorActionPreference = 'Continue'
+                                try {
+                                    & $File @Arguments 2>&1 | ForEach-Object { $_.ToString() }
+                                    $toolExitCode = $LASTEXITCODE
+                                } finally { $ErrorActionPreference = $previousPreference }
+                                if ($toolExitCode -ne 0) { throw "Guest command exited with $toolExitCode" }
+                            }
                             $mise = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/bin/mise.exe'
                             if ($action -eq 'Setup') {
                                 $setup = Join-Path $env:USERPROFILE 'DesktopEnvironment/setup-guest.ps1'
-                                & powershell -NoProfile -ExecutionPolicy Bypass -File $setup -Workspace $source
+                                Invoke-GuestTool powershell @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $setup, '-Workspace', $source)
                             } else {
                                 Push-Location $source
                                 try {
                                     if ($action -eq 'Test') {
-                                        & $mise exec -- powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $source 'tools/test-desktop-control-vm.ps1')
+                                        Invoke-GuestTool $mise @('exec', '--', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $source 'tools/test-desktop-control-vm.ps1'))
                                     } else {
-                                        & $mise exec -- cargo test --workspace --all-targets --all-features -j 1
+                                        Invoke-GuestTool $mise @('exec', '--', 'cargo', 'test', '--workspace', '--all-targets', '--all-features', '-j', '1')
                                     }
                                 } finally { Pop-Location }
                             }
-                            if ($LASTEXITCODE -ne 0) { throw "Guest command exited with $LASTEXITCODE" }
                         } *>&1 | Out-File -LiteralPath $logPath -Encoding utf8
                     }
                 }

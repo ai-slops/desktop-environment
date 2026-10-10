@@ -138,8 +138,9 @@ creation and startup succeeded on 2026-10-10. The owned VM reports **Running**,
 32 GiB startup RAM, 12 vCPUs and a 40% CPU execution limit; its interactive console
 was opened for Windows installation. Windows 11 Pro build 26200 was subsequently
 installed; PowerShell Direct verified the guest model, 32 GiB RAM, 12 logical
-processors and internet access. Toolchain/audio fixture setup and live acceptance
-remain pending. Linux native libvirt definition, boot
+processors and internet access. Guest C++ Build Tools, mise 2026.9.18 and
+Rust/Cargo 1.99.0 installation completed; Desktop Control regression compilation
+is in progress. Audio fixture setup and live acceptance remain pending. Linux native libvirt definition, boot
 and live guest audio checks require a Linux host and remain unverified.
 
 ## Keep one scoped Hyper-V management session
@@ -166,6 +167,10 @@ extracted into a new hash-named guest directory, preserving prior guest checkout
 `Stop` closes the worker/session while leaving the VM running. Guest test
 operations run serially and a stop request takes effect after the current operation.
 No credentials are included in request or response logs.
+Native program stderr is converted to log text and failure is determined by its
+exit code. This avoids treating Cargo progress/mise update notices as remoting
+failures. The corrected forwarding was checked with actual Windows PowerShell
+subprocesses: stderr with exit 0 succeeds, while stderr with exit 7 fails.
 
 From a normal host terminal, queue operations with `mise run vm-session-status`,
 `vm-sync-source`, `vm-guest-setup`, `vm-guest-test`, `vm-guest-test-all` or
