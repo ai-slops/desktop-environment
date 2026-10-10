@@ -77,7 +77,8 @@ passed, zero failed, 5 ignored**. Four window-manager service tests initially
 failed in PowerShell Direct's session 0 because it has no interactive monitor
 inventory; they all passed when the runner used the logged-in guest desktop.
 These synthetic callback tests do not certify live
-A/B/C audio signal fidelity; captured-tone acceptance remains **pending**.
+A/B/C audio signal fidelity; the recorded-tone checks described below now cover
+source attribution and old-source rejection.
 The guest now has VB-CABLE Pack45 and Voicemeeter Banana 2.1.3.0 installed,
 with ten active virtual render endpoints after reboot.
 
@@ -102,7 +103,7 @@ See the [publisher's command documentation](https://www.nirsoft.net/articles/set
 The Hyper-V test VM was created through
 UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console was
 opened for Windows installation. Windows 11 Pro build 26200 and the C++/mise/Rust
-toolchain are installed; audio fixture validation remains.
+toolchain and signed guest audio fixtures are installed and verified.
 No host audio defaults, playback, or running router processes were modified.
 
 ### Mixed DPI and topology regressions
@@ -138,3 +139,96 @@ The stalled-window service fixtures now create their disposable windows with
 per-monitor DPI awareness, matching the adapter's coordinate system on scaled
 guest desktops; production cross-DPI compatibility restrictions are unchanged.
 The full VM runner uses `--no-fail-fast` to collect results from every test target.
+
+### Recorded signal and GUI acceptance
+
+`windows_impl::signal_probe::live_default_switch_signal_acceptance` is ignored
+during ordinary Rust tests. The VM runner explicitly opts in, verifies the VM
+model and exact VB-Audio fixture names, plays 440 Hz on A and 880 Hz on B, and
+records channel zero of C's WASAPI loopback stream. For default-destination
+tests it also plays 1320 Hz on C. Routing subprocesses are owned and stopped;
+the original guest eConsole default is restored on success and failure.
+
+Fourteen WAV/JSON cases cover source baselines, silent destination baseline,
+default A/B/A selection while both sources remain active, an uninterrupted
+A-to-B recording, feedback pause/resume, router stop, fixed-source isolation,
+default-destination A/B switching and removal of the routed signal from the
+old destination. Expected tone amplitude must exceed 0.03; unwanted tone must
+remain below 1% of the expected tone amplitude (-40 dB). Silent cases require
+RMS at most 0.001. Nonfinite samples fail acceptance.
+
+Fresh loopback capture of these virtual drivers exposes initial buffered audio,
+including after routing has stopped. Complete WAV files retain this pre-roll;
+snapshot metrics analyze the recording after a fixed 250 ms startup interval,
+following two seconds of settling. The continuous case holds the same capture
+client across the default change and verifies A before the switch and B after
+a one-second settling bound. This additional case does not reopen capture at
+the switch. These checks certify tone attribution on the analyzed channel,
+not bit-perfect reproduction, all-channel fidelity or dropout-free playback.
+
+Enhanced VM/RDP desktop sessions may expose only `Remote Audio`. Native window
+and rendered-GUI tests run on the interactive guest desktop; fixture signal and
+GUI router-controller integration tests run through PowerShell Direct where
+the real guest virtual endpoints remain visible. Neither uses a redirected
+host speaker as a fallback. Voicemeeter's internal clock permits its virtual
+inputs to run without a physical A1 device, as described in the
+[publisher's manual](https://vb-audio.com/Voicemeeter/VoicemeeterBanana_UserManual.pdf).
+
+GUI regressions send pointer events to the real egui combo box, check its default
+label and symbolic selector after inventory changes, and verify feedback
+validation and persistence. A separate opt-in GUI controller test launches the
+real router through the Start handler's process-management path, verifies the
+same PID across default changes and feedback recovery, then verifies stop/restart.
+The GUI also refreshes device labels every two seconds and rechecks actual
+endpoints at Start, so stale default labels do not decide source/target equality.
+The native `ui-smoke` build separately renders and captures its own viewport;
+it never starts routing. This is automated widget/controller/render verification,
+not certification of manual mouse input through the elevated Hyper-V console.
+
+Windows Desktop Control selects the wgpu renderer and explicitly enables its
+DirectX 12 backend. The enhanced-session guest exposed only OpenGL 1.1, which
+caused the former glow renderer to exit before opening the control panel. The
+DirectX path allows the VM's software adapter to render without GPU passthrough.
+The VM request client also preserves UTC `DateTime` values produced by
+PowerShell 7's JSON parser, avoiding false worker-expiry errors in KST.
+
+On 2026-10-11 at `c40d5fd`, all **145 workspace tests passed**, with zero failures
+and seven ordinary ignored tests across 19 suites. Two of those ignored tests
+were explicitly exercised by the VM runner and passed: recorded-signal acceptance
+and the live GUI controller lifecycle. The native Desktop Control viewport also
+rendered and closed successfully in the logged-in enhanced session. Its imported
+1520 x 1120 PNG was visually checked for Korean text and the displayed controls.
+Evidence receipt:
+`target/vm-session/responses/b9d166d6-77a3-4b7a-8cef-528dc736b9ad.json`.
+
+All fourteen recording cases passed. The continuous recording measured the old
+A tone at **-66.60 dB relative to B** after the settling bound; every analyzed
+non-silent case exceeded the required 40 dB rejection. Destination baseline,
+feedback pause and stopped-router metrics were zero RMS after capture warmup.
+The graph retains startup history and visible amplitude dips; this result does
+not establish gapless switching or dropout-free playback.
+
+Verified local evidence (ignored build artifacts):
+
+- `target/vm-audio-evidence/bf829863-a222-4f90-92d1-026afe2f0154/` contains fourteen
+  WAV/JSON pairs, `summary.csv`, and `continuous-a-to-b.png` / `.svg`. Export/import
+  receipt: `target/vm-session/responses/688aa82a-b490-49b3-8172-2c89ec703fca.json`.
+- `target/vm-gui-evidence/ee9db69b-8aac-4ade-bfb9-2286a87cffae/panel.png` is the
+  native GUI viewport from the successful Test receipt above.
+
+Guest setup can export the newest complete passing synthetic recording set
+(`-ExportAudioEvidence:$false` disables export). The export is limited to fourteen
+known case names, two MiB per WAV, passing metrics and ordinary files; it reads
+no microphone recordings. Import a successful setup response with:
+
+```powershell
+powershell -NoProfile -File tools/import-desktop-test-audio-evidence.ps1 -LogPath target/vm-session/responses/<setup-id>.log
+```
+
+Imported WAV/JSON files and `summary.csv` live under ignored
+`target/vm-audio-evidence/<run-id>/`. Every recording's SHA256 is verified.
+`tools/plot-desktop-test-audio.py` uses numpy/matplotlib to plot the verified
+continuous WAV as PNG/SVG without opening any audio device. A successful Test
+response's native GUI viewport can similarly be imported with
+`tools/import-desktop-test-gui-evidence.ps1 -LogPath <test-log>`; that importer
+verifies the worker receipt, PNG signature and SHA256.
