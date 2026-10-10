@@ -4,6 +4,8 @@ $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $log = (Resolve-Path -LiteralPath $LogPath).Path
 $responseRoot = [IO.Path]::GetFullPath((Join-Path $workspace 'target/vm-session/responses')) + [IO.Path]::DirectorySeparatorChar
 if (-not $log.StartsWith($responseRoot, [StringComparison]::OrdinalIgnoreCase) -or (Get-Item -LiteralPath $log).Length -gt 50MB) { throw 'Expected a bounded local VM worker response log.' }
+$receipt = Get-Content -LiteralPath ([IO.Path]::ChangeExtension($log,'.json')) -Raw | ConvertFrom-Json
+if (-not $receipt.ok) { throw 'The VM worker did not report success.' }
 $cases = @('source-a','source-b','destination-baseline','default-a-to-c','default-b-to-c','default-back-a-to-c','continuous-a-to-b','feedback-paused','feedback-resumed-b','router-stopped','fixed-a-default-b','default-target-a','default-target-b','old-target-a-no-longer-routed')
 $received = @{}
 $runId = $null

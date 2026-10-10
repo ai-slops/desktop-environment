@@ -129,6 +129,30 @@ try {
     if (-not $DesktopControlOnly) {
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
     }
+    # Render the real native GUI on the guest desktop. The existing ui-smoke
+    # feature captures only its own viewport and closes without starting routing.
+    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'desktop-control', '--features', 'ui-smoke', '-j', "$BuildJobs")
+    $guiId = [guid]::NewGuid().ToString()
+    $guiRoot = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/gui-render-tests/' + $guiId)
+    New-Item -ItemType Directory -Path $guiRoot -Force | Out-Null
+    $screenshot = Join-Path $guiRoot 'panel.png'
+    $previousScreenshot = $env:DESKTOP_CONTROL_SCREENSHOT
+    $guiProcess = $null
+    try {
+        $env:DESKTOP_CONTROL_SCREENSHOT = $screenshot
+        $config = Join-Path $guiRoot 'presets.json'
+        $guiProcess = Start-Process -FilePath (Join-Path $binaryDirectory 'desktop-control.exe') -ArgumentList @('--config', ('"' + $config + '"')) -PassThru
+        if (-not $guiProcess.WaitForExit(20000)) { throw 'Native guest GUI capture timed out.' }
+        if ($guiProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $screenshot)) { throw 'Native guest GUI did not produce its viewport screenshot.' }
+        $png = [IO.File]::ReadAllBytes($screenshot)
+        if ($png.Length -gt 2MB) { throw 'GUI screenshot exceeds evidence budget.' }
+        $hash = (Get-FileHash -LiteralPath $screenshot -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-Output ('VM_GUI_SCREENSHOT|' + $guiId + '|' + $hash + '|' + [Convert]::ToBase64String($png))
+        Write-Output 'PASS: native Desktop Control viewport rendered and closed in the VM.'
+    } finally {
+        $env:DESKTOP_CONTROL_SCREENSHOT = $previousScreenshot
+        if ($guiProcess -and -not $guiProcess.HasExited) { $guiProcess.Kill(); $guiProcess.WaitForExit() }
+    }
     if (-not $InteractiveChild) { Invoke-SignalAcceptance }
     Write-Output 'Workspace regressions passed. The VM worker separately verifies recorded signals and the GUI router lifecycle.'
     $result.ok = $true
