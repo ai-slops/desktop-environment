@@ -49,7 +49,8 @@ $stderr = Join-Path $root 'router-errors.log'
 function Wait-RoutingLog([string] $Text, [int] $AfterLength) {
     $deadline = [DateTime]::UtcNow.AddSeconds(12)
     do {
-        $log = if (Test-Path -LiteralPath $stdout) { [string](Get-Content -LiteralPath $stdout -Raw) } else { '' }
+        [string] $log = ''
+        if (Test-Path -LiteralPath $stdout) { $log = [string](Get-Content -LiteralPath $stdout -Raw) }
         if ($log.Length -ge $AfterLength -and $log.Substring($AfterLength).Contains($Text)) { return }
         if ($child.HasExited) { throw "Owned router exited before reconnect; inspect $stdout and $stderr" }
         Start-Sleep -Milliseconds 100
