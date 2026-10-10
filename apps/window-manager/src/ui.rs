@@ -938,7 +938,7 @@ impl Manager {
         let Some(window) = self.selected_window.clone() else {
             return;
         };
-        egui::CollapsingHeader::new("선택한 실제 창의 모든 배치 위치 / 탐색").default_open(cfg!(feature = "ui-smoke") && std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_ok()).show(ui, |ui| {
+        egui::CollapsingHeader::new("선택한 실제 창의 모든 배치 위치 / 탐색").default_open(cfg!(feature = "ui-smoke") && std::env::var("WINDOW_MANAGER_SMOKE_PANEL").is_ok_and(|panel| panel == "onboarding")).show(ui, |ui| {
             ui.label("각 참조는 한 번 표시됩니다. 아래 위치 선택은 미리보기만 준비하며, 계획 적용으로 확정합니다.");
             for location in window_manager_core::placement_locations(&self.config, &window) {
                 ui.horizontal_wrapped(|ui| {

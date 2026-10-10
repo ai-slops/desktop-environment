@@ -79,6 +79,25 @@ cargo run --release -p windows-window-manager --example application_probe -- "C:
 
 The application/version arguments label the report; verify the installed executable FileVersion before each run. Only Chrome/Edge-style app windows are accepted; no window fallback by title or process name is used.
 
+## Empty local-session idle cost
+
+Measured after the final release build on 2026-10-10. The harness creates a new empty configuration and an ordinary-user read-only `--session` process, keeps stdin open without issuing commands, drains output, waits five seconds, then samples CPU/working set/private bytes every second for 30 intervals. The exact executable SHA-256 is in the [raw report](measurements/window-manager-idle-session-20261010.json). EOF shut the session down successfully; its fixture directory was removed. Only the owned process is sampled or terminated.
+
+| Metric | Median | P95 | P99 / worst |
+| --- | ---: | ---: | ---: |
+| CPU, percent of one logical core | 0.0000% | 1.5469% | 1.5491% |
+| Working set | 10.6250 MiB | 10.6289 MiB | 10.6289 MiB |
+| Private bytes | 2.0078 MiB | 2.0078 MiB | 2.0078 MiB |
+
+CPU is calculated from process-time deltas divided by actual elapsed wall time, without division by the machine's core count. Process-time quantization at one-second sampling means a zero median does not establish zero work. This session has no GUI, bound windows, providers, registered shortcuts or output capture. It exercises the actor's idle topology/event loop; it does not establish GUI/GPU cost, idle scaling with managed windows or game/broadcast impact. Native observation hooks are active and terminate with the session.
+
+```powershell
+cargo build --release -p window-manager
+pwsh -File tools/measure-window-manager-idle.ps1
+```
+
+Wait for the build to complete before measuring; a running Windows executable prevents its build output from being replaced. The PowerShell 7 harness uses a unique workspace fixture directory and validates its absolute path before cleanup.
+
 ## Reproduction and product logs
 
 ```powershell
@@ -88,4 +107,4 @@ cargo run --release -p windows-window-manager --example benchmark -- target/wind
 
 The worker retains one redacted `.last-transition.json` beside its configuration/journal. It records opaque request/window IDs, exact scope, revisions, mode, impact, fallback diagnostics, batch/individual counts, per-window result and microsecond planning/submission/native API/geometry-settlement/focus times. Planning is measured against an immutable snapshot. Submission includes journal preparation; native API time isolates submit_many. Settlement elapsed starts before journal preparation and includes polling; geometry_settlement is null when any submitted operation failed, timed out or was superseded. Authority is rechecked before commit; observed geometry alone is not a committed authority result. No native handles, titles or screenshots are logged.
 
-Unmeasured release gates: larger browser/editor/terminal/game/broadcaster mixes, elevated targets, verified mixed-DPI native transfers, physical disconnect/reconnect, CPU/GPU load and broadcast encoder impact, idle resource distributions, and actual render readiness. Existing bounded fixture tests cover stalls, rapid supersession, output evidence expiry/disconnect and crash reveal, without claiming those application matrix results.
+Unmeasured release gates: larger browser/editor/terminal/game/broadcaster mixes, elevated targets, verified mixed-DPI native transfers, physical disconnect/reconnect, CPU/GPU load and broadcast encoder impact, GUI/bound-window idle resource distributions, and actual render readiness. Existing bounded fixture tests cover stalls, rapid supersession, output evidence expiry/disconnect and crash reveal, without claiming those application matrix results.

@@ -1,0 +1,28 @@
+{
+  "measured_utc": "2026-10-10T10:52:44.0782123Z",
+  "executable_sha256": "705508796D6FE2D43B9A74C69219A6FB60E7A4E02DE69C2DBCABC6EB784A2821",
+  "fixture": "empty read-only local session; no GUI, bound windows, providers or hotkeys",
+  "samples": 30,
+  "interval_seconds": 1,
+  "warmup_seconds": 5,
+  "cpu_percent_one_logical_core": {
+    "median": 0.0,
+    "p95": 1.546859854695163,
+    "p99": 1.5491277741408405,
+    "worst": 1.5491277741408405
+  },
+  "working_set_bytes": {
+    "median": 11141120,
+    "p95": 11145216,
+    "p99": 11145216,
+    "worst": 11145216
+  },
+  "private_bytes": {
+    "median": 2105344,
+    "p95": 2105344,
+    "p99": 2105344,
+    "worst": 2105344
+  },
+  "graceful_eof_shutdown": true,
+  "rendering_readiness": "not applicable; no GUI"
+}

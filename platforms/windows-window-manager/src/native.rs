@@ -970,10 +970,12 @@ mod tests {
         let register = |number: u32| unsafe {
             RegisterHotKey(None, 100, MOD_CONTROL | MOD_WIN | MOD_NOREPEAT, 0x7C + number)
         };
-        let Some(number) = (1..=9).find(|number| register(*number).is_ok()) else {
-            eprintln!("No unclaimed Win+Ctrl+F14..F22 available; collision fixture skipped");
-            return Ok(());
-        };
+        let number = (1..=9).find(|number| register(*number).is_ok()).ok_or_else(|| {
+            windows::core::Error::new(
+                windows::core::HRESULT(0x8000_4005_u32 as i32),
+                "No unclaimed Win+Ctrl+F14..F22 available for the collision fixture",
+            )
+        })?;
         let owner = Hotkey(100);
         let stream = event_stream_with_key(&[number, number, 0, 10], |number| 0x7C + number);
         let errors = stream
@@ -1256,6 +1258,150 @@ mod tests {
         assert!(!ended.get());
         assert_eq!(observe(&before[0].binding, false)?.frame, before[0].frame);
         assert!(observe(&before[1].binding, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn foreign_hung_window_submission_does_not_block_an_independent_owned_batch()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::io::BufRead;
+        use std::os::windows::process::CommandExt;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let blocked_path = directory.path().join("blocked");
+        let mut child = Child(
+            Command::new(std::env::current_exe()?)
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "native::tests::foreign_hung_window_fixture",
+                    "--nocapture",
+                ])
+                .env("WINDOW_MANAGER_FOREIGN_FIXTURE_MARKER", &blocked_path)
+                .creation_flags(0x0800_0000)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()?,
+        );
+        let output = child.0.stdout.take().ok_or("fixture stdout missing")?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            let limited = std::io::Read::take(output, 4096);
+            for line in std::io::BufReader::new(limited).lines().map_while(std::result::Result::ok)
+            {
+                if let Some(value) = line.strip_prefix("FOREIGN_WINDOW:") {
+                    let _ = sender.send(value.to_owned());
+                    break;
+                }
+            }
+        });
+        let marker = receiver.recv_timeout(Duration::from_secs(5))?;
+        reader.join().map_err(|_| "fixture reader failed")?;
+        let handle: u64 = serde_json::from_str(&marker)?;
+        let candidate = Candidate {
+            handle,
+            title: "owned foreign fixture".into(),
+            class: "STATIC".into(),
+            process: child.0.id(),
+            frame: Rect::default(),
+        };
+        let foreign = bind(&candidate, false)?;
+        assert_eq!(foreign.binding.process, child.0.id());
+        let own = Owned::new()?;
+        let local = bind(&own.candidate(), false)?;
+        let mutations = [&foreign, &local]
+            .iter()
+            .enumerate()
+            .map(|(index, prior)| Mutation {
+                window: format!("fixture-{index}"),
+                binding: prior.binding.clone(),
+                geometry: Some(Rect { x: prior.frame.x + 30, ..prior.frame }),
+                move_only: true,
+                visible: None,
+                focus: false,
+                show_state: None,
+            })
+            .collect::<Vec<_>>();
+        let first = submit_many(std::slice::from_ref(&mutations[0]));
+        assert!(first.results.values().all(std::result::Result::is_ok));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !blocked_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(blocked_path.exists(), "Child did not enter its blocking WndProc");
+        // Submit again while the foreign UI thread is demonstrably blocked.
+        let started = Instant::now();
+        let report = submit_many(&mutations);
+        assert!(started.elapsed() < Duration::from_millis(900));
+        assert_eq!(report.individual_windows, 1);
+        assert_eq!(report.batched_windows, 1);
+        assert!(report.results.values().all(std::result::Result::is_ok));
+        assert_eq!(
+            observe(&local.binding, false)?.frame,
+            mutations[1].geometry.ok_or("geometry missing")?
+        );
+        // The foreign WndProc sleeps for three seconds before applying its pending target.
+        assert_eq!(observe(&foreign.binding, false)?.frame, foreign.frame);
+        drop(child);
+        assert!(observe(&foreign.binding, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Spawned only as the disposable foreign-window parent test's child"]
+    fn foreign_hung_window_fixture() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use windows::Win32::Foundation::{LRESULT, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            CallWindowProcW, DispatchMessageW, GWL_WNDPROC, SetWindowLongPtrW, TranslateMessage,
+            WM_WINDOWPOSCHANGING, WNDPROC,
+        };
+        static MARKER: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        static PREVIOUS: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+        unsafe extern "system" fn blocked(
+            hwnd: HWND,
+            message: u32,
+            wparam: WPARAM,
+            lparam: LPARAM,
+        ) -> LRESULT {
+            if message == WM_WINDOWPOSCHANGING {
+                if let Some(path) = MARKER.get() {
+                    let _ = std::fs::write(path, b"blocked");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(3));
+            }
+            // SAFETY: this is the original WndProc returned for our own built-in fixture window.
+            let original: WNDPROC = unsafe { std::mem::transmute(PREVIOUS.load(Ordering::SeqCst)) };
+            unsafe { CallWindowProcW(original, hwnd, message, wparam, lparam) }
+        }
+        let marker = std::env::var_os("WINDOW_MANAGER_FOREIGN_FIXTURE_MARKER")
+            .ok_or("This fixture must be spawned by its parent test")?;
+        MARKER.set(std::path::PathBuf::from(marker)).map_err(|_| "fixture marker already set")?;
+        let window = Owned::new()?;
+        // SAFETY: only this child-owned fixture is subclassed, on its own UI thread.
+        let previous =
+            unsafe { SetWindowLongPtrW(window.0, GWL_WNDPROC, blocked as *const () as isize) };
+        if previous == 0 {
+            return Err(windows::core::Error::from_win32().into());
+        }
+        PREVIOUS.store(previous, Ordering::SeqCst);
+        println!("FOREIGN_WINDOW:{}", window.candidate().handle);
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut message = MSG::default();
+        while unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0 > 0 {
+            let _ = unsafe { TranslateMessage(&raw const message) };
+            unsafe { DispatchMessageW(&raw const message) };
+        }
+        // SAFETY: restore the original callback before the owned window is destroyed.
+        let _ = unsafe { SetWindowLongPtrW(window.0, GWL_WNDPROC, previous) };
         Ok(())
     }
 

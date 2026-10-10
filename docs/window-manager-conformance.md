@@ -8,10 +8,11 @@ Status on 2026-10-10: implemented Windows feasibility product; **the P1 release 
 | --- | --- | --- |
 | Ordinary-user Win32 STATIC fixture, normal state, same DPI | Native move-only, batch, explicit show-state, journal reveal, independent crash recovery | Only disposable windows created by the harness; rendering unknown |
 | Own manager GUI at 192 DPI | Korean onboarding, parameters/synthetic preview, ancestor/structure editor, Library mapping renders; private-region guard | Static smoke checks, not full keyboard/IME or physical reconnect review |
-| Arbitrary browser/editor/terminal | No application-version matrix run | Manual binding and per-resource profiles; hide/show-state opt-in; no advertised compatibility certification |
+| Chrome 154.0.8037.98 / Edge 155.0.4283.45, one isolated normal app window, 96 DPI | [Measured move/resize/hide-show and direct journal recovery](window-manager-performance.md#isolated-actual-browser-applications) | Limited profile; ordinary user; rendering/output unknown; no browser-internal state claim |
+| Other browser modes / arbitrary editor/terminal | No application-version matrix run | Manual binding and per-resource profiles; hide/show-state opt-in; no compatibility certification |
 | Full-screen games / broadcaster / load-sensitive applications | Pure zero-unrelated-operation invariant only | Actual frame timing, CPU/GPU and encoder impact unmeasured |
 | Elevated/protected/unsupported native windows | Ordinary-user boundaries and rejection paths | No elevation broker or bypass advertised |
-| Mixed-DPI foreign windows / docking | Pure client/DPI settlement and topology fallback fixtures | Native transfer/reconnect distributions unmeasured; strict incompatible preservation rejects |
+| Mixed-DPI foreign windows / docking | Actual Chrome/Edge 96↔192 DPI failed 20/20 samples each; pure topology fixtures | Cross-DPI opt-in defaults off; these browser transfers unsupported; physical reconnect unmeasured |
 | Output/AI providers | Granted-resource/session/sequence/TTL/disconnect test contracts | Actual integrations deferred; output and rendering remain unverified |
 | macOS/Linux adapters, linked templates, executable extensions, remote API, mirrors/clipping | No implementation | Outside Windows P1 baseline / P2 deferred |
 
@@ -21,62 +22,62 @@ The linked function identifies relevant evidence, not the whole acceptance scena
 
 | Acceptance item | Relevant checked fixture | Remaining scenario gate |
 | --- | --- | --- |
-| AT-01 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L578) | Real browser contexts |
-| AT-02 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1098) | Real app visibility profile |
-| AT-03 | [named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection](../libs/window-manager-core/src/tests.rs#L2088) | Keyboard/reordering usability |
-| AT-04 | [local_membership_exclusions_preserve_ids_weights_and_source_queries](../libs/window-manager-core/src/tests.rs#L1054) | Manual add usability |
-| AT-05 | [unknown_negative_query_never_proves_public_and_exclusions_win](../libs/window-manager-core/src/tests.rs#L686) | Exclusion/re-include usability |
-| AT-06 | [unknown_negative_query_never_proves_public_and_exclusions_win](../libs/window-manager-core/src/tests.rs#L686) | Actual capture state unverified |
-| AT-07 | [selector_membership_is_staged_and_restores_stable_preferences](../libs/window-manager-core/src/tests.rs#L1426) | Real lifecycle churn |
-| AT-08 | [continuous_rules_defer_interaction_and_reflow_only_opted_in_groups](../libs/window-manager-core/src/tests.rs#L2237) | Korean IME and application-internal typing |
-| AT-09 | [temporary_filter_clear_restores_layout_without_authored_state_drift](../libs/window-manager-core/src/tests.rs#L1699) | Interactive filter selection |
-| AT-10 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L578) | Real same-DPI browser |
-| AT-11 | [leaving_a_visit_drops_its_override_and_normal_return_uses_saved_size](../libs/window-manager-core/src/tests.rs#L1147) | Real application context return |
-| AT-12 | [manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception](../libs/window-manager-core/src/tests.rs#L1516) | Actual user resize hook provenance |
-| AT-13 | [keep_here_reserves_space_for_surrounding_children](../libs/window-manager-core/src/tests.rs#L1123) | Real window reservations |
-| AT-14 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L578) | Carry-placement usability |
-| AT-15 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1098) | Explicit branch choice usability |
-| AT-16 | [approved_resize_enforces_minima_capabilities_output_and_geometry_locks](../libs/window-manager-core/src/tests.rs#L2469) | Real fit/minimum constraints |
-| AT-17 | [subtree_moves_copies_and_size_copies_are_atomic_local_and_independent](../libs/window-manager-core/src/tests.rs#L945) | Multi-selection keyboard review |
-| AT-18 | [manual_onboarding_captures_current_arrangement_without_rules_or_native_mutations](../libs/window-manager-core/src/tests.rs#L2590) | Switcher pointer/keyboard no-mutation review |
-| AT-19 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L578) | Real app recall |
+| AT-01 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L581) | Real browser contexts |
+| AT-02 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1101) | Real app visibility profile |
+| AT-03 | [named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection](../libs/window-manager-core/src/tests.rs#L2091) | Keyboard/reordering usability |
+| AT-04 | [local_membership_exclusions_preserve_ids_weights_and_source_queries](../libs/window-manager-core/src/tests.rs#L1057) | Manual add usability |
+| AT-05 | [unknown_negative_query_never_proves_public_and_exclusions_win](../libs/window-manager-core/src/tests.rs#L689) | Exclusion/re-include usability |
+| AT-06 | [unknown_negative_query_never_proves_public_and_exclusions_win](../libs/window-manager-core/src/tests.rs#L689) | Actual capture state unverified |
+| AT-07 | [selector_membership_is_staged_and_restores_stable_preferences](../libs/window-manager-core/src/tests.rs#L1429) | Real lifecycle churn |
+| AT-08 | [continuous_rules_defer_interaction_and_reflow_only_opted_in_groups](../libs/window-manager-core/src/tests.rs#L2240) | Korean IME and application-internal typing |
+| AT-09 | [temporary_filter_clear_restores_layout_without_authored_state_drift](../libs/window-manager-core/src/tests.rs#L1702) | Interactive filter selection |
+| AT-10 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L581) | Real same-DPI browser |
+| AT-11 | [leaving_a_visit_drops_its_override_and_normal_return_uses_saved_size](../libs/window-manager-core/src/tests.rs#L1150) | Real application context return |
+| AT-12 | [manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception](../libs/window-manager-core/src/tests.rs#L1519) | Actual user resize hook provenance |
+| AT-13 | [keep_here_reserves_space_for_surrounding_children](../libs/window-manager-core/src/tests.rs#L1126) | Real window reservations |
+| AT-14 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L581) | Carry-placement usability |
+| AT-15 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1101) | Explicit branch choice usability |
+| AT-16 | [approved_resize_enforces_minima_capabilities_output_and_geometry_locks](../libs/window-manager-core/src/tests.rs#L2472) | Real fit/minimum constraints |
+| AT-17 | [subtree_moves_copies_and_size_copies_are_atomic_local_and_independent](../libs/window-manager-core/src/tests.rs#L948) | Multi-selection keyboard review |
+| AT-18 | [manual_onboarding_captures_current_arrangement_without_rules_or_native_mutations](../libs/window-manager-core/src/tests.rs#L2593) | Switcher pointer/keyboard no-mutation review |
+| AT-19 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L581) | Real app recall |
 | AT-20 | [supersession_interrupts_a_stalled_scope_without_cancelling_disjoint_generations](../apps/window-manager/src/service.rs#L206) | Foreign-app late A→B→C effects |
-| AT-21 | [unrelated_scope_and_new_claims_are_not_overwritten_by_old_plans](../libs/window-manager-core/src/tests.rs#L1164) | Independent real-app concurrency |
-| AT-22 | [dpi_transfer_verifies_requested_client_size_instead_of_only_frame](../libs/window-manager-core/src/tests.rs#L163) | Chrome/Edge 96↔192 DPI unsupported; default compatibility gate added |
-| AT-23 | [subtree_moves_copies_and_size_copies_are_atomic_local_and_independent](../libs/window-manager-core/src/tests.rs#L945) | Nested drag/drop interaction review |
-| AT-24 | [responsive_folding_restores_wide_ratios_and_variant_preferences](../libs/window-manager-core/src/tests.rs#L1182) | Interactive responsive resize |
-| AT-25 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1098) | Real semantic visibility profile |
-| AT-26 | [generated_layouts_have_one_final_mutation_per_window_and_no_saved_state_drift](../libs/window-manager-core/src/tests.rs#L1233) | Foreign native resize counts |
-| AT-27 | [fixed_size_children_leave_flexible_remainder_and_allowed_fallback_folds](../libs/window-manager-core/src/tests.rs#L1794) | Single Chrome/Edge app-window move-only checked; larger arrangements remain |
-| AT-28 | [manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception](../libs/window-manager-core/src/tests.rs#L1516) | Real gesture/IME provenance |
-| AT-29 | [formulas_are_bounded_pure_typed_and_lazy](../libs/window-manager-core/src/tests.rs#L666) | Rule diagnostics usability |
-| AT-30 | [packages_require_explicit_mapping_and_have_no_live_identity](../libs/window-manager-core/src/tests.rs#L734) | Mapping/import interaction review |
-| AT-31 | [wrapping_and_unwrapping_keep_child_identity_and_removal_never_removes_resources](../libs/window-manager-core/src/tests.rs#L193) | Keyboard unwrap/remove review |
-| AT-32 | [all_three_group_preservation_modes_have_distinct_geometry](../libs/window-manager-core/src/tests.rs#L1770) | Content-fit interaction review |
-| AT-33 | [game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detected](../libs/window-manager-core/src/tests.rs#L1321) | Real full-screen game and neighbor apps |
-| AT-34 | [group_and_visit_protections_have_independent_lifetimes_and_attention_is_scoped](../libs/window-manager-core/src/tests.rs#L1600) | Production AI provider deferred |
-| AT-35 | [navigation_resolves_exact_shared_occurrence_and_keeps_other_roots_out_of_scope](../libs/window-manager-core/src/tests.rs#L2554) | Production attention provider deferred |
-| AT-36 | [group_and_visit_protections_have_independent_lifetimes_and_attention_is_scoped](../libs/window-manager-core/src/tests.rs#L1600) | Real maintained-visible monitoring app |
-| AT-37 | [claim_elsewhere_and_stale_binding_are_rejected](../libs/window-manager-core/src/tests.rs#L642) | Real shared-resource transfer review |
-| AT-38 | [output_provider_expiry_disconnect_and_capability_scope_are_enforced](../libs/window-manager-core/src/tests.rs#L1549) | Actual output integration deferred |
-| AT-39 | [control_fallback_never_uses_public_intersections_or_changes_saved_topology](../libs/window-manager-core/src/tests.rs#L1653) | Physical monitor removal |
-| AT-40 | [explicit_topology_fallback_has_independent_preferences_and_reconnect_restores_original](../libs/window-manager-core/src/tests.rs#L1915) | Physical docking/reconnect |
+| AT-21 | [unrelated_scope_and_new_claims_are_not_overwritten_by_old_plans](../libs/window-manager-core/src/tests.rs#L1167) | Independent real-app concurrency |
+| AT-22 | [dpi_transfer_verifies_requested_client_size_instead_of_only_frame](../libs/window-manager-core/src/tests.rs#L166) | Chrome/Edge 96↔192 DPI unsupported; default compatibility gate added |
+| AT-23 | [subtree_moves_copies_and_size_copies_are_atomic_local_and_independent](../libs/window-manager-core/src/tests.rs#L948) | Nested drag/drop interaction review |
+| AT-24 | [responsive_folding_restores_wide_ratios_and_variant_preferences](../libs/window-manager-core/src/tests.rs#L1185) | Interactive responsive resize |
+| AT-25 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1101) | Real semantic visibility profile |
+| AT-26 | [generated_layouts_have_one_final_mutation_per_window_and_no_saved_state_drift](../libs/window-manager-core/src/tests.rs#L1236) | Foreign native resize counts |
+| AT-27 | [fixed_size_children_leave_flexible_remainder_and_allowed_fallback_folds](../libs/window-manager-core/src/tests.rs#L1797) | Single Chrome/Edge app-window move-only checked; larger arrangements remain |
+| AT-28 | [manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception](../libs/window-manager-core/src/tests.rs#L1519) | Real gesture/IME provenance |
+| AT-29 | [formulas_are_bounded_pure_typed_and_lazy](../libs/window-manager-core/src/tests.rs#L669) | Rule diagnostics usability |
+| AT-30 | [packages_require_explicit_mapping_and_have_no_live_identity](../libs/window-manager-core/src/tests.rs#L737) | Mapping/import interaction review |
+| AT-31 | [wrapping_and_unwrapping_keep_child_identity_and_removal_never_removes_resources](../libs/window-manager-core/src/tests.rs#L196) | Keyboard unwrap/remove review |
+| AT-32 | [all_three_group_preservation_modes_have_distinct_geometry](../libs/window-manager-core/src/tests.rs#L1773) | Content-fit interaction review |
+| AT-33 | [game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detected](../libs/window-manager-core/src/tests.rs#L1324) | Real full-screen game and neighbor apps |
+| AT-34 | [group_and_visit_protections_have_independent_lifetimes_and_attention_is_scoped](../libs/window-manager-core/src/tests.rs#L1603) | Production AI provider deferred |
+| AT-35 | [navigation_resolves_exact_shared_occurrence_and_keeps_other_roots_out_of_scope](../libs/window-manager-core/src/tests.rs#L2557) | Production attention provider deferred |
+| AT-36 | [group_and_visit_protections_have_independent_lifetimes_and_attention_is_scoped](../libs/window-manager-core/src/tests.rs#L1603) | Real maintained-visible monitoring app |
+| AT-37 | [claim_elsewhere_and_stale_binding_are_rejected](../libs/window-manager-core/src/tests.rs#L645) | Real shared-resource transfer review |
+| AT-38 | [output_provider_expiry_disconnect_and_capability_scope_are_enforced](../libs/window-manager-core/src/tests.rs#L1552) | Actual output integration deferred |
+| AT-39 | [control_fallback_never_uses_public_intersections_or_changes_saved_topology](../libs/window-manager-core/src/tests.rs#L1656) | Physical monitor removal |
+| AT-40 | [explicit_topology_fallback_has_independent_preferences_and_reconnect_restores_original](../libs/window-manager-core/src/tests.rs#L1918) | Physical docking/reconnect |
 | AT-41 | [provider_disconnect_received_during_application_prevents_scope_commit](../apps/window-manager/src/service.rs#L150) | Actual capture provider deferred |
-| AT-42 | [copied_private_view_retains_shared_public_content_warning](../libs/window-manager-core/src/tests.rs#L2206) | Shared-content warning usability |
-| AT-43 | [borrowed_expansion_requires_exact_authority_and_restores_empty_slots](../libs/window-manager-core/src/tests.rs#L396) | Real protected-neighbor expansion |
-| AT-44 | [stalled_native_submission_has_bounded_failure_and_preserves_other_scopes](../apps/window-manager/src/service.rs#L233) | Foreign hung-app/hotkey responsiveness |
+| AT-42 | [copied_private_view_retains_shared_public_content_warning](../libs/window-manager-core/src/tests.rs#L2209) | Shared-content warning usability |
+| AT-43 | [borrowed_expansion_requires_exact_authority_and_restores_empty_slots](../libs/window-manager-core/src/tests.rs#L399) | Real protected-neighbor expansion |
+| AT-44 | [stalled_native_submission_has_bounded_failure_and_preserves_other_scopes](../apps/window-manager/src/service.rs#L233) | Owned foreign hung-window adapter verified below; actual app/hotkey responsiveness remains |
 | AT-45 | [stalled_native_submission_has_bounded_failure_and_preserves_other_scopes](../apps/window-manager/src/service.rs#L233) | Real app repeated size rejection |
-| AT-46 | [move_only_keeps_client_size_and_destroyed_lifetime_is_rejected](../platforms/windows-window-manager/src/native.rs#L955) | Forced same-value HWND reuse and inventory-to-bind race |
+| AT-46 | [move_only_keeps_client_size_and_destroyed_lifetime_is_rejected](../platforms/windows-window-manager/src/native.rs#L1075) | Forced same-value HWND reuse and inventory-to-bind race |
 | AT-47 | [separate_helper_recovers_hidden_window_after_parent_process_death](../apps/window-manager/tests/recovery.rs#L35) | Chrome/Edge direct journal profile checked; independent-helper browser review remains |
-| AT-48 | [manual_minimization_is_not_undone_by_force_restore](../libs/window-manager-core/src/tests.rs#L1628) | Real user minimization |
-| AT-49 | [settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects](../libs/window-manager-core/src/tests.rs#L1994) | Actual owned-modal creation/IME |
-| AT-50 | [claim_elsewhere_and_stale_binding_are_rejected](../libs/window-manager-core/src/tests.rs#L642) | Ambiguous real-window restart UI |
-| AT-51 | [native_undo_is_scoped_and_revalidates_new_owners_and_manual_changes](../libs/window-manager-core/src/tests.rs#L522) | Real late undo/claim interactions |
-| AT-52 | [duplicate_configuration_maps_are_not_normalized_or_saved_over_last_good_state](../libs/window-manager-core/src/tests.rs#L2532) | Safe-mode recovery usability |
-| AT-53 | [named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection](../libs/window-manager-core/src/tests.rs#L2088) | Native collision/release fixture below; Korean IME/layouts remain |
-| AT-54 | [settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects](../libs/window-manager-core/src/tests.rs#L1994) | Actual denied activation result |
-| AT-55 | [tab_identity_and_scope_are_validated_before_layout](../libs/window-manager-core/src/tests.rs#L1302) | Local command lifecycle review |
-| AT-56 | [game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detected](../libs/window-manager-core/src/tests.rs#L1321) | Real game CPU/GPU/frame and encoder impact |
+| AT-48 | [manual_minimization_is_not_undone_by_force_restore](../libs/window-manager-core/src/tests.rs#L1631) | Real user minimization |
+| AT-49 | [settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects](../libs/window-manager-core/src/tests.rs#L1997) | Actual owned-modal creation/IME |
+| AT-50 | [claim_elsewhere_and_stale_binding_are_rejected](../libs/window-manager-core/src/tests.rs#L645) | Ambiguous real-window restart UI |
+| AT-51 | [native_undo_is_scoped_and_revalidates_new_owners_and_manual_changes](../libs/window-manager-core/src/tests.rs#L525) | Real late undo/claim interactions |
+| AT-52 | [duplicate_configuration_maps_are_not_normalized_or_saved_over_last_good_state](../libs/window-manager-core/src/tests.rs#L2535) | Safe-mode recovery usability |
+| AT-53 | [named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection](../libs/window-manager-core/src/tests.rs#L2091) | Native collision/release fixture below; Korean IME/layouts remain |
+| AT-54 | [settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects](../libs/window-manager-core/src/tests.rs#L1997) | Actual denied activation result |
+| AT-55 | [tab_identity_and_scope_are_validated_before_layout](../libs/window-manager-core/src/tests.rs#L1305) | Local command lifecycle review |
+| AT-56 | [game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detected](../libs/window-manager-core/src/tests.rs#L1324) | Real game CPU/GPU/frame and encoder impact |
 
 ## VG evidence
 
@@ -89,8 +90,8 @@ The linked function identifies relevant evidence, not the whole acceptance scena
 | VG-05 formulas/packages | Typed bounded formulas, acyclic parameters, sort/variants, read-only simulation, redaction/mapping/independent import | Interactive authoring/package review; P2 links excluded |
 | VG-06 authority | Shared planner/revalidation, strict local pipe capabilities, opaque single-use tokens, bounded replay, no executable layout dependency | Unsupported origin/privilege scenario matrix; remote transport excluded |
 | VG-07 native execution | One final mutation per resource, same-thread batch, async foreign-thread submissions, separate activation, bounded settlement and domain commit | Larger foreign-app mixes; owned native Defer failure verified below |
-| VG-08 lifecycle | Manual binding; hide/show-state compatibility opt-ins; readiness unknown; own-window graceful reveal and independent crash recovery | Real minimized/modal/elevated/app-version profiles and exact HWND reuse |
-| VG-09 measurements | [Reference fixtures and timing distributions](window-manager-performance.md); redacted bounded last-result log; no thumbnail/capture cache | Idle CPU/memory distributions, game/broadcast load, foreign-app/mixed-DPI timings |
+| VG-08 lifecycle | Manual binding; hide/show-state compatibility opt-ins; readiness unknown; own-window graceful reveal and independent crash recovery | Other minimized/modal/elevated/app-version profiles and exact HWND reuse |
+| VG-09 measurements | [Reference and actual-browser timings; empty read-only session idle CPU/memory](window-manager-performance.md); redacted bounded last-result log; no thumbnail/capture cache | GUI/bound-window idle distributions, game/broadcast load, larger app mixes and verified mixed-DPI timings |
 | VG-10 API lifecycle | Strict fields/keys/scope/revision, replay collision and missed-event resync, malformed configuration/session tests | Exhaustive scenario exercise of every origin/error/capability; provider integrations excluded |
 
 ## Reproduction
@@ -102,7 +103,7 @@ cargo fmt --all -- --check
 cargo build -p window-manager
 ```
 
-Latest full workspace run: 128 passing tests, 0 failures, 4 intentionally ignored interactive/child fixtures. The recovery child fixture is exercised indirectly by its parent test. New window-manager crates pass strict Clippy; full-workspace strict Clippy still has documented pre-existing warnings in unrelated native adapters/applications. Stable rustfmt reports unsupported nightly-only configuration options but completes formatting.
+Latest full workspace run: 129 passing tests, 0 failures, 5 intentionally ignored interactive/child fixtures. Recovery and hung-window child fixtures are exercised indirectly by their parent tests. New window-manager crates pass strict Clippy; full-workspace strict Clippy still has documented pre-existing warnings in unrelated native adapters/applications. Stable rustfmt reports unsupported nightly-only configuration options but completes formatting.
 
 To close application gates, record application/version, privilege, monitor identity/DPI, show-state and visibility profile, each AT/VG result, counts/timing distributions, and whether rendering/output evidence is known. Do not mark a provider or application supported solely from its executable name, an API success return or observed geometry. Keep personal titles/content out of published logs.
 
@@ -117,3 +118,9 @@ The owned `Win+Ctrl+F14..F22` collision fixture passes without injecting input o
 ## Actual application follow-up
 
 [Published browser measurements](window-manager-performance.md#isolated-actual-browser-applications) cover one isolated normal app window each for Chrome 154.0.8037.98 and Edge 155.0.4283.45 at 96 DPI. Move-only, resize and hide/show passed 30 measured requests per mode; explicit minimize/restore and direct journal recovery also passed. Process termination invalidated bindings and unique temporary profiles were removed. Rendering/output remains unknown. Actual 96↔192 DPI requests failed on both applications; a compatibility opt-in now defaults off and prevents such a plan before native effects. Older configurations inherit the off value. Pure planning explicitly declares simulated compatibility when exercising mixed-DPI fixtures. Physical topology loss, elevated/modals/IME, browser rendering/capture, simultaneous application mixes and exact HWND reuse remain open.
+
+## Foreign hung-window follow-up
+
+`foreign_hung_window_submission_does_not_block_an_independent_owned_batch` launches a separate disposable test process and binds only the HWND it publishes with the matching owned PID. The child subclasses only its own STATIC window and writes a readiness marker from inside a three-second blocking position callback. After the marker proves its UI thread is blocked, the parent submits another asynchronous request to that foreign window alongside a local same-thread batch. Submission/local settlement complete within 900 ms, the foreign frame remains pending, and the classified counts are one individual plus one batched operation. The owned child is terminated on every exit path; its binding is then rejected. This is a real Win32 thread-isolation test, not a browser/game hang certification. The child fixture cannot run independently without its parent-provided marker.
+
+The empty-session idle measurement and reproduction harness are published in [reference measurements](window-manager-performance.md#empty-local-session-idle-cost). Actual GUI and managed-window idle scaling remain open.
