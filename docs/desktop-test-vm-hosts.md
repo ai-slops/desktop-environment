@@ -121,10 +121,12 @@ record the guest's routed/captured signal because host audio passthrough is disa
 
 mise user installation is complete. Both host configurations reflect 32 GiB /
 12 vCPUs; PowerShell parsing, read-only Windows plan and pure Linux XML tests are
-checked on the Windows host. An attempted Hyper-V setup elevation was reported by
-Windows as **canceled**, so actual VM creation and guest installation are pending.
-Run the Administrator command above to create it. Linux native libvirt definition,
-boot and live guest audio checks require a Linux host and remain unverified.
+checked on the Windows host. After retrying the canceled UAC request, Hyper-V
+creation and startup succeeded on 2026-10-10. The owned VM reports **Running**,
+32 GiB startup RAM, 12 vCPUs and a 40% CPU execution limit; its interactive console
+was opened for Windows installation. Guest OS installation, toolchain/audio fixture
+setup and live acceptance remain pending. Linux native libvirt definition, boot
+and live guest audio checks require a Linux host and remain unverified.
 
 References: [Hyper-V Windows 11 generation/TPM setup](https://techcommunity.microsoft.com/blog/itopstalkblog/how-to-run-a-windows-11-vm-on-hyper-v/3713948),
 [Hyper-V CPU limits](https://learn.microsoft.com/en-us/powershell/module/hyper-v/set-vmprocessor),

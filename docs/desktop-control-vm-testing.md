@@ -68,6 +68,7 @@ old streams on the routing thread, including during render-buffer waits. Epochs
 are sampled before device selection so changes during reconnection are retained.
 
 Static checks of the fix and regression test code pass. Automated test execution
-and live VM acceptance are **pending**: Hyper-V's VM management service is running
-on the host, but this session cannot enumerate VMs because of authorization limits.
+and live VM acceptance are **pending**. The Hyper-V test VM was created through
+UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console was
+opened for Windows installation; guest setup and audio fixture validation remain.
 No host audio defaults, playback, or running router processes were modified.
