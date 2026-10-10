@@ -1,7 +1,7 @@
-use crate::{Candidate, Journal};
+use crate::{Candidate, EventStream, Journal};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use window_manager_core::{
     Binding, Display, Error, ErrorCode, Id, Mutation, ObservedWindow, Result,
 };
@@ -94,10 +94,10 @@ pub enum NativeEvent {
     RegistrationError(String),
 }
 
-pub fn event_stream(_: &[u32]) -> Receiver<NativeEvent> {
+pub fn event_stream(_: &[u32]) -> EventStream {
     let (sender, receiver) = mpsc::channel();
     let _ = sender.send(NativeEvent::RegistrationError("Global shortcuts require Windows".into()));
-    receiver
+    EventStream { receiver, stop: None }
 }
 
 // This type is used by the shared facade even without a native adapter.

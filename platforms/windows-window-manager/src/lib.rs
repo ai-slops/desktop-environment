@@ -45,6 +45,25 @@ mod unsupported;
 #[cfg(not(windows))]
 pub use unsupported::*;
 
+/// Owns the observation thread and its registrations. Dropping it releases native resources.
+pub struct EventStream {
+    receiver: std::sync::mpsc::Receiver<NativeEvent>,
+    stop: Option<Box<dyn FnOnce() + Send>>,
+}
+impl std::ops::Deref for EventStream {
+    type Target = std::sync::mpsc::Receiver<NativeEvent>;
+    fn deref(&self) -> &Self::Target {
+        &self.receiver
+    }
+}
+impl Drop for EventStream {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop();
+        }
+    }
+}
+
 /// Journal writes precede hiding. A failed write prevents the native hide.
 impl Journal {
     pub fn load(path: &std::path::Path) -> window_manager_core::Result<Self> {

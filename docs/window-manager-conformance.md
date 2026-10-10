@@ -73,7 +73,7 @@ The linked function identifies relevant evidence, not the whole acceptance scena
 | AT-50 | [claim_elsewhere_and_stale_binding_are_rejected](../libs/window-manager-core/src/tests.rs#L642) | Ambiguous real-window restart UI |
 | AT-51 | [native_undo_is_scoped_and_revalidates_new_owners_and_manual_changes](../libs/window-manager-core/src/tests.rs#L522) | Real late undo/claim interactions |
 | AT-52 | [duplicate_configuration_maps_are_not_normalized_or_saved_over_last_good_state](../libs/window-manager-core/src/tests.rs#L2532) | Safe-mode recovery usability |
-| AT-53 | [named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection](../libs/window-manager-core/src/tests.rs#L2088) | Native shortcut collision and Korean IME/layouts |
+| AT-53 | [named_shortcuts_use_ids_and_fixed_roles_across_rename_and_workspace_selection](../libs/window-manager-core/src/tests.rs#L2088) | Native collision/release fixture below; Korean IME/layouts remain |
 | AT-54 | [settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects](../libs/window-manager-core/src/tests.rs#L1994) | Actual denied activation result |
 | AT-55 | [tab_identity_and_scope_are_validated_before_layout](../libs/window-manager-core/src/tests.rs#L1302) | Local command lifecycle review |
 | AT-56 | [game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detected](../libs/window-manager-core/src/tests.rs#L1321) | Real game CPU/GPU/frame and encoder impact |
@@ -102,6 +102,10 @@ cargo fmt --all -- --check
 cargo build -p window-manager
 ```
 
-Latest full workspace run: 123 passing tests, 0 failures, 4 intentionally ignored interactive/child fixtures. The recovery child fixture is exercised indirectly by its parent test. New window-manager crates pass strict Clippy; full-workspace strict Clippy still has documented pre-existing warnings in unrelated native adapters/applications. Stable rustfmt reports unsupported nightly-only configuration options but completes formatting.
+Prior full workspace run: 123 passing tests, 0 failures, 4 intentionally ignored interactive/child fixtures. The recovery child fixture is exercised indirectly by its parent test. New window-manager crates pass strict Clippy; full-workspace strict Clippy still has documented pre-existing warnings in unrelated native adapters/applications. Stable rustfmt reports unsupported nightly-only configuration options but completes formatting.
 
 To close application gates, record application/version, privilege, monitor identity/DPI, show-state and visibility profile, each AT/VG result, counts/timing distributions, and whether rendering/output evidence is known. Do not mark a provider or application supported solely from its executable name, an API success return or observed geometry. Keep personal titles/content out of published logs.
+
+## Native shortcut lifecycle follow-up
+
+The owned `Win+Ctrl+F14..F22` collision fixture passes without injecting input or replacing existing registrations. It verifies one error for duplicate requested IDs, rejects out-of-range IDs, preserves the original registration after a collision, and releases successfully registered keys on stream drop across three restarts. Observation hooks and their message-loop thread now share the same explicit shutdown lifetime; channel saturation cannot block shutdown. This exercises the production registration path with test virtual keys. Actual digit shortcuts under Korean IME/layouts remain an interactive gate.

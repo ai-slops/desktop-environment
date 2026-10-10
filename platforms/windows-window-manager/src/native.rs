@@ -1,11 +1,11 @@
 // Win32 pointer-sized handles/style bitfields require ABI casts; structure sizes
 // and shortcut numbers are bounded by their native types and configuration validation.
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-use crate::{Candidate, Journal};
+use crate::{Candidate, EventStream, Journal};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use window_manager_core::{
     Binding, Display, Error, ErrorCode, Id, Mutation, ObservedWindow, Rect, Result, ShowState,
     new_id,
@@ -778,10 +778,19 @@ pub enum NativeEvent {
 
 /// Out-of-context callbacks enqueue compact events; all observation/planning stays off the callback.
 #[must_use]
-pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
+pub fn event_stream(shortcuts: &[u32]) -> EventStream {
+    event_stream_with_key(shortcuts, |number| 0x30 + number)
+}
+
+#[allow(clippy::too_many_lines)] // Hook callback and registration cleanup share one thread lifetime.
+fn event_stream_with_key(shortcuts: &[u32], virtual_key: fn(u32) -> u32) -> EventStream {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        PM_NOREMOVE, PeekMessageW, PostThreadMessageW, WM_QUIT,
+    };
     let (sender, receiver) = mpsc::sync_channel(1024);
-    let numbers = shortcuts.to_vec();
-    std::thread::spawn(move || {
+    let numbers: std::collections::BTreeSet<_> = shortcuts.iter().copied().collect();
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
         use std::cell::RefCell;
         use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
         use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -815,6 +824,10 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
                 });
             }
         }
+        // Create the thread message queue before exposing its ID to shutdown.
+        let mut queued = MSG::default();
+        let _ = unsafe { PeekMessageW(&raw mut queued, None, 0, 0, PM_NOREMOVE) };
+        let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
         SENDER.with(|slot| *slot.borrow_mut() = Some(sender.clone()));
         // SAFETY: out-of-context callback is valid for this thread's message-loop lifetime.
         let hook = unsafe {
@@ -845,30 +858,44 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
                 "Window observation hook unavailable; manual autosave disabled".into(),
             ));
         }
+        let mut registered = Vec::new();
         for number in &numbers {
+            if !(1..=9).contains(number) {
+                let _ = sender.try_send(NativeEvent::RegistrationError(format!(
+                    "Shortcut number {number} is outside 1..=9"
+                )));
+                continue;
+            }
             // SAFETY: thread-scoped hotkey; stable configured number, no HWND or input injection.
             if let Err(error) = unsafe {
                 RegisterHotKey(
                     None,
                     *number as i32,
                     MOD_CONTROL | MOD_WIN | MOD_NOREPEAT,
-                    0x30 + *number,
+                    virtual_key(*number),
                 )
             } {
-                let _ = sender
-                    .send(NativeEvent::RegistrationError(format!("Win+Ctrl+{number}: {error}")));
+                let _ = sender.try_send(NativeEvent::RegistrationError(format!(
+                    "Win+Ctrl+{number}: {error}"
+                )));
+            } else {
+                registered.push(*number);
             }
         }
+        let _ = ready_sender.send(thread_id);
         let mut message = MSG::default();
         // SAFETY: writable MSG and a normal message loop for hooks/hotkeys on this worker.
         while unsafe { GetMessageW(&raw mut message, None, 0, 0) }.0 > 0 {
             if message.message == WM_HOTKEY
-                && sender.send(NativeEvent::Shortcut(message.wParam.0 as u32)).is_err()
+                && matches!(
+                    sender.try_send(NativeEvent::Shortcut(message.wParam.0 as u32)),
+                    Err(mpsc::TrySendError::Disconnected(_))
+                )
             {
                 break;
             }
         }
-        for number in numbers {
+        for number in registered {
             let _ = unsafe { UnregisterHotKey(None, number as i32) };
         }
         if !hook.0.is_null() {
@@ -878,7 +905,24 @@ pub fn event_stream(shortcuts: &[u32]) -> Receiver<NativeEvent> {
             let _ = unsafe { UnhookWinEvent(gesture_hook) };
         }
     });
-    receiver
+    let thread_id = ready_receiver.recv().ok();
+    EventStream {
+        receiver,
+        stop: Some(Box::new(move || {
+            if let Some(thread_id) = thread_id {
+                // SAFETY: this ID belongs to our live worker, whose queue already exists.
+                let _ = unsafe {
+                    PostThreadMessageW(
+                        thread_id,
+                        WM_QUIT,
+                        windows::Win32::Foundation::WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+            }
+            let _ = worker.join();
+        })),
+    }
 }
 
 #[cfg(test)]
@@ -889,6 +933,58 @@ mod tests {
         WS_OVERLAPPEDWINDOW,
     };
     use windows::core::w;
+    #[test]
+    fn shortcut_collision_preserves_owner_and_stream_drop_releases_registrations()
+    -> windows::core::Result<()> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            MOD_CONTROL, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
+        };
+        struct Hotkey(i32);
+        impl Drop for Hotkey {
+            fn drop(&mut self) {
+                let _ = unsafe { UnregisterHotKey(None, self.0) };
+            }
+        }
+        let register = |number: u32| unsafe {
+            RegisterHotKey(None, 100, MOD_CONTROL | MOD_WIN | MOD_NOREPEAT, 0x7C + number)
+        };
+        let Some(number) = (1..=9).find(|number| register(*number).is_ok()) else {
+            eprintln!("No unclaimed Win+Ctrl+F14..F22 available; collision fixture skipped");
+            return Ok(());
+        };
+        let owner = Hotkey(100);
+        let stream = event_stream_with_key(&[number, number, 0, 10], |number| 0x7C + number);
+        let errors = stream
+            .try_iter()
+            .filter_map(|event| match event {
+                NativeEvent::RegistrationError(message) => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            errors.iter().filter(|error| error.starts_with(&format!("Win+Ctrl+{number}:"))).count(),
+            1
+        );
+        assert_eq!(errors.iter().filter(|error| error.contains("outside 1..=9")).count(), 2);
+        drop(stream);
+        // Our original registration remains owned by this thread after the failed worker attempt.
+        let other = event_stream_with_key(&[number], |number| 0x7C + number);
+        assert!(other.try_iter().any(|event| matches!(event, NativeEvent::RegistrationError(message) if message.starts_with(&format!("Win+Ctrl+{number}:")))));
+        drop(other);
+        drop(owner);
+        for _ in 0..3 {
+            let stream = event_stream_with_key(&[number], |number| 0x7C + number);
+            assert!(
+                !stream.try_iter().any(|event| matches!(event, NativeEvent::RegistrationError(_)))
+            );
+            assert!(register(number).is_err());
+            drop(stream);
+            register(number)?;
+            drop(Hotkey(100));
+        }
+        Ok(())
+    }
+
     struct Owned(HWND);
     impl Owned {
         fn new() -> std::result::Result<Self, windows::core::Error> {
