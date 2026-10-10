@@ -13,3 +13,7 @@ workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 windows.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Required by the COM implementation macro for endpoint change notifications.
+windows-core = "0.61"

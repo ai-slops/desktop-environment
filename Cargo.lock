@@ -3408,6 +3408,7 @@ dependencies = [
  "anyhow",
  "tracing",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

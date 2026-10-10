@@ -81,8 +81,13 @@ an available screen if its saved bounds would be completely off-screen.
 Audio outputs are stored by endpoint ID; displays use their Windows display name
 (for example `\\.\DISPLAY3`). IDs and settings are passed as literal arguments,
 without shell interpolation. The audio dropdown also offers **Windows 기본 출력**,
-which resolves when the router starts. Hover over an audio option to see its endpoint
-ID and distinguish outputs with the same friendly name.
+which follows the current Windows default output while the router is running.
+When the default output changes from A to B, the router stops the old capture/render
+streams and resolves the source and target again. Explicit endpoint IDs keep their
+selection. If the new default equals the other endpoint, cloning pauses to prevent
+feedback and retries until the pair is valid again. A missing default after routing
+has started also waits for recovery. Initial invalid selections are still rejected. Hover over an audio option to see its
+endpoint ID and distinguish outputs with the same friendly name.
 
 Disconnected selections stay visible as **연결 안 됨**. They are not silently replaced
 with another device. Use **장치 다시 검색** after connecting hardware. Starting rejects
@@ -147,3 +152,5 @@ $env:DESKTOP_CONTROL_RELAY_SMOKE_BINARY = "$PWD\target\desktop-control\debug\dis
 cargo test -p desktop-control real_mirror_close_reopen_keeps_other_windows_running -- --ignored --nocapture
 Remove-Item Env:DESKTOP_CONTROL_RELAY_SMOKE_BINARY
 ```
+
+For VM-only default-output switching acceptance, see [the regression procedure](desktop-control-vm-testing.md).

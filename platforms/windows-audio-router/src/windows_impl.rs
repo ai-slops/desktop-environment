@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, bail};
 use std::slice;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -8,7 +12,7 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
     IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceCollection,
-    IMMDeviceEnumerator, MMDeviceEnumerator, eConsole, eRender,
+    IMMDeviceEnumerator, IMMNotificationClient, MMDeviceEnumerator, eConsole, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{
@@ -17,6 +21,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::PWSTR;
+
+mod default_endpoint;
+use default_endpoint::DefaultEndpointNotification;
 
 const RENDER_STREAM_FLAGS: u32 =
     AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
@@ -45,12 +52,24 @@ const DEVICE_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> Result<()> {
     let _com = ComGuard::new()?;
+    let watch = if source_selector.eq_ignore_ascii_case("default")
+        || target_selector.eq_ignore_ascii_case("default")
+    {
+        Some(DefaultEndpointWatch::new()?)
+    } else {
+        None
+    };
     let mut started_once = false;
 
     loop {
-        match run_audio_session(source_selector, target_selector, &mut started_once) {
-            Ok(()) => return Ok(()),
-            Err(error) if started_once => {
+        let generation = watch.as_ref().map_or(0, DefaultEndpointWatch::generation);
+        match run_audio_session(source_selector, target_selector, &mut started_once, watch.as_ref())
+        {
+            Ok(()) => info!("Default audio output changed; reconnecting to the current endpoints"),
+            Err(error)
+                if started_once
+                    || watch.as_ref().is_some_and(|watch| watch.generation() != generation) =>
+            {
                 warn!(
                     "Audio routing interrupted, likely due to a device change; waiting to reconnect: {error:#}"
                 );
@@ -65,11 +84,18 @@ fn run_audio_session(
     source_selector: &str,
     target_selector: &str,
     started_once: &mut bool,
+    watch: Option<&DefaultEndpointWatch>,
 ) -> Result<()> {
+    // Snapshot before resolving either selector so changes during setup cannot be lost.
+    let generation = watch.map_or(0, DefaultEndpointWatch::generation);
+    let changed = || watch.is_some_and(|watch| watch.generation() != generation);
     let source = select_output_device(source_selector)
         .with_context(|| format!("failed to resolve source device '{source_selector}'"))?;
     let target = select_output_device(target_selector)
         .with_context(|| format!("failed to resolve target device '{target_selector}'"))?;
+    if changed() {
+        return Ok(());
+    }
     if source.id == target.id {
         bail!("Source and target must be different output devices (audio feedback prevention)");
     }
@@ -89,6 +115,9 @@ fn run_audio_session(
         .with_context(|| format!("failed to open render client on {}", target.friendly_name))?;
     debug!("Target render initialized with format={}", render_stream.format.describe());
 
+    if changed() {
+        return Ok(());
+    }
     unsafe { render_stream.client.Start() }.context("failed to start render client")?;
     unsafe { capture_stream.client.Start() }.context("failed to start capture client")?;
     debug!("Started source capture and target render streams");
@@ -99,16 +128,25 @@ fn run_audio_session(
     }
 
     loop {
-        pump_audio(&capture_stream, &render_stream)?;
+        if pump_audio(&capture_stream, &render_stream, &changed)? {
+            return Ok(());
+        }
         thread::sleep(Duration::from_millis(3));
     }
 }
 
-fn pump_audio(capture: &AudioCaptureStream, render: &AudioRenderStream) -> Result<()> {
+fn pump_audio(
+    capture: &AudioCaptureStream,
+    render: &AudioRenderStream,
+    changed: &impl Fn() -> bool,
+) -> Result<bool> {
     loop {
+        if changed() {
+            return Ok(true);
+        }
         let packet_frames = unsafe { capture.capture.GetNextPacketSize() }?;
         if packet_frames == 0 {
-            return Ok(());
+            return Ok(false);
         }
 
         let mut data = std::ptr::null_mut();
@@ -127,6 +165,12 @@ fn pump_audio(capture: &AudioCaptureStream, render: &AudioRenderStream) -> Resul
         let silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
         let mut frame_offset = 0_u32;
         while frame_offset < frames {
+            // Also interrupt a full render buffer; otherwise a default change could
+            // leave us stuck waiting for the old endpoint to accept more audio.
+            if changed() {
+                unsafe { capture.capture.ReleaseBuffer(frames) }?;
+                return Ok(true);
+            }
             let padding = unsafe { render.client.GetCurrentPadding() }?;
             let capacity = render.buffer_frames.saturating_sub(padding);
             if capacity == 0 {
@@ -212,6 +256,46 @@ fn open_render_client(device: &IMMDevice, format: &WaveFormatOwned) -> Result<Au
     let buffer_frames = unsafe { client.GetBufferSize() }?;
     let render = unsafe { client.GetService::<IAudioRenderClient>() }?;
     Ok(AudioRenderStream { client, render, buffer_frames, format: format.clone() })
+}
+
+struct DefaultEndpointWatch {
+    enumerator: IMMDeviceEnumerator,
+    callback: IMMNotificationClient,
+    generation: Arc<AtomicU64>,
+}
+
+impl DefaultEndpointWatch {
+    fn new() -> Result<Self> {
+        let enumerator = device_enumerator()?;
+        let generation = Arc::new(AtomicU64::new(0));
+        let callback: IMMNotificationClient =
+            DefaultEndpointNotification { generation: generation.clone() }.into();
+        unsafe { enumerator.RegisterEndpointNotificationCallback(&callback) }
+            .context("failed to watch default audio output changes")?;
+        Ok(Self { enumerator, callback, generation })
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for DefaultEndpointWatch {
+    fn drop(&mut self) {
+        let _ = unsafe { self.enumerator.UnregisterEndpointNotificationCallback(&self.callback) };
+    }
+}
+
+impl Drop for AudioCaptureStream {
+    fn drop(&mut self) {
+        let _ = unsafe { self.client.Stop() };
+    }
+}
+
+impl Drop for AudioRenderStream {
+    fn drop(&mut self) {
+        let _ = unsafe { self.client.Stop() };
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,7 +470,16 @@ impl Drop for ComGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioOutputDevice, resolve_output_device};
+    use super::{AudioOutputDevice, DefaultEndpointNotification, resolve_output_device};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    use windows::Win32::Media::Audio::{
+        DEVICE_STATE_ACTIVE, IMMNotificationClient, eCapture, eCommunications, eConsole,
+        eMultimedia, eRender,
+    };
+    use windows::core::PCWSTR;
 
     fn devices() -> Vec<AudioOutputDevice> {
         vec![
@@ -432,5 +525,88 @@ mod tests {
             output.is_default = false;
         }
         assert!(resolve_output_device(outputs, "default").is_err());
+    }
+
+    // These callbacks are invoked on a local COM object only. No endpoint is
+    // registered, opened, played, or changed by the regression tests.
+    fn notification() -> (IMMNotificationClient, Arc<AtomicU64>) {
+        let generation = Arc::new(AtomicU64::new(0));
+        let callback = DefaultEndpointNotification { generation: generation.clone() }.into();
+        (callback, generation)
+    }
+
+    #[test]
+    fn only_render_console_default_changes_request_reconnection() -> anyhow::Result<()> {
+        let (callback, generation) = notification();
+        let endpoint = windows::core::w!("output-b");
+        unsafe {
+            callback.OnDefaultDeviceChanged(eCapture, eConsole, endpoint)?;
+            callback.OnDefaultDeviceChanged(eRender, eCommunications, endpoint)?;
+            callback.OnDefaultDeviceChanged(eRender, eMultimedia, endpoint)?;
+            callback.OnDeviceAdded(endpoint)?;
+            callback.OnDeviceRemoved(endpoint)?;
+            callback.OnDeviceStateChanged(endpoint, DEVICE_STATE_ACTIVE)?;
+        }
+        assert_eq!(generation.load(Ordering::Relaxed), 0);
+        unsafe {
+            callback.OnDefaultDeviceChanged(eRender, eConsole, endpoint)?;
+        }
+        assert_eq!(generation.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn default_removal_and_changes_during_reconnection_are_not_lost() -> anyhow::Result<()> {
+        let (callback, generation) = notification();
+        let original_session = generation.load(Ordering::Relaxed);
+        unsafe {
+            callback.OnDefaultDeviceChanged(eRender, eConsole, PCWSTR::null())?;
+        }
+        assert_ne!(generation.load(Ordering::Relaxed), original_session);
+        let reconnecting_session = generation.load(Ordering::Relaxed);
+        unsafe {
+            callback.OnDefaultDeviceChanged(eRender, eConsole, windows::core::w!("output-b"))?;
+            callback.OnDefaultDeviceChanged(eRender, eConsole, windows::core::w!("output-a"))?;
+        }
+        assert_ne!(generation.load(Ordering::Relaxed), reconnecting_session);
+        assert_eq!(generation.load(Ordering::Relaxed), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn switching_default_reresolves_source_and_target_but_keeps_fixed_ids() -> anyhow::Result<()> {
+        let (callback, generation) = notification();
+        let session_generation = generation.load(Ordering::Relaxed);
+        let fixed_target = resolve_output_device(devices(), "output-c")?;
+        assert_eq!(resolve_output_device(devices(), "default")?.id, "output-a");
+        let mut outputs = devices();
+        for output in &mut outputs {
+            output.is_default = output.id == "output-b";
+        }
+        unsafe {
+            callback.OnDefaultDeviceChanged(eRender, eConsole, windows::core::w!("output-b"))?;
+        }
+        assert_ne!(generation.load(Ordering::Relaxed), session_generation);
+        assert_eq!(resolve_output_device(outputs.clone(), "default")?.id, "output-b");
+        assert_eq!(resolve_output_device(outputs.clone(), "DEFAULT")?.id, "output-b");
+        assert_eq!(resolve_output_device(outputs.clone(), "output-a")?.id, "output-a");
+        assert_eq!(resolve_output_device(outputs, "output-c")?.id, fixed_target.id);
+        Ok(())
+    }
+
+    #[test]
+    fn default_switch_can_create_feedback_and_later_clear_it() -> anyhow::Result<()> {
+        let mut outputs = devices();
+        let target = resolve_output_device(outputs.clone(), "output-c")?;
+        assert_ne!(resolve_output_device(outputs.clone(), "default")?.id, target.id);
+        for output in &mut outputs {
+            output.is_default = output.id == target.id;
+        }
+        assert_eq!(resolve_output_device(outputs.clone(), "default")?.id, target.id);
+        for output in &mut outputs {
+            output.is_default = output.id == "output-b";
+        }
+        assert_ne!(resolve_output_device(outputs, "default")?.id, target.id);
+        Ok(())
     }
 }
