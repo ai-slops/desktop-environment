@@ -88,6 +88,12 @@ try {
             return
         }
     }
+    $router = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target/debug/audio-output-router.exe'
+    if (Test-Path -LiteralPath $router) {
+        Write-Output 'Active guest audio endpoints:'
+        & $router list-audio-devices
+        if ($LASTEXITCODE -ne 0) { throw 'Guest audio endpoint inventory failed.' }
+    }
     if ($RunTests) {
         & $mise exec -- powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Workspace 'tools/test-desktop-control-vm.ps1')
         if ($LASTEXITCODE -ne 0) { throw 'Guest regression checks failed.' }
