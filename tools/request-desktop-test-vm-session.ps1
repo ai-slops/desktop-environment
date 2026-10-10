@@ -8,7 +8,10 @@ $workerRoot = Join-Path $workspace 'target/vm-session'
 $statusPath = Join-Path $workerRoot 'status.json'
 if (-not (Test-Path -LiteralPath $statusPath)) { throw 'Start the scoped elevated VM worker first.' }
 $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json
-if (-not $status.pid -or -not $status.expiresUtc -or [DateTime]::Parse($status.expiresUtc).ToUniversalTime() -le [DateTime]::UtcNow) {
+# PowerShell 7 converts JSON timestamps to DateTime automatically. Parsing that
+# value again via its culture-specific string loses the UTC kind/time zone.
+$expiresUtc = if ($status.expiresUtc) { ([DateTime]$status.expiresUtc).ToUniversalTime() } else { [DateTime]::MinValue }
+if (-not $status.pid -or $expiresUtc -le [DateTime]::UtcNow) {
     throw 'VM worker is stopped or expired; start it again with UAC.'
 }
 $owner = Get-Content -LiteralPath (Join-Path $workspace 'target/vm-hyperv/owner.json') -Raw | ConvertFrom-Json
