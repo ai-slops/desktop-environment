@@ -31,6 +31,7 @@ function Invoke-SignalAcceptance {
     $guestTarget = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target'
     $binaryDirectory = Join-Path $guestTarget 'debug'
     Push-Location $workspace
+    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'audio-output-router', '-j', "$BuildJobs")
     # Real, recorded signal acceptance uses only the dedicated guest fixtures.
     $engine = $null
     $probeVariables = @('DESKTOP_AUDIO_VM_PROBE', 'DESKTOP_AUDIO_PROBE_OUTPUT', 'DESKTOP_AUDIO_DEFAULT_HELPER', 'DESKTOP_AUDIO_ROUTER')
@@ -57,6 +58,8 @@ function Invoke-SignalAcceptance {
 }
 if ($sessionId -eq 0) {
     if ($InteractiveChild) { throw 'Interactive task unexpectedly started in session 0.' }
+    # Fixture audio is visible here; enhanced desktop sessions expose only Remote Audio.
+    Invoke-SignalAcceptance
     # PowerShell Direct runs in session 0, where there is no interactive display.
     # Use this same VM account's existing desktop token, without storing its
     # password in Task Scheduler or running the native tests as Administrator.
@@ -94,7 +97,6 @@ if ($sessionId -eq 0) {
         if (Test-Path -LiteralPath $logFile) { Get-Content -LiteralPath $logFile }
         $result = Get-Content -LiteralPath $resultFile -Raw | ConvertFrom-Json
         if (-not $result.ok) { throw "Interactive guest tests failed: $($result.error)" }
-        Invoke-SignalAcceptance
         return
     } finally {
         if ($registered) {
