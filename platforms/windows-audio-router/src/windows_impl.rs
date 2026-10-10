@@ -23,6 +23,8 @@ use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::PWSTR;
 
 mod default_endpoint;
+#[cfg(test)]
+mod signal_probe;
 use default_endpoint::DefaultEndpointNotification;
 
 const RENDER_STREAM_FLAGS: u32 =

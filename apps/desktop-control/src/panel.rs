@@ -33,6 +33,7 @@ pub struct ControlPanel {
     window_state: Option<WindowStateFile>,
     skip_initial_placement_save: bool,
     devices_pending: Option<Receiver<Devices>>,
+    next_device_refresh: std::time::Instant,
     audio_devices: Vec<AudioOutputDevice>,
     displays: Vec<DisplayInfo>,
     device_errors: Vec<String>,
@@ -75,6 +76,7 @@ impl ControlPanel {
             window_state,
             skip_initial_placement_save: false,
             devices_pending: None,
+            next_device_refresh: std::time::Instant::now() + Duration::from_secs(2),
             audio_devices: Vec::new(),
             displays: Vec::new(),
             device_errors: Vec::new(),
@@ -304,6 +306,11 @@ impl ControlPanel {
     }
 
     fn start(&mut self) -> Result<()> {
+        // The default may have changed since the last asynchronous GUI refresh.
+        // Keep the symbolic selector, but validate against current endpoints.
+        if self.draft.audio.enabled && !self.audio.is_running() {
+            self.audio_devices = list_output_devices()?;
+        }
         self.start_with_resolver(sibling_binary)
     }
 
@@ -760,6 +767,10 @@ impl ControlPanel {
 impl eframe::App for ControlPanel {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.poll();
+        if std::time::Instant::now() >= self.next_device_refresh {
+            self.next_device_refresh = std::time::Instant::now() + Duration::from_secs(2);
+            self.refresh_devices();
+        }
         if let Err(error) = self.remember_window(frame) {
             self.error = Some(format!("창 배치를 저장하지 못했습니다: {error:#}"));
         }
@@ -856,19 +867,9 @@ fn audio_selector(
     value: &mut String,
     saved_label: &mut String,
     devices: &[AudioOutputDevice],
-) {
+) -> egui::Response {
     ui.label(title);
-    let label = if value == "default" {
-        devices.iter().find(|device| device.is_default).map_or_else(
-            || "Windows 기본 출력 (연결 안 됨)".into(),
-            |device| format!("Windows 기본 출력 · {}", device.friendly_name),
-        )
-    } else {
-        devices.iter().find(|device| device.id == *value).map_or_else(
-            || missing_label(value, saved_label),
-            |device| device.friendly_name.clone(),
-        )
-    };
+    let label = audio_selection_label(value, saved_label, devices);
     egui::ComboBox::from_id_salt(id)
         .width(ui.available_width() - 20.0)
         .selected_text(label)
@@ -885,12 +886,140 @@ fn audio_selector(
                     saved_label.clone_from(&device.friendly_name);
                 }
             }
-        });
+        })
+        .response
+}
+
+fn audio_selection_label(value: &str, saved_label: &str, devices: &[AudioOutputDevice]) -> String {
+    if value == "default" {
+        devices.iter().find(|device| device.is_default).map_or_else(
+            || "Windows 기본 출력 (연결 안 됨)".into(),
+            |device| format!("Windows 기본 출력 · {}", device.friendly_name),
+        )
+    } else {
+        devices.iter().find(|device| device.id == value).map_or_else(
+            || missing_label(value, saved_label),
+            |device| device.friendly_name.clone(),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_combobox_click_keeps_default_symbolic_after_device_refresh() -> Result<()> {
+        fn frame(
+            ctx: &egui::Context,
+            events: Vec<egui::Event>,
+            value: &mut String,
+            label: &mut String,
+            devices: &[AudioOutputDevice],
+        ) -> (egui::FullOutput, egui::Rect) {
+            let mut rect = egui::Rect::NOTHING;
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(760.0, 560.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        rect =
+                            audio_selector(ui, "test-source", "Source", value, label, devices).rect;
+                    });
+                },
+            );
+            (output, rect)
+        }
+        fn click(position: egui::Pos2) -> Vec<egui::Event> {
+            vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        }
+        fn text_position(shape: &egui::epaint::Shape, text: &str) -> Option<egui::Pos2> {
+            match shape {
+                egui::epaint::Shape::Text(shape) if shape.galley.job.text == text => {
+                    Some(shape.pos + shape.galley.rect.center().to_vec2())
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().find_map(|shape| text_position(shape, text))
+                }
+                _ => None,
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let mut panel = panel(directory.path());
+        let ctx = egui::Context::default();
+        let mut value = "speakers".to_owned();
+        let mut label = "Speakers".to_owned();
+        let (_, rect) = frame(&ctx, vec![], &mut value, &mut label, &panel.audio_devices);
+        frame(&ctx, click(rect.center()), &mut value, &mut label, &panel.audio_devices);
+        let (output, _) = frame(&ctx, vec![], &mut value, &mut label, &panel.audio_devices);
+        let position = output
+            .shapes
+            .iter()
+            .find_map(|shape| text_position(&shape.shape, "Windows 기본 출력"))
+            .context("Default option was not rendered")?;
+        frame(&ctx, click(position), &mut value, &mut label, &panel.audio_devices);
+        assert_eq!(value, "default");
+        assert_eq!(label, "Windows 기본 출력");
+        for device in &mut panel.audio_devices {
+            device.is_default = device.id == "headphones";
+        }
+        let (output, _) = frame(&ctx, vec![], &mut value, &mut label, &panel.audio_devices);
+        assert!(
+            output.shapes.iter().any(|shape| text_position(
+                &shape.shape,
+                "Windows 기본 출력 · Headphones"
+            )
+            .is_some())
+        );
+        assert_eq!(value, "default");
+        Ok(())
+    }
+
+    #[test]
+    fn gui_default_switch_updates_label_and_validation_without_pinning_the_source() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut panel = panel(directory.path());
+        panel.draft.audio.source = "default".into();
+        assert!(audio_selection_label("default", "old", &panel.audio_devices).contains("Speakers"));
+        assert!(panel.validate_devices().is_ok());
+        for device in &mut panel.audio_devices {
+            device.is_default = device.id == "headphones";
+        }
+        assert!(
+            audio_selection_label("default", "old", &panel.audio_devices).contains("Headphones")
+        );
+        assert!(panel.validate_devices().is_err()); // default source now equals fixed target.
+        panel.draft.audio.target = "speakers".into();
+        panel.validate_devices()?;
+        assert_eq!(panel.draft.audio.source, "default");
+        let args = panel.draft.audio_args();
+        assert_eq!(args, vec!["route", "default", "speakers"]);
+        panel.save_current()?;
+        let reopened = ControlPanel::new(panel.path.clone());
+        assert_eq!(reopened.draft.audio.source, "default");
+        assert_eq!(audio_selection_label("speakers", "Speakers", &panel.audio_devices), "Speakers");
+        Ok(())
+    }
 
     fn panel(directory: &std::path::Path) -> ControlPanel {
         let mut panel = ControlPanel::new(directory.join("presets.json"));
