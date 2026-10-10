@@ -2,7 +2,7 @@
 
 Measured 2026-10-10 on Windows 10.0.26200.0, ordinary desktop user token, release build, AMD64 Family 25 Model 117 Stepping 2, AuthenticAMD. Four connected monitors include 96 and 192 DPI; native fixtures deliberately remain on one same-DPI monitor. No elevated target or existing user application is controlled.
 
-These are reference fixtures, not an application compatibility or rendering-liveness certification. Native geometry settlement includes submission and repeated observation/message pumping. Render readiness remains unknown. Quantiles use nearest rank; 20 samples make the native P99 equal to the worst sample. Results depend on desktop load and are not fixed product guarantees.
+The planning and STATIC measurements are reference fixtures. Limited actual-browser evidence is recorded separately below; rendering liveness remains uncertified. Native geometry settlement includes submission and repeated observation/message pumping. Render readiness remains unknown. Quantiles use nearest rank; 20 samples make the native P99 equal to the worst sample. Results depend on desktop load and are not fixed product guarantees.
 
 ## Pure planning
 
@@ -51,6 +51,34 @@ Disposable, same-thread/same-parent Win32 STATIC windows created and destroyed b
 | 16 | widespread_resize | 13.262 / 20.341 / 22.787 / 22.787 | 30.287 / 40.778 / 42.027 / 42.027 | 320 / 0 |
 | 16 | hide_show | 14.424 / 41.049 / 52.650 / 52.650 | 38.838 / 71.541 / 84.813 / 84.813 | 320 / 0 |
 
+## Isolated actual browser applications
+
+Measured 2026-10-10, release build, ordinary user, Chrome 154.0.8037.98 and Edge 155.0.4283.45 (installed executable FileVersion). Each application used one newly launched app window with a unique temporary profile and constant data page. Processes were created suspended, assigned to an owned kill-on-close Job, then resumed. Existing profiles/windows were not bound. Profiles were removed and terminated bindings were rejected. Reports contain no native handle, PID, profile path or personal title/content: [Chrome raw report](measurements/window-manager-chrome-20261010.json), [Edge raw report](measurements/window-manager-edge-20261010.json).
+
+Same-monitor 96 DPI cases used five warm-ups and 30 measured requests each; one asynchronous individual geometry/visibility request per sample. Client size and DPI were checked in addition to frame/visibility. All six cases had zero failures, zero client/DPI mismatches and zero observed foreground changes. Rendering readiness is unknown; product planner/journal overhead is excluded from these timing cases.
+
+| Application | Mode | Submission median / P95 / P99 / worst ms | Settlement median / P95 / P99 / worst ms |
+| --- | --- | --- | --- |
+| Chrome 154.0.8037.98 | move_only | 0.028 / 0.477 / 0.559 / 0.559 | 4.950 / 6.272 / 6.275 / 6.275 |
+| Chrome 154.0.8037.98 | resize | 0.120 / 0.456 / 1.313 / 1.313 | 4.649 / 8.534 / 11.136 / 11.136 |
+| Chrome 154.0.8037.98 | hide_show | 0.261 / 0.656 / 0.824 / 0.824 | 9.213 / 13.838 / 16.909 / 16.909 |
+| Edge 155.0.4283.45 | move_only | 0.146 / 0.548 / 1.911 / 1.911 | 5.640 / 6.846 / 183.608 / 183.608 |
+| Edge 155.0.4283.45 | resize | 0.111 / 0.762 / 1.327 / 1.327 | 4.675 / 9.093 / 11.896 / 11.896 |
+| Edge 155.0.4283.45 | hide_show | 0.216 / 0.606 / 1.521 / 1.521 | 8.635 / 15.921 / 16.072 / 16.072 |
+
+Both applications also passed explicit minimize/normal restore, recovery preserving a minimized window, recovery revealing a hidden window without changing frame/client, and emptied recovery journals. These are direct adapter/journal tests, not evidence of crash-helper behavior against every browser mode.
+
+**Restricted mixed-DPI profile:** both applications failed all 20 measured 96↔192 DPI transitions within the 900 ms settlement bound. A requested 1600×1200 frame settled at 3200×2400 on 192 DPI; a requested 800×600 frame settled at 400×300 on return to 96 DPI. Client dimensions also differed, and each run observed two foreground changes. The probe sent one geometry request and did not replay a correction. Timeout quantiles in raw reports are failure bounds, not successful transition latency. This profile is unsupported. `capabilities.allow_dpi_transfer` now defaults to false, including older v1 configurations; normal same-DPI operations remain available. Explicit opt-in is for independently verified application profiles and does not certify rendering or capture safety. Undo also rechecks this policy.
+
+Reproduce only with a disposable, isolated profile through the supplied harness:
+
+```powershell
+cargo run --release -p windows-window-manager --example application_probe -- "C:\Program Files\Google\Chrome\Application\chrome.exe" Chrome 154.0.8037.98 target/window-manager-chrome-probe.json
+cargo run --release -p windows-window-manager --example application_probe -- "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" Edge 155.0.4283.45 target/window-manager-edge-probe.json
+```
+
+The application/version arguments label the report; verify the installed executable FileVersion before each run. Only Chrome/Edge-style app windows are accepted; no window fallback by title or process name is used.
+
 ## Reproduction and product logs
 
 ```powershell
@@ -60,4 +88,4 @@ cargo run --release -p windows-window-manager --example benchmark -- target/wind
 
 The worker retains one redacted `.last-transition.json` beside its configuration/journal. It records opaque request/window IDs, exact scope, revisions, mode, impact, fallback diagnostics, batch/individual counts, per-window result and microsecond planning/submission/native API/geometry-settlement/focus times. Planning is measured against an immutable snapshot. Submission includes journal preparation; native API time isolates submit_many. Settlement elapsed starts before journal preparation and includes polling; geometry_settlement is null when any submitted operation failed, timed out or was superseded. Authority is rechecked before commit; observed geometry alone is not a committed authority result. No native handles, titles or screenshots are logged.
 
-Unmeasured release gates: real browser/editor/terminal/game/broadcaster mixes, foreign/elevated targets, mixed-DPI native transfer distributions, physical disconnect/reconnect, CPU/GPU load and broadcast encoder impact, idle resource distributions, and actual render readiness. Existing bounded fixture tests cover stalls, rapid supersession, output evidence expiry/disconnect and crash reveal, without claiming those application matrix results.
+Unmeasured release gates: larger browser/editor/terminal/game/broadcaster mixes, elevated targets, verified mixed-DPI native transfers, physical disconnect/reconnect, CPU/GPU load and broadcast encoder impact, idle resource distributions, and actual render readiness. Existing bounded fixture tests cover stalls, rapid supersession, output evidence expiry/disconnect and crash reveal, without claiming those application matrix results.

@@ -156,6 +156,9 @@ impl UndoRecord {
             if geometry.is_some()
                 && (protection.geometry_lock
                     || !current.can_move
+                    || !reference.capabilities.allow_move
+                    || !move_only && !reference.capabilities.allow_resize
+                    || prior.dpi != current.dpi && !reference.capabilities.allow_dpi_transfer
                     || (!move_only && !current.can_resize)
                     || current.show_state != ShowState::Normal)
                 || visible == Some(false)

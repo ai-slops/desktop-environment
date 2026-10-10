@@ -862,6 +862,11 @@ impl Manager {
                 ui.checkbox(&mut edit.capabilities.allow_resize, "크기 변경 허용");
                 ui.checkbox(&mut edit.capabilities.allow_show_state, "상태 복원 호환성 확인됨");
             });
+            ui.checkbox(
+                &mut edit.capabilities.allow_dpi_transfer,
+                "서로 다른 DPI 이동 호환성을 확인했음 (기본 차단)",
+            );
+            ui.small("Chrome/Edge의 96↔192 DPI 전환은 현재 미지원입니다. 같은 DPI 이동은 이 설정과 무관합니다.");
             ui.checkbox(&mut edit.allow_hide, "이 앱의 숨김/복구 호환성을 확인했음 (숨김 허용)");
             ui.horizontal(|ui| {
                 ui.label("태그");

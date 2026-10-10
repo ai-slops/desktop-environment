@@ -42,12 +42,12 @@ The linked function identifies relevant evidence, not the whole acceptance scena
 | AT-19 | [preserved_size_is_visit_local_and_idempotent_recall_keeps_it](../libs/window-manager-core/src/tests.rs#L578) | Real app recall |
 | AT-20 | [supersession_interrupts_a_stalled_scope_without_cancelling_disjoint_generations](../apps/window-manager/src/service.rs#L206) | Foreign-app late A→B→C effects |
 | AT-21 | [unrelated_scope_and_new_claims_are_not_overwritten_by_old_plans](../libs/window-manager-core/src/tests.rs#L1164) | Independent real-app concurrency |
-| AT-22 | [dpi_transfer_verifies_requested_client_size_instead_of_only_frame](../libs/window-manager-core/src/tests.rs#L163) | Foreign-window mixed-DPI transfers |
+| AT-22 | [dpi_transfer_verifies_requested_client_size_instead_of_only_frame](../libs/window-manager-core/src/tests.rs#L163) | Chrome/Edge 96↔192 DPI unsupported; default compatibility gate added |
 | AT-23 | [subtree_moves_copies_and_size_copies_are_atomic_local_and_independent](../libs/window-manager-core/src/tests.rs#L945) | Nested drag/drop interaction review |
 | AT-24 | [responsive_folding_restores_wide_ratios_and_variant_preferences](../libs/window-manager-core/src/tests.rs#L1182) | Interactive responsive resize |
 | AT-25 | [semantic_tabs_keep_occurrences_independent_even_when_widened](../libs/window-manager-core/src/tests.rs#L1098) | Real semantic visibility profile |
 | AT-26 | [generated_layouts_have_one_final_mutation_per_window_and_no_saved_state_drift](../libs/window-manager-core/src/tests.rs#L1233) | Foreign native resize counts |
-| AT-27 | [fixed_size_children_leave_flexible_remainder_and_allowed_fallback_folds](../libs/window-manager-core/src/tests.rs#L1794) | Actual client-size preservation |
+| AT-27 | [fixed_size_children_leave_flexible_remainder_and_allowed_fallback_folds](../libs/window-manager-core/src/tests.rs#L1794) | Single Chrome/Edge app-window move-only checked; larger arrangements remain |
 | AT-28 | [manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception](../libs/window-manager-core/src/tests.rs#L1516) | Real gesture/IME provenance |
 | AT-29 | [formulas_are_bounded_pure_typed_and_lazy](../libs/window-manager-core/src/tests.rs#L666) | Rule diagnostics usability |
 | AT-30 | [packages_require_explicit_mapping_and_have_no_live_identity](../libs/window-manager-core/src/tests.rs#L734) | Mapping/import interaction review |
@@ -67,7 +67,7 @@ The linked function identifies relevant evidence, not the whole acceptance scena
 | AT-44 | [stalled_native_submission_has_bounded_failure_and_preserves_other_scopes](../apps/window-manager/src/service.rs#L233) | Foreign hung-app/hotkey responsiveness |
 | AT-45 | [stalled_native_submission_has_bounded_failure_and_preserves_other_scopes](../apps/window-manager/src/service.rs#L233) | Real app repeated size rejection |
 | AT-46 | [move_only_keeps_client_size_and_destroyed_lifetime_is_rejected](../platforms/windows-window-manager/src/native.rs#L955) | Forced same-value HWND reuse and inventory-to-bind race |
-| AT-47 | [separate_helper_recovers_hidden_window_after_parent_process_death](../apps/window-manager/tests/recovery.rs#L35) | Real application visibility profiles |
+| AT-47 | [separate_helper_recovers_hidden_window_after_parent_process_death](../apps/window-manager/tests/recovery.rs#L35) | Chrome/Edge direct journal profile checked; independent-helper browser review remains |
 | AT-48 | [manual_minimization_is_not_undone_by_force_restore](../libs/window-manager-core/src/tests.rs#L1628) | Real user minimization |
 | AT-49 | [settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects](../libs/window-manager-core/src/tests.rs#L1994) | Actual owned-modal creation/IME |
 | AT-50 | [claim_elsewhere_and_stale_binding_are_rejected](../libs/window-manager-core/src/tests.rs#L642) | Ambiguous real-window restart UI |
@@ -102,7 +102,7 @@ cargo fmt --all -- --check
 cargo build -p window-manager
 ```
 
-Prior full workspace run: 123 passing tests, 0 failures, 4 intentionally ignored interactive/child fixtures. The recovery child fixture is exercised indirectly by its parent test. New window-manager crates pass strict Clippy; full-workspace strict Clippy still has documented pre-existing warnings in unrelated native adapters/applications. Stable rustfmt reports unsupported nightly-only configuration options but completes formatting.
+Latest full workspace run: 128 passing tests, 0 failures, 4 intentionally ignored interactive/child fixtures. The recovery child fixture is exercised indirectly by its parent test. New window-manager crates pass strict Clippy; full-workspace strict Clippy still has documented pre-existing warnings in unrelated native adapters/applications. Stable rustfmt reports unsupported nightly-only configuration options but completes formatting.
 
 To close application gates, record application/version, privilege, monitor identity/DPI, show-state and visibility profile, each AT/VG result, counts/timing distributions, and whether rendering/output evidence is known. Do not mark a provider or application supported solely from its executable name, an API success return or observed geometry. Keep personal titles/content out of published logs.
 
@@ -113,3 +113,7 @@ The owned `Win+Ctrl+F14..F22` collision fixture passes without injecting input o
 ## Batch failure follow-up
 
 `native_defer_failure_leaves_prior_window_unchanged_without_end` creates two owned STATIC windows, queues the first move, destroys the second after lifetime validation, and receives a real Win32 Defer failure. End is not called; the first frame remains unchanged and the destroyed lifetime is rejected. Separate injected Begin/Defer/End return-path tests verify immediate stop, retention of each returned handle, one End at most, and no individual replay. An End failure remains an uncertain native outcome; these tests do not promise atomic rollback after End.
+
+## Actual application follow-up
+
+[Published browser measurements](window-manager-performance.md#isolated-actual-browser-applications) cover one isolated normal app window each for Chrome 154.0.8037.98 and Edge 155.0.4283.45 at 96 DPI. Move-only, resize and hide/show passed 30 measured requests per mode; explicit minimize/restore and direct journal recovery also passed. Process termination invalidated bindings and unique temporary profiles were removed. Rendering/output remains unknown. Actual 96↔192 DPI requests failed on both applications; a compatibility opt-in now defaults off and prevents such a plan before native effects. Older configurations inherit the off value. Pure planning explicitly declares simulated compatibility when exercising mixed-DPI fixtures. Physical topology loss, elevated/modals/IME, browser rendering/capture, simultaneous application mixes and exact HWND reuse remain open.

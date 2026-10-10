@@ -16,7 +16,10 @@ fn fixture() -> (Configuration, Snapshot, Target) {
             public_content: false,
             protection: Protection::default(),
             output_protection: OutputProtection::None,
-            capabilities: CapabilityProfile::default(),
+            capabilities: CapabilityProfile {
+                allow_dpi_transfer: true,
+                ..CapabilityProfile::default()
+            },
         },
     );
     let slot = DisplaySlot {
@@ -2627,5 +2630,63 @@ fn manual_onboarding_captures_current_arrangement_without_rules_or_native_mutati
     );
     assert_eq!(config.revision, revision);
     assert_eq!(serde_json::to_vec(&config).unwrap_or_default(), bytes);
+    Ok(())
+}
+
+#[test]
+fn cross_dpi_transfer_requires_explicit_compatibility_and_old_profiles_default_off()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (mut config, mut snapshot, target) = fixture();
+    let profile: CapabilityProfile =
+        decode_json(br#"{"allow_move":true,"allow_resize":true,"allow_show_state":false}"#)
+            .map_err(|error| {
+                Error::new(ErrorCode::InvalidConfiguration, error.to_string(), "fixture")
+            })?;
+    assert!(!profile.allow_dpi_transfer);
+    config.windows.get_mut("preview").ok_or("fixture window missing")?.capabilities = profile;
+    let same_dpi =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    assert!(!same_dpi.mutations.is_empty());
+    snapshot.displays.get_mut("monitor").ok_or("fixture display missing")?.dpi = 192;
+    let request = Request::open(&config, target);
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &request).err().map(|error| error.code),
+        Some(ErrorCode::UnsupportedOperation)
+    );
+    assert!(plan_independent(&config, &Runtime::default(), &snapshot, &request).is_err());
+    config
+        .windows
+        .get_mut("preview")
+        .ok_or("fixture window missing")?
+        .capabilities
+        .allow_dpi_transfer = true;
+    let accepted = plan(&config, &Runtime::default(), &snapshot, &request)?;
+    assert_eq!(accepted.desired["preview"].dpi, 192);
+    assert!(!accepted.mutations.is_empty());
+    Ok(())
+}
+
+#[test]
+fn undo_rechecks_current_move_resize_and_dpi_compatibility_profiles()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (mut config, mut snapshot, target) = fixture();
+    snapshot.displays.get_mut("monitor").ok_or("fixture display missing")?.dpi = 192;
+    let prior = Runtime::default();
+    let transition = plan(&config, &prior, &snapshot, &Request::open(&config, target))?;
+    let mut after = settled_snapshot(&transition, &snapshot);
+    after.windows.get_mut("preview").ok_or("fixture window missing")?.dpi = 192;
+    after.windows.get_mut("preview").ok_or("fixture window missing")?.client = [1600, 1000];
+    let mut runtime = prior.clone();
+    transition.commit(&mut runtime);
+    let undo = UndoRecord::capture(&transition, &prior, &after, &runtime);
+    assert!(undo.reverse(&config, &runtime, &after).is_ok());
+    for restriction in 0..3 {
+        let profile =
+            &mut config.windows.get_mut("preview").ok_or("fixture window missing")?.capabilities;
+        profile.allow_move = restriction != 0;
+        profile.allow_resize = restriction != 1;
+        profile.allow_dpi_transfer = restriction != 2;
+        assert!(undo.reverse(&config, &runtime, &after).is_err());
+    }
     Ok(())
 }

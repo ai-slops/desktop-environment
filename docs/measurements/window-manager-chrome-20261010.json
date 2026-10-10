@@ -1,0 +1,148 @@
+{
+  "application": "Chrome",
+  "cases": [
+    {
+      "client_or_dpi_mismatches": 0,
+      "failures": 0,
+      "geometry_settlement_ns": {
+        "median": 4950500,
+        "p95": 6272100,
+        "p99": 6274900,
+        "worst": 6274900
+      },
+      "individual_operations": 30,
+      "mode": "move_only",
+      "observed_foreground_changes": 0,
+      "samples": 30,
+      "submission_ns": {
+        "median": 28400,
+        "p95": 476700,
+        "p99": 558600,
+        "worst": 558600
+      },
+      "windows": 1
+    },
+    {
+      "client_or_dpi_mismatches": 0,
+      "failures": 0,
+      "geometry_settlement_ns": {
+        "median": 4648600,
+        "p95": 8533600,
+        "p99": 11135500,
+        "worst": 11135500
+      },
+      "individual_operations": 30,
+      "mode": "resize",
+      "observed_foreground_changes": 0,
+      "samples": 30,
+      "submission_ns": {
+        "median": 119700,
+        "p95": 456300,
+        "p99": 1312900,
+        "worst": 1312900
+      },
+      "windows": 1
+    },
+    {
+      "client_or_dpi_mismatches": 0,
+      "failures": 0,
+      "geometry_settlement_ns": {
+        "median": 9212500,
+        "p95": 13837800,
+        "p99": 16909200,
+        "worst": 16909200
+      },
+      "individual_operations": 30,
+      "mode": "hide_show",
+      "observed_foreground_changes": 0,
+      "samples": 30,
+      "submission_ns": {
+        "median": 260700,
+        "p95": 655900,
+        "p99": 824200,
+        "worst": 824200
+      },
+      "windows": 1
+    }
+  ],
+  "dpi": 96,
+  "file_version": "154.0.8037.98",
+  "fixture": "single ordinary-user browser app window with unique temporary profile and constant data page",
+  "initial_client": [
+    784,
+    592
+  ],
+  "lifecycle": {
+    "hidden_window_revealed": true,
+    "manual_minimized_state_preserved_by_recovery": true,
+    "recovery_client_unchanged": true,
+    "recovery_geometry_unchanged": true,
+    "recovery_journal_empty": true
+  },
+  "mixed_dpi": {
+    "destination_dpi": 192,
+    "failures": 20,
+    "final_geometry_requests_per_transition": 1,
+    "geometry_client_dpi_settlement_ns": {
+      "median": 901748600,
+      "p95": 903109900,
+      "p99": 903448600,
+      "worst": 903448600
+    },
+    "mismatches": [
+      {
+        "expected_client": [
+          1568,
+          1184
+        ],
+        "expected_dpi": 192,
+        "expected_frame_size": [
+          1600,
+          1200
+        ],
+        "observed_client": [
+          3174,
+          2387
+        ],
+        "observed_dpi": 192,
+        "observed_frame_size": [
+          3200,
+          2400
+        ],
+        "position_matches": true
+      },
+      {
+        "expected_client": [
+          784,
+          592
+        ],
+        "expected_dpi": 96,
+        "expected_frame_size": [
+          800,
+          600
+        ],
+        "observed_client": [
+          384,
+          292
+        ],
+        "observed_dpi": 96,
+        "observed_frame_size": [
+          400,
+          300
+        ],
+        "position_matches": true
+      }
+    ],
+    "observed_foreground_changes": 2,
+    "rendering_readiness": "unknown",
+    "samples": 20,
+    "source_dpi": 96,
+    "status": "measured"
+  },
+  "process_cleanup": "suspended creation; kill-on-close job assigned before resume",
+  "rendering_readiness": "unknown",
+  "show_state": "normal",
+  "temporary_profile_removed": true,
+  "terminated_binding_rejected": true,
+  "visibility_opt_in": true
+}

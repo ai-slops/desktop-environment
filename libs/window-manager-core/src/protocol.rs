@@ -117,10 +117,12 @@ pub struct PublicWindow {
 }
 
 #[derive(Clone, Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // Each operation has independent capability evidence or policy.
 pub struct PublicCapabilities {
     pub move_supported: bool,
     pub resize_supported: bool,
     pub hide_supported: bool,
+    pub dpi_transfer_allowed: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -194,6 +196,9 @@ impl PublicSnapshot {
                                     window.can_resize
                                         && config.windows[id].capabilities.allow_resize
                                 }),
+                                dpi_transfer_allowed: config.windows[id]
+                                    .capabilities
+                                    .allow_dpi_transfer,
                                 hide_supported: window.is_some_and(|window| {
                                     window.can_hide
                                         && config.windows[id].allow_hide

@@ -146,14 +146,23 @@ pub enum OutputProtection {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Independent operation opt-ins are not mutually exclusive states.
 pub struct CapabilityProfile {
     pub allow_move: bool,
     pub allow_resize: bool,
     pub allow_show_state: bool,
+    /// Cross-DPI native behavior must be verified per application before enabling transfers.
+    #[serde(default)]
+    pub allow_dpi_transfer: bool,
 }
 impl Default for CapabilityProfile {
     fn default() -> Self {
-        Self { allow_move: true, allow_resize: true, allow_show_state: false }
+        Self {
+            allow_move: true,
+            allow_resize: true,
+            allow_show_state: false,
+            allow_dpi_transfer: false,
+        }
     }
 }
 

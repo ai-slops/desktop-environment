@@ -40,6 +40,7 @@ fn fixture(count: usize) -> (Configuration, Snapshot, Target) {
             let id = format!("fixture-{index}");
             let mut reference = WindowRef::unbound(id.clone(), id.clone());
             reference.allow_hide = true;
+            reference.capabilities.allow_dpi_transfer = true; // Synthetic fixture, not an app profile.
             config.windows.insert(id.clone(), reference);
             let mut placement = Placement::new(id.clone(), "member".into());
             placement.default_preference.client_size = Some([300.0, 200.0]);

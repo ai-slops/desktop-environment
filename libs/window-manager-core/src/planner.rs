@@ -2243,6 +2243,15 @@ impl Evaluator<'_> {
                 &placement.id,
             ));
         }
+        if observed.dpi != self.dpi
+            && !self.config.windows[&placement.window].capabilities.allow_dpi_transfer
+        {
+            return Err(Error::new(
+                ErrorCode::UnsupportedOperation,
+                "Cross-DPI transfer is not enabled in this application's compatibility profile",
+                &placement.window,
+            ));
+        }
         let decoration =
             [observed.frame.width - observed.client[0], observed.frame.height - observed.client[1]]
                 .map(|padding| {
