@@ -212,6 +212,9 @@ impl Drop for DefaultRestore {
 fn check(root: &Path, label: &str, id: &str, expected: f64, unwanted: f64) -> Result<()> {
     thread::sleep(Duration::from_secs(2)); // Exclude the bounded reconnect/buffer drain period.
     let (samples, rate) = capture(id, 2)?;
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        bail!("{label}: nonfinite captured samples");
+    }
     save_wave(&root.join(format!("{label}.wav")), &samples, rate)?;
     let wanted = amplitude(&samples, rate, expected);
     let leaked = amplitude(&samples, rate, unwanted);
@@ -224,6 +227,14 @@ fn check(root: &Path, label: &str, id: &str, expected: f64, unwanted: f64) -> Re
     );
     std::fs::write(root.join(format!("{label}.json")), &report)?;
     println!("{report}");
+    for quarter in 0..4 {
+        let segment = &samples[samples.len() * quarter / 4..samples.len() * (quarter + 1) / 4];
+        println!(
+            "{label} quarter {quarter}: expected={} unwanted={}",
+            amplitude(segment, rate, expected),
+            amplitude(segment, rate, unwanted)
+        );
+    }
     if wanted < 0.03 || leaked > wanted * 0.01 {
         bail!("{label}: absent expected tone or leaked old source exceeds -40 dB");
     }
@@ -233,6 +244,9 @@ fn check(root: &Path, label: &str, id: &str, expected: f64, unwanted: f64) -> Re
 fn check_silent(root: &Path, label: &str, id: &str) -> Result<()> {
     thread::sleep(Duration::from_secs(2));
     let (samples, rate) = capture(id, 2)?;
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        bail!("{label}: nonfinite captured samples");
+    }
     save_wave(&root.join(format!("{label}.wav")), &samples, rate)?;
     let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
         / samples.len() as f64)
@@ -244,6 +258,24 @@ fn check_silent(root: &Path, label: &str, id: &str) -> Result<()> {
         bail!("{label}: output was not silent");
     }
     Ok(())
+}
+
+#[test]
+fn spectral_probe_distinguishes_known_tones_and_detects_leakage() {
+    let rate = 48_000;
+    let samples = (0..rate)
+        .map(|index| {
+            (0.15 * (TAU * 440.0 * f64::from(index) / f64::from(rate)).sin()
+                + 0.003 * (TAU * 880.0 * f64::from(index) / f64::from(rate)).sin())
+                as f32
+        })
+        .collect::<Vec<_>>();
+    let wanted = amplitude(&samples, rate, 440.0);
+    let leaked = amplitude(&samples, rate, 880.0);
+    assert!((wanted - 0.15).abs() < 0.000_001);
+    assert!((leaked - 0.003).abs() < 0.000_001);
+    assert!(leaked > wanted * 0.01);
+    assert!(amplitude(&samples, rate, 1320.0) < 0.000_001);
 }
 
 #[test]

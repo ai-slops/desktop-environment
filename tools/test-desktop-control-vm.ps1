@@ -31,7 +31,6 @@ function Invoke-SignalAcceptance {
     $guestTarget = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target'
     $binaryDirectory = Join-Path $guestTarget 'debug'
     Push-Location $workspace
-    try {
     # Real, recorded signal acceptance uses only the dedicated guest fixtures.
     $engine = $null
     $probeVariables = @('DESKTOP_AUDIO_VM_PROBE', 'DESKTOP_AUDIO_PROBE_OUTPUT', 'DESKTOP_AUDIO_DEFAULT_HELPER', 'DESKTOP_AUDIO_ROUTER')
@@ -49,11 +48,12 @@ function Invoke-SignalAcceptance {
         $env:DESKTOP_AUDIO_DEFAULT_HELPER = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-fixtures/SoundVolumeView/SoundVolumeView.exe'
         $env:DESKTOP_AUDIO_ROUTER = Join-Path $binaryDirectory 'audio-output-router.exe'
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'desktop-control', 'gui_live_default_switch_keeps_child_and_symbolic_settings', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
     } finally {
         foreach ($variable in $probeVariables) { [Environment]::SetEnvironmentVariable($variable, $previousProbeEnvironment[$variable]) }
         if ($engine -and -not $engine.HasExited) { $engine.Kill(); $engine.WaitForExit() }
+        Pop-Location
     }
-    } finally { Pop-Location }
 }
 if ($sessionId -eq 0) {
     if ($InteractiveChild) { throw 'Interactive task unexpectedly started in session 0.' }

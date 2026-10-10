@@ -912,6 +912,141 @@ fn audio_selection_label(value: &str, saved_label: &str, devices: &[AudioOutputD
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "VM-only: GUI controller starts the real router and changes/restores fixture defaults"]
+    fn gui_live_default_switch_keeps_child_and_symbolic_settings() -> Result<()> {
+        use std::os::windows::process::CommandExt;
+        use std::process::Command;
+        use std::time::Instant;
+        if std::env::var("DESKTOP_AUDIO_VM_PROBE").as_deref() != Ok("1") {
+            bail!("VM opt-in required");
+        }
+        let guard = Command::new("powershell.exe").creation_flags(0x0800_0000).args(["-NoProfile", "-NonInteractive", "-Command", "$c=Get-CimInstance Win32_ComputerSystem; if (($c.Model -notmatch 'Virtual Machine|VirtualBox|VMware|KVM|QEMU|HVM domU|Parallels') -and ($c.Manufacturer -notmatch '^QEMU$|^VMware|^innotek GmbH$')) {exit 1}"]).status()?;
+        if !guard.success() {
+            bail!("GUI live acceptance is VM-only");
+        }
+        struct DefaultRestore {
+            helper: String,
+            original: String,
+        }
+        impl DefaultRestore {
+            fn set(&self, id: &str) -> Result<()> {
+                if !Command::new(&self.helper)
+                    .creation_flags(0x0800_0000)
+                    .args(["/SetDefault", id, "0"])
+                    .status()?
+                    .success()
+                {
+                    bail!("Default helper failed");
+                }
+                let end = Instant::now() + Duration::from_secs(5);
+                while Instant::now() < end {
+                    if list_output_devices()?
+                        .iter()
+                        .any(|device| device.id == id && device.is_default)
+                    {
+                        return Ok(());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                bail!("Default did not change")
+            }
+        }
+        impl Drop for DefaultRestore {
+            fn drop(&mut self) {
+                if let Err(error) = self.set(&self.original) {
+                    eprintln!("DEFAULT RESTORE FAILED: {error:#}");
+                }
+            }
+        }
+        fn wait(panel: &mut ControlPanel, event: &str) -> Result<()> {
+            let end = Instant::now() + Duration::from_secs(12);
+            loop {
+                panel.poll();
+                if panel.audio.logs.iter().any(|line| line.contains(event)) {
+                    return Ok(());
+                }
+                if !panel.audio.is_running() || Instant::now() >= end {
+                    bail!("GUI child did not report {event}: {:?}", panel.audio.logs);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+        let devices = list_output_devices()?;
+        let exact = |name: &str| -> Result<AudioOutputDevice> {
+            let found =
+                devices.iter().filter(|device| device.friendly_name == name).collect::<Vec<_>>();
+            match found.as_slice() {
+                [device] => Ok((*device).clone()),
+                _ => bail!("Missing or ambiguous fixture {name}"),
+            }
+        };
+        let a = exact("Voicemeeter Input (VB-Audio Voicemeeter VAIO)")?;
+        let b = exact("Voicemeeter AUX Input (VB-Audio Voicemeeter VAIO)")?;
+        let c = exact("CABLE Input (VB-Audio Virtual Cable)")?;
+        let restore = DefaultRestore {
+            helper: std::env::var("DESKTOP_AUDIO_DEFAULT_HELPER")?,
+            original: devices
+                .iter()
+                .find(|device| device.is_default)
+                .context("Default missing")?
+                .id
+                .clone(),
+        };
+        restore.set(&a.id)?;
+        let directory = tempfile::tempdir()?;
+        let mut panel = ControlPanel::new(directory.path().join("gui-live.json"));
+        let end = Instant::now() + Duration::from_secs(5);
+        while panel.devices_pending.is_some() {
+            panel.poll();
+            if Instant::now() >= end {
+                bail!("GUI device refresh timed out");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panel.draft.audio.source = "default".into();
+        panel.draft.audio.target = c.id.clone();
+        panel.draft.audio.target_label = c.friendly_name.clone();
+        let binary = PathBuf::from(std::env::var("DESKTOP_AUDIO_ROUTER")?);
+        panel.start_with_resolver(|name| {
+            assert_eq!(name, "audio-output-router");
+            Ok(binary.clone())
+        })?;
+        let pid = panel.audio.child_id().context("GUI did not launch router")?;
+        wait(&mut panel, "Cloning audio from Voicemeeter Input")?;
+        panel.audio.logs.clear();
+        restore.set(&b.id)?;
+        wait(&mut panel, "Audio routing resumed from Voicemeeter AUX Input")?;
+        assert_eq!(panel.audio.child_id(), Some(pid));
+        assert_eq!(panel.draft.audio.source, "default");
+        assert_eq!(PresetStore::load(&panel.path)?.last_used.audio.source, "default");
+        panel.audio_devices = list_output_devices()?;
+        assert!(
+            audio_selection_label("default", "", &panel.audio_devices).contains(&b.friendly_name)
+        );
+        assert!(panel.audio_devices.iter().any(|device| device.id == a.id));
+        panel.audio.logs.clear();
+        restore.set(&c.id)?;
+        wait(&mut panel, "audio feedback prevention")?;
+        panel.audio.logs.clear();
+        restore.set(&b.id)?;
+        wait(&mut panel, "Audio routing resumed from Voicemeeter AUX Input")?;
+        assert_eq!(panel.audio.child_id(), Some(pid));
+        panel.audio.stop()?;
+        assert!(!panel.audio.is_running());
+        panel.audio_devices = list_output_devices()?;
+        panel.start_with_resolver(|_| Ok(binary.clone()))?;
+        assert_ne!(panel.audio.child_id(), Some(pid));
+        wait(&mut panel, "Cloning audio from Voicemeeter AUX Input")?;
+        panel.audio.stop()?;
+        restore.set(&restore.original)?;
+        println!(
+            "PASS: GUI controller live switch, label refresh, feedback pause/resume, stop/restart and symbolic persistence"
+        );
+        Ok(())
+    }
+
     #[test]
     fn gui_combobox_click_keeps_default_symbolic_after_device_refresh() -> Result<()> {
         fn frame(
