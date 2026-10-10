@@ -193,6 +193,188 @@ fn dpi_transfer_verifies_requested_client_size_instead_of_only_frame() -> Result
 }
 
 #[test]
+fn mixed_dpi_monitor_addition_keeps_the_existing_target_and_preferences()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for dpi in [96, 120, 144, 168, 192] {
+        let (config, mut snapshot, target) = fixture();
+        let request = Request::open(&config, target);
+        let baseline = plan(&config, &Runtime::default(), &snapshot, &request)?;
+        let saved = serde_json::to_vec(&config)?;
+        snapshot.displays.insert(
+            "added".into(),
+            Display {
+                id: "added".into(),
+                name: "Portrait left".into(),
+                work_area: Rect { x: -2160, y: -300, width: 2160, height: 3840 },
+                dpi,
+            },
+        );
+        snapshot.topology_revision += 1;
+        let added = plan(&config, &Runtime::default(), &snapshot, &request)?;
+        assert_eq!(added.desired["preview"].frame, baseline.desired["preview"].frame);
+        assert_eq!(added.desired["preview"].dpi, 96);
+        assert_eq!(added.desired["preview"].context, baseline.desired["preview"].context);
+        assert_eq!(serde_json::to_vec(&config)?, saved);
+    }
+    Ok(())
+}
+
+#[test]
+fn fractional_scale_rounds_logical_preferences_and_requires_exact_settlement()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    // Explicit expectations cover half-pixel rounding, independent of planner formulas.
+    for (dpi, client, decoration, position) in [
+        (96, [801, 501], [20, 40], [11, 13]),
+        (120, [1001, 626], [25, 50], [14, 16]),
+        (144, [1202, 752], [30, 60], [17, 20]),
+        (168, [1402, 877], [35, 70], [19, 23]),
+        (192, [1602, 1002], [40, 80], [22, 26]),
+    ] {
+        let (mut config, mut snapshot, target) = fixture();
+        let context = context_key(&config.slots["work"], "base");
+        config.save_properties(
+            &target.view,
+            "preview",
+            &context,
+            Some([11.0, 13.0]),
+            Some([801.0, 501.0]),
+        )?;
+        let display = snapshot.displays.get_mut("monitor").ok_or("fixture display missing")?;
+        display.dpi = dpi;
+        display.work_area = Rect { x: -2160, y: -300, width: 2160, height: 3840 };
+        let result =
+            plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target))?;
+        let desired = &result.desired["preview"];
+        assert_eq!(desired.client_target, client.map(Some), "DPI {dpi}");
+        assert_eq!(
+            desired.frame,
+            Rect {
+                x: -2160 + position[0],
+                y: -300 + position[1],
+                width: client[0] + decoration[0],
+                height: client[1] + decoration[1],
+            }
+        );
+        let mut actual = snapshot.windows["preview"].clone();
+        actual.frame = desired.frame;
+        actual.client = client;
+        actual.dpi = dpi;
+        assert!(desired.geometry_matches(&actual));
+        actual.client[0] -= 1;
+        assert!(!desired.geometry_matches(&actual));
+        actual.client = client;
+        actual.dpi = dpi + 1;
+        assert!(!desired.geometry_matches(&actual));
+    }
+    Ok(())
+}
+
+#[test]
+fn disconnected_monitor_never_implicitly_selects_a_new_different_scale_display()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (config, mut snapshot, target) = fixture();
+    let saved = serde_json::to_vec(&config)?;
+    let mut added = snapshot.displays.remove("monitor").ok_or("fixture display missing")?;
+    added.id = "added".into();
+    added.dpi = 144;
+    snapshot.displays.insert(added.id.clone(), added);
+    snapshot.topology_revision += 1;
+    assert_eq!(
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target))
+            .err()
+            .map(|e| e.code),
+        Some(ErrorCode::TargetMissing)
+    );
+    assert_eq!(serde_json::to_vec(&config)?, saved);
+    Ok(())
+}
+
+#[test]
+fn ordered_mixed_dpi_fallback_checks_compatibility_before_producing_mutations()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    for dpi in [120, 144, 168, 192] {
+        let (mut config, mut snapshot, target) = fixture();
+        config.slots.get_mut("work").ok_or("fixture slot missing")?.fallback_displays =
+            vec!["absent".into(), "scaled".into(), "same-scale".into()];
+        let original = snapshot.displays.remove("monitor").ok_or("fixture display missing")?;
+        let mut scaled = original.clone();
+        scaled.id = "scaled".into();
+        scaled.dpi = dpi;
+        snapshot.displays.insert(scaled.id.clone(), scaled);
+        let mut same = original;
+        same.id = "same-scale".into();
+        snapshot.displays.insert(same.id.clone(), same);
+        config
+            .windows
+            .get_mut("preview")
+            .ok_or("fixture window missing")?
+            .capabilities
+            .allow_dpi_transfer = false;
+        let request = Request::open(&config, target);
+        let saved = serde_json::to_vec(&config)?;
+        assert_eq!(
+            plan(&config, &Runtime::default(), &snapshot, &request).err().map(|e| e.code),
+            Some(ErrorCode::UnsupportedOperation)
+        );
+        assert_eq!(serde_json::to_vec(&config)?, saved);
+        config
+            .windows
+            .get_mut("preview")
+            .ok_or("fixture window missing")?
+            .capabilities
+            .allow_dpi_transfer = true;
+        let accepted = plan(&config, &Runtime::default(), &snapshot, &request)?;
+        assert_eq!(accepted.desired["preview"].dpi, dpi);
+        assert!(accepted.desired["preview"].context.contains("scaled"));
+        assert_eq!(config.slots["work"].display, "monitor");
+    }
+    Ok(())
+}
+
+#[test]
+fn reconnected_monitor_uses_fresh_scale_and_work_area_with_original_logical_preferences()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (mut config, mut snapshot, target) = fixture();
+    config
+        .slots
+        .get_mut("work")
+        .ok_or("fixture slot missing")?
+        .fallback_displays
+        .push("fallback".into());
+    let mut original = snapshot.displays.remove("monitor").ok_or("fixture display missing")?;
+    let mut fallback = original.clone();
+    fallback.id = "fallback".into();
+    snapshot.displays.insert(fallback.id.clone(), fallback);
+    let transition =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    config.save_properties(
+        &target.view,
+        "preview",
+        &transition.desired["preview"].context,
+        None,
+        Some([440.0, 260.0]),
+    )?;
+    let mut runtime = Runtime::default();
+    transition.commit(&mut runtime);
+    let mut current = settled_snapshot(&transition, &snapshot);
+    original.dpi = 144;
+    original.work_area = Rect { x: -2560, y: 80, width: 2560, height: 1360 };
+    current.displays.insert(original.id.clone(), original);
+    current.topology_revision += 1;
+    let restored = plan(&config, &runtime, &current, &Request::open(&config, target.clone()))?;
+    let desired = &restored.desired["preview"];
+    assert!(!restored.idempotent);
+    assert_eq!(desired.dpi, 144);
+    assert_eq!(desired.client_target, [Some(1200), Some(750)]);
+    assert_eq!(desired.frame, Rect { x: -2560, y: 80, width: 1230, height: 810 });
+    assert_eq!(desired.context, context_key(&config.slots["work"], "base"));
+    current.displays.remove("monitor");
+    let fallback_again = plan(&config, &runtime, &current, &Request::open(&config, target))?;
+    assert_eq!(fallback_again.desired["preview"].client_target, [Some(440), Some(260)]);
+    Ok(())
+}
+
+#[test]
 fn wrapping_and_unwrapping_keep_child_identity_and_removal_never_removes_resources() -> Result<()> {
     let (mut config, _, target) = two_window_fixture()?;
     let group = group_mut(&mut config, &target)?;

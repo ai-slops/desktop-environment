@@ -104,3 +104,26 @@ UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console 
 opened for Windows installation. Windows 11 Pro build 26200 and the C++/mise/Rust
 toolchain are installed; audio fixture validation remains.
 No host audio defaults, playback, or running router processes were modified.
+
+### Mixed DPI and topology regressions
+
+The workspace suite includes synthetic monitor inventories and planner snapshots
+for the following cases. Run them through the VM worker's `Test` action, which
+also runs native tests on the logged-in guest desktop.
+
+| Case | Expected behavior |
+| --- | --- |
+| Add a 100%, 125%, 150%, 175% or 200% monitor | Existing target geometry, DPI and saved preferences stay unchanged. |
+| Fractional scaling on a portrait monitor at negative coordinates | Logical size/position and nonclient borders round to the expected physical pixels; settlement rejects wrong DPI or a one-pixel client mismatch. |
+| Remove the target while an unrelated scaled monitor exists | No implicit fallback or saved mapping rewrite. |
+| Ordered fallback through missing, scaled and same-scale monitors | First available configured target requires explicit cross-DPI compatibility; rejection preserves configuration. |
+| Reconnect the original monitor with a new DPI and work area | Original logical preferences use the fresh DPI/work area; fallback preferences remain independent on the next disconnect. |
+| Reorder, add or remove uniquely identified monitors | Hardware identity survives enumeration reordering and hotplug; inventory reports current DPI and work area. |
+| Change scale, taskbar work area, orientation or connection state | Manual confirmations expire; stale confirmations fail and reconnecting requires current-topology confirmation. |
+| Same hardware identifier at different scales/positions | Geometry and DPI do not silently resolve ambiguous identities. |
+| Invalid DPI or duplicate device inventory | Reject the update without discarding a valid confirmed mapping. |
+
+These tests exercise mapping/planning contracts without changing host display
+settings. They do not emulate Windows delivering `WM_DPICHANGED` to a real app.
+Physical docking, mixed-DPI native window behavior and Chrome/Edge compatibility
+remain separate acceptance checks; cross-DPI transfer remains opt-in.

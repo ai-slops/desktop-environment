@@ -145,6 +145,119 @@ impl MonitorMappings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn monitor(device: &str, hardware: Option<&str>, dpi: u32) -> MonitorIdentity {
+        MonitorIdentity {
+            device: device.into(),
+            hardware: hardware.map(str::to_owned),
+            name: device.into(),
+            work_area: Rect { x: 0, y: 0, width: 2560, height: 1440 },
+            dpi,
+        }
+    }
+
+    #[test]
+    fn adding_and_removing_mixed_scale_monitors_preserves_unique_hardware_identity() -> Result<()> {
+        for dpi in [96, 120, 144, 168, 192] {
+            let one = monitor("one", Some("hardware-one"), 96);
+            let mut added = monitor("added", Some("hardware-added"), dpi);
+            added.work_area = Rect { x: -2160, y: -300, width: 2160, height: 3840 };
+            let mut mappings = MonitorMappings::default();
+            mappings.update(vec![one.clone()])?;
+            let epoch = mappings.epoch().to_owned();
+            assert!(mappings.update(vec![added.clone(), one.clone()])?);
+            assert_ne!(mappings.epoch(), epoch);
+            assert_eq!(mappings.resolve("one")?, "hardware-one");
+            assert_eq!(mappings.displays()["hardware-added"].dpi, dpi);
+            assert_eq!(mappings.displays()["hardware-added"].work_area, added.work_area);
+            let epoch = mappings.epoch().to_owned();
+            assert!(!mappings.update(vec![one.clone(), added])?);
+            assert_eq!(mappings.epoch(), epoch);
+            mappings.update(vec![one])?;
+            assert_eq!(mappings.resolve("one")?, "hardware-one");
+            assert_eq!(
+                mappings.resolve("added").err().map(|e| e.code),
+                Some(ErrorCode::TargetMissing)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scale_work_area_orientation_and_hotplug_expire_manual_confirmation() -> Result<()> {
+        let original = monitor("one", None, 96);
+        let mut scale = original.clone();
+        scale.dpi = 120;
+        let mut taskbar = original.clone();
+        taskbar.work_area.height -= 48;
+        let mut portrait = original.clone();
+        portrait.work_area = Rect { x: -1440, y: -200, width: 1440, height: 2560 };
+        for inventory in [
+            vec![scale],
+            vec![taskbar],
+            vec![portrait],
+            vec![original.clone(), monitor("added", Some("second"), 192)],
+            vec![],
+        ] {
+            let mut mappings = MonitorMappings::default();
+            mappings.update(vec![original.clone()])?;
+            let epoch = mappings.epoch().to_owned();
+            mappings.confirm(&epoch, "one", "saved-slot".into())?;
+            mappings.update(inventory)?;
+            assert_eq!(
+                mappings.confirm(&epoch, "one", "saved-slot".into()).err().map(|e| e.code),
+                Some(ErrorCode::StaleRevision)
+            );
+            assert!(!mappings.displays().contains_key("saved-slot"));
+            // Reconnection at the original scale still requires a fresh confirmation.
+            mappings.update(vec![original.clone()])?;
+            assert_eq!(
+                mappings.resolve("one").err().map(|e| e.code),
+                Some(ErrorCode::AmbiguousBinding)
+            );
+            let current = mappings.epoch().to_owned();
+            mappings.confirm(&current, "one", "saved-slot".into())?;
+            assert_eq!(mappings.displays()["saved-slot"].dpi, 96);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identical_hardware_with_different_scales_is_not_disambiguated_by_geometry() -> Result<()> {
+        let one = monitor("one", Some("same-hardware"), 96);
+        let mut two = monitor("two", Some("same-hardware"), 192);
+        two.work_area.x = -2560;
+        let mut mappings = MonitorMappings::default();
+        mappings.update(vec![one, two])?;
+        assert!(mappings.displays().is_empty());
+        let epoch = mappings.epoch().to_owned();
+        mappings.confirm(&epoch, "one", "left".into())?;
+        mappings.confirm(&epoch, "two", "right".into())?;
+        assert_eq!(mappings.displays()["left"].dpi, 96);
+        assert_eq!(mappings.displays()["right"].dpi, 192);
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_inventory_does_not_discard_a_confirmed_mapping() -> Result<()> {
+        let original = monitor("one", None, 96);
+        let mut mappings = MonitorMappings::default();
+        mappings.update(vec![original.clone()])?;
+        let epoch = mappings.epoch().to_owned();
+        mappings.confirm(&epoch, "one", "saved-slot".into())?;
+        for dpi in [0, 47, 961, u32::MAX] {
+            let mut invalid = original.clone();
+            invalid.dpi = dpi;
+            assert!(mappings.update(vec![invalid]).is_err());
+            assert_eq!(mappings.epoch(), epoch);
+            assert_eq!(mappings.resolve("one")?, "saved-slot");
+        }
+        assert!(mappings.update(vec![original.clone(), original]).is_err());
+        assert_eq!(mappings.epoch(), epoch);
+        assert_eq!(mappings.resolve("one")?, "saved-slot");
+        Ok(())
+    }
+
     #[test]
     fn duplicate_and_missing_hardware_need_confirmation_and_topology_change_expires_it()
     -> Result<()> {
