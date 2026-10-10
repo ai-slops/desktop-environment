@@ -93,6 +93,9 @@ try {
         Write-Output 'Active guest audio endpoints:'
         & $router list-audio-devices
         if ($LASTEXITCODE -ne 0) { throw 'Guest audio endpoint inventory failed.' }
+        if ($AudioFixtures) {
+            & (Join-Path $Workspace 'tools/test-desktop-control-default-audio.ps1')
+        }
     }
     if ($RunTests) {
         & $mise exec -- powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Workspace 'tools/test-desktop-control-vm.ps1')
