@@ -16,7 +16,7 @@ ui-smoke = ["dep:image"]
 anyhow.workspace = true
 raw-window-handle.workspace = true
 desktop-presets = { path = "../../libs/desktop-presets" }
-eframe = { version = "0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.32.3", default-features = false, features = ["accesskit", "default_fonts", "glow", "wgpu", "x11", "wayland"] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 windows-audio-router = { path = "../../platforms/windows-audio-router" }
 windows-desktop-duplication = { path = "../../platforms/windows-desktop-duplication" }

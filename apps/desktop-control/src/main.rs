@@ -30,6 +30,10 @@ fn main() -> Result<()> {
         bail!("Unexpected extra arguments");
     }
     let options = eframe::NativeOptions {
+        // Windows VMs/RDP can expose only OpenGL 1.1. Wgpu can use DirectX
+        // software adapters, so the control panel does not require GPU passthrough.
+        #[cfg(windows)]
+        renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(COMPACT_WINDOW_SIZE)
             .with_min_inner_size([640.0, 440.0]),
