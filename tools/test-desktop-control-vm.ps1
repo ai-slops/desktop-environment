@@ -119,16 +119,7 @@ try {
     }
     # A guest-local target directory avoids replacing binaries in a shared host checkout.
     $guestTarget = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target'
-    Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', '-p', 'desktop-presets', '-j', "$BuildJobs")
-    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'desktop-control', '-p', 'audio-output-router', '-p', 'display-relay', '-j', "$BuildJobs")
-
     $binaryDirectory = Join-Path $guestTarget 'debug'
-    # This enumerates endpoints only; it does not start cloning or change defaults.
-    Invoke-TestTool (Join-Path $binaryDirectory 'audio-output-router.exe') @('list-audio-devices')
-    Write-Output "Guest binaries: $binaryDirectory"
-    if (-not $DesktopControlOnly) {
-        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
-    }
     # Render the real native GUI on the guest desktop. The existing ui-smoke
     # feature captures only its own viewport and closes without starting routing.
     Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'desktop-control', '--features', 'ui-smoke', '-j', "$BuildJobs")
@@ -141,9 +132,14 @@ try {
     try {
         $env:DESKTOP_CONTROL_SCREENSHOT = $screenshot
         $config = Join-Path $guiRoot 'presets.json'
-        $guiProcess = Start-Process -FilePath (Join-Path $binaryDirectory 'desktop-control.exe') -ArgumentList @('--config', ('"' + $config + '"')) -PassThru
+        $guiErrors = Join-Path $guiRoot 'errors.log'
+        $guiProcess = Start-Process -FilePath (Join-Path $binaryDirectory 'desktop-control.exe') -ArgumentList @('--config', ('"' + $config + '"')) -RedirectStandardError $guiErrors -PassThru
+        $null = $guiProcess.Handle # Retain the process handle until exit status is read.
         if (-not $guiProcess.WaitForExit(20000)) { throw 'Native guest GUI capture timed out.' }
-        if ($guiProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $screenshot)) { throw 'Native guest GUI did not produce its viewport screenshot.' }
+        if ($guiProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $screenshot)) {
+            if (Test-Path -LiteralPath $guiErrors) { Get-Content -LiteralPath $guiErrors -Tail 30 }
+            throw "Native guest GUI exit=$($guiProcess.ExitCode), viewport exists=$(Test-Path -LiteralPath $screenshot), evidence=$guiRoot"
+        }
         $png = [IO.File]::ReadAllBytes($screenshot)
         if ($png.Length -gt 2MB) { throw 'GUI screenshot exceeds evidence budget.' }
         $hash = (Get-FileHash -LiteralPath $screenshot -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -152,6 +148,16 @@ try {
     } finally {
         $env:DESKTOP_CONTROL_SCREENSHOT = $previousScreenshot
         if ($guiProcess -and -not $guiProcess.HasExited) { $guiProcess.Kill(); $guiProcess.WaitForExit() }
+    }
+    Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', '-p', 'desktop-presets', '-j', "$BuildJobs")
+    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'desktop-control', '-p', 'audio-output-router', '-p', 'display-relay', '-j', "$BuildJobs")
+
+    $binaryDirectory = Join-Path $guestTarget 'debug'
+    # This enumerates endpoints only; it does not start cloning or change defaults.
+    Invoke-TestTool (Join-Path $binaryDirectory 'audio-output-router.exe') @('list-audio-devices')
+    Write-Output "Guest binaries: $binaryDirectory"
+    if (-not $DesktopControlOnly) {
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
     }
     if (-not $InteractiveChild) { Invoke-SignalAcceptance }
     Write-Output 'Workspace regressions passed. The VM worker separately verifies recorded signals and the GUI router lifecycle.'
