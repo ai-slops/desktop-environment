@@ -216,6 +216,9 @@ fn check(root: &Path, label: &str, id: &str, expected: f64, unwanted: f64) -> Re
         bail!("{label}: nonfinite captured samples");
     }
     save_wave(&root.join(format!("{label}.wav")), &samples, rate)?;
+    // Preserve the entire recording, including driver pre-roll, as evidence.
+    // Every new loopback stream warms up for 250 ms before steady-state analysis.
+    let samples = &samples[rate as usize / 4..];
     let wanted = amplitude(&samples, rate, expected);
     let leaked = amplitude(&samples, rate, unwanted);
     let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
@@ -248,6 +251,14 @@ fn check_silent(root: &Path, label: &str, id: &str) -> Result<()> {
         bail!("{label}: nonfinite captured samples");
     }
     save_wave(&root.join(format!("{label}.wav")), &samples, rate)?;
+    for quarter in 0..4 {
+        let segment = &samples[samples.len() * quarter / 4..samples.len() * (quarter + 1) / 4];
+        let rms = (segment.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
+            / segment.len() as f64)
+            .sqrt();
+        println!("{label} raw quarter {quarter}: rms={rms}");
+    }
+    let samples = &samples[rate as usize / 4..];
     let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
         / samples.len() as f64)
         .sqrt();
