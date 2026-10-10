@@ -11,6 +11,9 @@ use anyhow::{Context, Result, bail};
 use desktop_presets::default_store_path;
 use eframe::egui;
 use std::path::PathBuf;
+// Enable the DirectX backend for eframe's transitive wgpu dependency.
+#[cfg(windows)]
+use wgpu as _;
 
 fn main() -> Result<()> {
     let mut args = std::env::args_os().skip(1);
