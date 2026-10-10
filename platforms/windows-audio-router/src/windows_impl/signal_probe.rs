@@ -96,12 +96,22 @@ impl Drop for Tone {
 }
 
 fn capture(id: &str, seconds: u64) -> Result<(Vec<f32>, u32)> {
+    capture_with_tick(id, seconds, |_, _, _| Ok(()))
+}
+
+fn capture_with_tick(
+    id: &str,
+    seconds: u64,
+    mut tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
+) -> Result<(Vec<f32>, u32)> {
     let stream = open_loopback_capture(&output_device_by_id(id)?)?;
     let (_, rate, bytes, float) = layout(&stream.format)?;
     unsafe { stream.client.Start() }?;
-    let end = Instant::now() + Duration::from_secs(seconds);
+    let started = Instant::now();
+    let end = started + Duration::from_secs(seconds);
     let mut samples = Vec::new();
     while Instant::now() < end {
+        tick(&samples, rate, started.elapsed())?;
         if unsafe { stream.capture.GetNextPacketSize() }? == 0 {
             thread::sleep(Duration::from_millis(2));
             continue;
@@ -271,6 +281,49 @@ fn check_silent(root: &Path, label: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+fn check_continuous_switch(root: &Path, c: &str, b: &str, restore: &DefaultRestore) -> Result<()> {
+    let mut switch_frame = None;
+    let (samples, rate) = capture_with_tick(c, 6, |samples, _, elapsed| {
+        if switch_frame.is_none() && elapsed >= Duration::from_secs(2) {
+            switch_frame = Some(samples.len());
+            restore.set(b)?;
+        }
+        Ok(())
+    })?;
+    if samples.iter().any(|sample| !sample.is_finite()) {
+        bail!("Continuous capture contains nonfinite samples");
+    }
+    let switch_frame = switch_frame.context("Continuous default change did not run")?;
+    if switch_frame <= rate as usize / 4 || samples.len() < switch_frame + rate as usize * 2 {
+        bail!("Continuous recording too short");
+    }
+    save_wave(&root.join("continuous-a-to-b.wav"), &samples, rate)?;
+    let before = &samples[rate as usize / 4..switch_frame];
+    // Same capture client remains running across the switch. Bound settling to
+    // one second, rather than hiding a source leak behind capture startup.
+    let after = &samples[switch_frame + rate as usize..];
+    let before_wanted = amplitude(before, rate, 440.0);
+    let before_unwanted = amplitude(before, rate, 880.0);
+    let wanted = amplitude(after, rate, 880.0);
+    let unwanted = amplitude(after, rate, 440.0);
+    let rms = (after.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
+        / after.len() as f64)
+        .sqrt();
+    let report = format!(
+        "{{\"case\":\"continuous-a-to-b\",\"rate\":{rate},\"switch_frame\":{switch_frame},\"settling_frames\":{rate},\"before_expected_amplitude\":{before_wanted},\"before_unwanted_amplitude\":{before_unwanted},\"expected_hz\":880,\"unwanted_hz\":440,\"expected_amplitude\":{wanted},\"unwanted_amplitude\":{unwanted},\"rms\":{rms}}}"
+    );
+    std::fs::write(root.join("continuous-a-to-b.json"), &report)?;
+    println!("{report}");
+    if before_wanted < 0.03
+        || before_unwanted > before_wanted * 0.01
+        || wanted < 0.03
+        || unwanted > wanted * 0.01
+    {
+        bail!("Continuous A -> B signal attribution failed");
+    }
+    Ok(())
+}
+
 #[test]
 fn spectral_probe_distinguishes_known_tones_and_detects_leakage() {
     let rate = 48_000;
@@ -343,6 +396,7 @@ fn live_default_switch_signal_acceptance() -> Result<()> {
     check(&root, "default-b-to-c", &c, 880.0, 440.0)?;
     restore.set(&a)?;
     check(&root, "default-back-a-to-c", &c, 440.0, 880.0)?;
+    check_continuous_switch(&root, &c, &b, &restore)?;
     restore.set(&c)?;
     check_silent(&root, "feedback-paused", &c)?;
     restore.set(&b)?;

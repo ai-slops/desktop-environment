@@ -3,7 +3,7 @@ $computer = Get-CimInstance Win32_ComputerSystem
 if (($computer.Model -notmatch 'Virtual Machine|VirtualBox|VMware|KVM|QEMU|HVM domU|Parallels') -and ($computer.Manufacturer -notmatch '^QEMU$|^VMware|^innotek GmbH$')) { throw 'Audio evidence export is VM-only.' }
 $root = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-signal-tests'
 if (-not (Test-Path -LiteralPath $root)) { return }
-$cases = @('source-a','source-b','destination-baseline','default-a-to-c','default-b-to-c','default-back-a-to-c','feedback-paused','feedback-resumed-b','router-stopped','fixed-a-default-b','default-target-a','default-target-b','old-target-a-no-longer-routed')
+$cases = @('source-a','source-b','destination-baseline','default-a-to-c','default-b-to-c','default-back-a-to-c','continuous-a-to-b','feedback-paused','feedback-resumed-b','router-stopped','fixed-a-default-b','default-target-a','default-target-b','old-target-a-no-longer-routed')
 foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory | Sort-Object CreationTimeUtc -Descending)) {
     if ($directory.Name -notmatch '^[a-fA-F0-9-]{36}$' -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
     $records = @()
@@ -30,7 +30,7 @@ foreach ($directory in @(Get-ChildItem -LiteralPath $root -Directory | Sort-Obje
         $metadata = @{ measurement=$record.measurement; analysis_warmup_ms=250; capture_channel=0; wav_sha256=$record.hash } | ConvertTo-Json -Depth 5 -Compress
         Write-Output ('VM_AUDIO_METRIC|' + $directory.Name + '|' + $record.name + '|' + $record.hash + '|' + $metadata)
     }
-    Write-Output ('Exported 13 verified synthetic guest recordings: ' + $directory.Name)
+    Write-Output ('Exported 14 verified synthetic guest recordings: ' + $directory.Name)
     return
 }
 Write-Output 'No complete passing signal recording set to export yet.'
