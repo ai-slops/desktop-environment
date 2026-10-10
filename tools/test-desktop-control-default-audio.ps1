@@ -81,6 +81,31 @@ try {
     Set-GuestDefault $b[0].id
     Wait-RoutingLog "Audio routing resumed from $($b[0].name) to $($c[0].name)" $offset
     Write-Output 'PASS: selecting C paused for feedback prevention, then selecting B resumed B -> C.'
+    $child.Kill(); $child.WaitForExit(); $child = $null
+
+    Set-GuestDefault $a[0].id
+    $stdout = Join-Path $root 'fixed-source.log'
+    $stderr = Join-Path $root 'fixed-source-errors.log'
+    $child = Start-Process -FilePath $router -WindowStyle Hidden -ArgumentList @('route',$a[0].id,$c[0].id) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    Wait-RoutingLog 'Started source capture and target render streams' 0
+    $offset = ([string](Get-Content -LiteralPath $stdout -Raw)).Length
+    Set-GuestDefault $b[0].id
+    Start-Sleep -Seconds 1
+    $fixedLog = [string](Get-Content -LiteralPath $stdout -Raw)
+    if ($child.HasExited -or $fixedLog.Substring($offset).Contains('reconnecting')) { throw 'Fixed endpoint routing changed or exited when only the default changed.' }
+    if (@(Get-Outputs | Where-Object id -EQ $a[0].id).Count -ne 1) { throw 'The fixed A source is no longer active.' }
+    Write-Output 'PASS: fixed A -> C remained running across the A -> B default change.'
+    $child.Kill(); $child.WaitForExit(); $child = $null
+
+    Set-GuestDefault $a[0].id
+    $stdout = Join-Path $root 'default-target.log'
+    $stderr = Join-Path $root 'default-target-errors.log'
+    $child = Start-Process -FilePath $router -WindowStyle Hidden -ArgumentList @('route',$c[0].id,'default') -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    Wait-RoutingLog 'Started source capture and target render streams' 0
+    $offset = ([string](Get-Content -LiteralPath $stdout -Raw)).Length
+    Set-GuestDefault $b[0].id
+    Wait-RoutingLog "Audio routing resumed from $($c[0].name) to $($b[0].name)" $offset
+    Write-Output 'PASS: fixed C -> default A reconnected to C -> B without restarting the router.'
     Write-Output "Routing evidence: $root"
     Write-Output 'This checks actual endpoint notifications and stream reconnection, not captured signal fidelity. Tone/capture acceptance remains required.'
 } finally {
