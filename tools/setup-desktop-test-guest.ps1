@@ -1,7 +1,8 @@
 param(
     [string] $Workspace = (Join-Path $env:USERPROFILE 'DesktopEnvironment/source'),
     [switch] $RunTests,
-    [switch] $AudioFixtures = $true
+    [switch] $AudioFixtures = $true,
+    [switch] $ExportAudioEvidence = $true
 )
 $ErrorActionPreference = 'Stop'
 
@@ -102,4 +103,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Guest regression checks failed.' }
     }
     Write-Output 'Guest toolchain setup completed.'
+if ($ExportAudioEvidence) {
+    & (Join-Path $Workspace 'tools/export-desktop-test-audio-evidence.ps1')
+}
 } finally { Pop-Location }

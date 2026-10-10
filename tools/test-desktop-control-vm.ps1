@@ -130,7 +130,7 @@ try {
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
     }
     if (-not $InteractiveChild) { Invoke-SignalAcceptance }
-    Write-Output 'Automated regressions passed. Live A/B/C endpoint switching still requires the VM-only acceptance procedure in docs/desktop-control-vm-testing.md.'
+    Write-Output 'Workspace regressions passed. The VM worker separately verifies recorded signals and the GUI router lifecycle.'
     $result.ok = $true
 } catch {
     $result.error = $_.Exception.Message
