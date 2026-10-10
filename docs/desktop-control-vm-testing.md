@@ -77,7 +77,28 @@ passed, zero failed, 5 ignored**. Four window-manager service tests initially
 failed in PowerShell Direct's session 0 because it has no interactive monitor
 inventory; they all passed when the runner used the logged-in guest desktop.
 These synthetic callback tests do not certify live
-A/B/C audio routing; that acceptance remains **pending**.
+A/B/C audio signal fidelity; captured-tone acceptance remains **pending**.
+The guest now has VB-CABLE Pack45 and Voicemeeter Banana 2.1.3.0 installed,
+with ten active virtual render endpoints after reboot.
+
+At `2f71890`, `tools/test-desktop-control-default-audio.ps1` passed four real
+Windows endpoint/stream checks using Voicemeeter Input (A), Voicemeeter AUX Input
+(B) and CABLE Input (C):
+
+- A remained active while changing the default A to B; the same router process
+  started capture/render on B to C and emitted the successful resume event.
+- Default C triggered feedback prevention; default B resumed B to C.
+- Fixed A to C remained running when the default changed to B.
+- Fixed C to default A reconnected to C to B.
+
+The VM-only script uses NirSoft's official SoundVolumeView command-line helper to
+change eConsole defaults, verifies each change via actual endpoint enumeration,
+and restores the original guest default/kills its owned router on every exit.
+It records router logs in the guest and validates events after each transition,
+including successful stream starts. It generates no test tones and therefore
+does **not** prove that C receives only B's signal after switching. SoundVolumeView
+is downloaded only inside the VM; it is not bundled in this application.
+See the [publisher's command documentation](https://www.nirsoft.net/articles/set_default_audio_device_command_line.html).
 The Hyper-V test VM was created through
 UAC elevation on 2026-10-10 and started with 32 GiB RAM / 12 vCPUs. Its console was
 opened for Windows installation. Windows 11 Pro build 26200 and the C++/mise/Rust
