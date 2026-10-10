@@ -26,7 +26,7 @@ try {
     while (-not $stopping -and [DateTime]::UtcNow -lt $deadline) {
         @{ pid = $PID; vmId = $vm.Id.ToString(); expiresUtc = $deadline.ToString('o'); heartbeatUtc = [DateTime]::UtcNow.ToString('o') } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $workerRoot 'status.json')
-        foreach ($requestFile in @(Get-ChildItem -LiteralPath $requests -Filter '*.json' -File | Sort-Object Name)) {
+        foreach ($requestFile in @(Get-ChildItem -LiteralPath $requests -Filter '*.json' -File | Sort-Object LastWriteTime, Name)) {
             if ($requestFile.BaseName -notmatch '^[a-fA-F0-9-]{36}$') { continue }
             $requestId = $requestFile.BaseName
             $logPath = Join-Path $responses ($requestId + '.log')
@@ -42,7 +42,7 @@ try {
                 if ($request.action -eq 'Stop') { $stopping = $true }
                 elseif ($request.action -eq 'Status') {
                     $result.state = $currentVm.State.ToString()
-                    $result.guestSource = $guestSource
+                    $result.guestSource = [string]$guestSource
                 } else {
                     if ($currentVm.State -ne 'Running') { throw 'Start the owned VM before submitting guest operations.' }
                     if (-not $session -or $session.State -ne 'Opened') {
@@ -61,13 +61,13 @@ try {
                         }
                         Copy-Item -LiteralPath $zip -Destination "$guestRoot\source.zip" -ToSession $session
                         Copy-Item -LiteralPath (Join-Path $workspace 'tools/setup-desktop-test-guest.ps1') -Destination "$guestRoot\setup-guest.ps1" -ToSession $session
-                        $guestSource = Invoke-Command -Session $session -ArgumentList $guestRoot, $hash -ScriptBlock {
+                        $guestSource = [string](Invoke-Command -Session $session -ArgumentList $guestRoot, $hash -ScriptBlock {
                             param($root, $expectedHash)
                             if ((Get-FileHash -LiteralPath "$root\source.zip" -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Guest source transfer checksum mismatch.' }
                             $source = Join-Path $root ('source-' + $expectedHash)
                             if (-not (Test-Path -LiteralPath $source)) { Expand-Archive -LiteralPath "$root\source.zip" -DestinationPath $source }
                             $source
-                        }
+                        })
                         $result.guestSource = $guestSource
                     } else {
                         if (-not $guestSource) { throw 'Submit SyncSource before guest setup/tests.' }
