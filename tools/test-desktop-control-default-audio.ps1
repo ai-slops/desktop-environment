@@ -51,8 +51,15 @@ function Wait-RoutingLog([string] $Text, [int] $AfterLength) {
     do {
         [string] $log = ''
         if (Test-Path -LiteralPath $stdout) { $log = [string](Get-Content -LiteralPath $stdout -Raw) }
-        if ($log.Length -ge $AfterLength -and $log.Substring($AfterLength).Contains($Text)) { return }
-        if ($child.HasExited) { throw "Owned router exited before reconnect; inspect $stdout and $stderr" }
+        if ($log -and $log.Length -gt $AfterLength) {
+            [string] $newOutput = $log.Substring($AfterLength)
+            if ($newOutput -and $newOutput.Contains($Text)) { return }
+        }
+        if ($child.HasExited) {
+            if (Test-Path -LiteralPath $stdout) { Get-Content -LiteralPath $stdout | Write-Output }
+            if (Test-Path -LiteralPath $stderr) { Get-Content -LiteralPath $stderr | Write-Output }
+            throw "Owned router exited before reconnect; inspect $stdout and $stderr"
+        }
         Start-Sleep -Milliseconds 100
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "No expected routing event '$Text'; inspect $stdout and $stderr"
