@@ -101,8 +101,20 @@ isolated ZIP directory served temporarily on loopback; the user-mode guest reach
 the host via `10.0.2.2`. Stop that local file server after the transfer. No permanent
 shared host directory is needed.
 
-Inside Windows, install mise, Rust and Visual Studio C++ build tools/Windows SDK.
-Run `mise trust mise.toml` and `mise install` from the extracted repository. To
+Inside Windows, the VM-guarded bootstrap installs a checksum-pinned official mise
+binary, Microsoft-signed C++ Build Tools with the recommended Windows SDK, then
+the workspace Rust/just tools via mise. It needs an Administrator PowerShell in
+the **guest** and never automatically restarts either computer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/setup-desktop-test-guest.ps1 -Workspace C:\path\to\extracted-source -RunTests
+```
+
+If the C++ installer requests a reboot, restart only the guest and rerun setup.
+The bootstrap checks the C++ installation before using mise: a fresh Windows
+guest may not yet have the runtime needed to start its executable. The script
+uses a standalone mise binary so App Installer/winget registration is not needed
+in PowerShell Direct sessions. To
 provide three guest render endpoints without host audio redirection, install
 [Voicemeeter Banana](https://vb-audio.com/Voicemeeter/banana.htm) and
 [VB-CABLE](https://vb-audio.com/Cable/index.htm) **inside the guest only**, following
@@ -124,9 +136,45 @@ mise user installation is complete. Both host configurations reflect 32 GiB /
 checked on the Windows host. After retrying the canceled UAC request, Hyper-V
 creation and startup succeeded on 2026-10-10. The owned VM reports **Running**,
 32 GiB startup RAM, 12 vCPUs and a 40% CPU execution limit; its interactive console
-was opened for Windows installation. Guest OS installation, toolchain/audio fixture
-setup and live acceptance remain pending. Linux native libvirt definition, boot
+was opened for Windows installation. Windows 11 Pro build 26200 was subsequently
+installed; PowerShell Direct verified the guest model, 32 GiB RAM, 12 logical
+processors and internet access. Toolchain/audio fixture setup and live acceptance
+remain pending. Linux native libvirt definition, boot
 and live guest audio checks require a Linux host and remain unverified.
+
+## Keep one scoped Hyper-V management session
+
+`tools/desktop-test-vm-session.ps1` keeps an elevated host worker and a guest
+PowerShell Direct session alive for up to eight hours. It verifies the exact VM
+ID from the ownership marker. It accepts only `Status`, `SyncSource`, `Setup`,
+`Test`, `WorkspaceTest` and `Stop`; requests cannot specify host commands, paths,
+another VM or guest code. The host remains available for broadcasting.
+
+Provide `-CredentialPath` pointing to a `PSCredential` exported using
+`Export-Clixml` by the same Windows account. Windows DPAPI encrypts the password;
+keep this file in ignored `target/vm-session`, never in source control. Start the
+worker once with UAC elevation. It does not install a service or change logon/group
+permissions. A named mutex refuses a second worker for the same VM.
+
+Requests are UUID-named JSON files under `target/vm-session/requests`, containing
+only `{"action":"Status"}` or another permitted action. Publish complete files
+atomically by writing a temporary file then renaming it to `.json`. Responses and
+logs are under `responses`; `status.json` records process ID/expiry and idle
+heartbeat. Submit `SyncSource` before setup/tests: the fixed
+`target/desktop-control-vm-source.zip` is checked by SHA-256 after transfer and
+extracted into a new hash-named guest directory, preserving prior guest checkouts.
+`Stop` closes the worker/session while leaving the VM running. Guest test
+operations run serially and a stop request takes effect after the current operation.
+No credentials are included in request or response logs.
+
+From a normal host terminal, queue operations with `mise run vm-session-status`,
+`vm-sync-source`, `vm-guest-setup`, `vm-guest-test`, `vm-guest-test-all` or
+`vm-session-stop`. These Windows-only worker tasks return a request ID and result/
+log paths immediately. `vm-test` remains the direct **inside-guest** runner; the
+worker tasks are the host-side alternative. Creating the ZIP still uses
+`git archive --format=zip --output=target/desktop-control-vm-source.zip HEAD`.
+Disable mise's host task auto-install if only managing VMs:
+`$env:MISE_TASK_RUN_AUTO_INSTALL = 'false'`.
 
 References: [Hyper-V Windows 11 generation/TPM setup](https://techcommunity.microsoft.com/blog/itopstalkblog/how-to-run-a-windows-11-vm-on-hyper-v/3713948),
 [Hyper-V CPU limits](https://learn.microsoft.com/en-us/powershell/module/hyper-v/set-vmprocessor),

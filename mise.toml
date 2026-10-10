@@ -86,3 +86,28 @@ run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop
 description = "Run Desktop Control audio regression checks INSIDE the Windows guest only"
 run = "echo 'Run mise run vm-test inside the Windows guest.' && exit 1"
 run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-desktop-control-vm.ps1"
+
+# These requests reuse the scoped host worker; they need no new UAC prompt.
+[tasks.vm-session-status]
+description = "Queue a status request to the running Hyper-V worker"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action Status"
+
+[tasks.vm-sync-source]
+description = "Transfer the source ZIP to the owned Windows guest via the existing worker"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action SyncSource"
+
+[tasks.vm-guest-setup]
+description = "Install guest C++/mise/Rust tools via the existing Hyper-V worker"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action Setup"
+
+[tasks.vm-guest-test]
+description = "Queue Desktop Control regression checks in the owned guest"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action Test"
+
+[tasks.vm-guest-test-all]
+description = "Queue all workspace tests in the owned guest"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action WorkspaceTest"
+
+[tasks.vm-session-stop]
+description = "Close the scoped Hyper-V worker after its current operation, leaving the guest running"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action Stop"
