@@ -77,9 +77,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Guest cargo verification failed.' }
     if ($AudioFixtures) {
         $fixtureScript = Join-Path $Workspace 'tools/setup-desktop-test-audio.ps1'
-        $fixtureOutput = @(& $fixtureScript -Install)
-        $fixtureOutput | Where-Object { $_ -isnot [bool] } | Write-Output
-        if ($fixtureOutput | Where-Object { $_ -is [bool] -and $_ }) {
+        $fixtureChanged = $false
+        & $fixtureScript -Install | ForEach-Object {
+            if ($_ -is [bool]) { $fixtureChanged = $_ } else { Write-Output $_ }
+        }
+        if ($fixtureChanged) {
             Write-Output 'Restarting ONLY the test guest in 15 seconds to activate its audio fixtures. Rerun setup/tests after guest boot.'
             & "$env:WINDIR\System32\shutdown.exe" /r /t 15
             if ($LASTEXITCODE -ne 0) { throw 'Guest restart request failed.' }
