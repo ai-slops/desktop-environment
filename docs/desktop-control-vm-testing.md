@@ -127,3 +127,14 @@ These tests exercise mapping/planning contracts without changing host display
 settings. They do not emulate Windows delivering `WM_DPICHANGED` to a real app.
 Physical docking, mixed-DPI native window behavior and Chrome/Edge compatibility
 remain separate acceptance checks; cross-DPI transfer remains opt-in.
+
+On 2026-10-10 the Windows guest passed all nine new regressions and the full
+workspace suite at `29d8d8e`: **142 passed, zero failed, 5 ignored across 19
+suites**. The host-side worker receipt is
+`target/vm-session/responses/e8c17142-a38d-4f71-989a-315762fe7661.json` and the
+corresponding `.log` contains individual test results (both are ignored local
+artifacts). The guest audio setup also passed its four live reconnection checks.
+The stalled-window service fixtures now create their disposable windows with
+per-monitor DPI awareness, matching the adapter's coordinate system on scaled
+guest desktops; production cross-DPI compatibility restrictions are unchanged.
+The full VM runner uses `--no-fail-fast` to collect results from every test target.
