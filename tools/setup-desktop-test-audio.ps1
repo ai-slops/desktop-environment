@@ -9,7 +9,7 @@ $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $packages = @(
     @{ name='VBCABLE'; url='https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip'; setup='VBCABLE_Setup_x64.exe'; device='VB-Audio Virtual Cable' },
-    @{ name='Voicemeeter'; url='https://download.vb-audio.com/Download_CABLE/VoicemeeterSetup_v2130.zip'; setup='VoicemeeterSetup.exe'; device='VB-Audio.*VoiceMeeter|VoiceMeeter.*VAIO' }
+    @{ name='Voicemeeter'; url='https://download.vb-audio.com/Download_CABLE/VoicemeeterSetup_v2130.zip'; setup='voicemeeterprosetup.exe'; device='VB-Audio.*VoiceMeeter|VoiceMeeter.*VAIO' }
 )
 $changed = $false
 foreach ($package in $packages) {
