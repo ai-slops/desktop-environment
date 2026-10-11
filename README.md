@@ -14,6 +14,7 @@ Concrete utilities now included:
 - `desktop-control`: a shared Windows GUI for saving audio/display presets and managing multiple mirror windows
 - `display-relay`: mirror one Windows display into a local control window
 - `audio-output-router`: clone the audio of one Windows output device into another output device
+- `audio-cable`: minimal Windows virtual cable control and additional 0–96 dB listening attenuation; see [usage and backend boundaries](docs/audio-cable.md)
 
 ## Saved-settings GUI
 

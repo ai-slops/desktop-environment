@@ -48,8 +48,8 @@ function Invoke-SignalAcceptance {
         $env:DESKTOP_AUDIO_PROBE_OUTPUT = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/audio-signal-tests/' + [guid]::NewGuid())
         $env:DESKTOP_AUDIO_DEFAULT_HELPER = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-fixtures/SoundVolumeView/SoundVolumeView.exe'
         $env:DESKTOP_AUDIO_ROUTER = Join-Path $binaryDirectory 'audio-output-router.exe'
-        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_cable_gain_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'desktop-control', 'gui_live_default_switch_keeps_child_and_symbolic_settings', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
     } finally {
         foreach ($variable in $probeVariables) { [Environment]::SetEnvironmentVariable($variable, $previousProbeEnvironment[$variable]) }
