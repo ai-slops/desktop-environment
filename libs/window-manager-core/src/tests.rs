@@ -1781,6 +1781,46 @@ fn retired_broadcast_settings_load_without_restricting_window_layout()
 }
 
 #[test]
+fn legacy_control_slot_names_migrate_without_changing_layout_targets()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (config, snapshot, target) = fixture();
+    let before =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    for legacy_flag in [None, Some(false), Some(true)] {
+        let mut document = serde_json::to_value(&config)?;
+        document["slots"]["work"]["name"] = serde_json::json!("비공개 제어");
+        document["slots"]["work"]["region"] = serde_json::json!([0.0, 0.0, 1.0, 1.0]);
+        if let Some(flag) = legacy_flag {
+            document["slots"]["work"]["designated_public"] = serde_json::json!(flag);
+        }
+        let migrated: Configuration = serde_json::from_value(document)?;
+        assert_eq!(migrated.slots["work"].name, "작업 영역");
+        assert_eq!(migrated.slots["work"].id, config.slots["work"].id);
+        assert_eq!(migrated.slots["work"].display, config.slots["work"].display);
+        let after = plan(
+            &migrated,
+            &Runtime::default(),
+            &snapshot,
+            &Request::open(&migrated, target.clone()),
+        )?;
+        assert_eq!(serde_json::to_value(&before.desired)?, serde_json::to_value(after.desired)?);
+        let reloaded: Configuration = serde_json::from_str(&serde_json::to_string(&migrated)?)?;
+        assert_eq!(reloaded.slots["work"].name, "작업 영역");
+    }
+    for (name, region) in [
+        ("사용자 영역", [0.0, 0.0, 1.0, 1.0]),
+        ("비공개 제어", [0.0, 0.0, 0.5, 1.0]),
+    ] {
+        let mut document = serde_json::to_value(&config)?;
+        document["slots"]["work"]["name"] = serde_json::json!(name);
+        document["slots"]["work"]["region"] = serde_json::json!(region);
+        let migrated: Configuration = serde_json::from_value(document)?;
+        assert_eq!(migrated.slots["work"].name, name);
+    }
+    Ok(())
+}
+
+#[test]
 fn legacy_compatibility_keeps_unknown_field_rejection()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (config, _, _) = fixture();

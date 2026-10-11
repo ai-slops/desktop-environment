@@ -618,7 +618,7 @@ impl Manager {
             }
         }
         ui.separator();
-        ui.label("전환 대상 영역");
+        ui.label("배치를 적용할 영역");
         for slot in self.config.slots.values() {
             if ui.selectable_label(self.selected_slot == slot.id, &slot.name).clicked() {
                 self.selected_slot = slot.id.clone();
