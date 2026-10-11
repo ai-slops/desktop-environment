@@ -383,7 +383,7 @@ impl ApplicationHandler for RelayApp {
             reduce_ratio(display.area.width.max(1), display.area.height.max(1));
         let attributes = WindowAttributes::default()
             .with_title(format!(
-                "Display Relay — {} · 미러 화면 (더블클릭: 원본으로 커서 이동)",
+                "Relay {} — Display Relay 미러 화면 (더블클릭: 원본으로 커서 이동)",
                 display.name
             ))
             .with_inner_size(PhysicalSize::new(display.area.width, display.area.height))
