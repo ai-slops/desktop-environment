@@ -393,6 +393,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "audio-cable"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-cable-core",
+ "eframe",
+ "image",
+ "tempfile",
+ "wgpu",
+ "windows-audio-router",
+]
+
+[[package]]
+name = "audio-cable-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "audio-output-router"
 version = "0.1.0"
 dependencies = [
@@ -3468,6 +3491,7 @@ name = "windows-audio-router"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio-cable-core",
  "tracing",
  "windows 0.61.3",
  "windows-core 0.61.2",

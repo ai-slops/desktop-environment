@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/audio-cable",
+    "libs/audio-cable-core",
     "apps/desktop-control",
     "apps/audio-output-router",
     "apps/display-relay",

@@ -6,6 +6,9 @@ mod windows_impl;
 #[cfg(target_os = "windows")]
 pub use windows_impl::{AudioOutputDevice, list_output_devices, run_output_audio_router};
 
+#[cfg(target_os = "windows")]
+pub use windows_impl::{WindowsAudioBackend, run_controlled_audio_router};
+
 #[cfg(not(target_os = "windows"))]
 mod unsupported {
     use anyhow::{Result, bail};

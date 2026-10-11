@@ -1,0 +1,26 @@
+[package]
+name = "audio-cable"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+ui-smoke = ["dep:image"]
+
+[dependencies]
+anyhow.workspace = true
+audio-cable-core = { path = "../../libs/audio-cable-core" }
+eframe = { version = "0.32.3", default-features = false, features = ["default_fonts", "glow", "wgpu", "x11", "wayland"] }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-audio-router = { path = "../../platforms/windows-audio-router" }
+wgpu = { version = "25", default-features = false, features = ["dx12"] }
+
+[dev-dependencies]
+tempfile.workspace = true

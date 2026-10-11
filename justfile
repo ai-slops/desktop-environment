@@ -16,6 +16,10 @@ desktop-control:
     cargo build --target-dir target/desktop-control -p desktop-control -p audio-output-router -p display-relay
     cargo run --target-dir target/desktop-control -p desktop-control
 
+# Open only the cable and quiet-monitoring settings.
+audio-cable:
+    cargo run -p audio-cable
+
 # Run Audio Repeater with interactive source/target selection.
 audio-repeater:
     cargo run -p audio-output-router

@@ -1,4 +1,7 @@
 use anyhow::{Context, Result, bail};
+use audio_cable_core::{
+    AudioBackend, Cable, Endpoint, EndpointFlow, GainRamp, RouteControl, RouteState,
+};
 use std::slice;
 use std::sync::{
     Arc,
@@ -12,7 +15,7 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
     IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceCollection,
-    IMMDeviceEnumerator, IMMNotificationClient, MMDeviceEnumerator, eConsole, eRender,
+    IMMDeviceEnumerator, IMMNotificationClient, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{
@@ -23,6 +26,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::PWSTR;
 
 mod default_endpoint;
+mod installed_cables;
 #[cfg(test)]
 mod signal_probe;
 use default_endpoint::DefaultEndpointNotification;
@@ -50,9 +54,58 @@ pub fn list_output_devices() -> Result<Vec<AudioOutputDevice>> {
     read_output_devices(&collection, default_id.as_deref())
 }
 
+pub struct WindowsAudioBackend;
+impl AudioBackend for WindowsAudioBackend {
+    fn endpoints(&self) -> Result<Vec<Endpoint>> {
+        let _com = ComGuard::new()?;
+        let enumerator = device_enumerator()?;
+        let mut endpoints = Vec::new();
+        for (native_flow, flow) in
+            [(eRender, EndpointFlow::Playback), (eCapture, EndpointFlow::Capture)]
+        {
+            let default_id = unsafe { enumerator.GetDefaultAudioEndpoint(native_flow, eConsole) }
+                .ok()
+                .and_then(|d| endpoint_id(&d).ok());
+            let collection =
+                unsafe { enumerator.EnumAudioEndpoints(native_flow, DEVICE_STATE_ACTIVE) }?;
+            endpoints.extend(
+                read_output_devices(&collection, default_id.as_deref())?.into_iter().map(|d| {
+                    Endpoint { id: d.id, name: d.friendly_name, flow, is_default: d.is_default }
+                }),
+            );
+        }
+        Ok(endpoints)
+    }
+    fn installed_cables(&self, endpoints: &[Endpoint]) -> Vec<Cable> {
+        installed_cables::discover(endpoints)
+    }
+    fn monitor(&self, cable: &Cable, output_id: &str, control: Arc<RouteControl>) -> Result<()> {
+        cable.validate(&self.endpoints()?)?;
+        run_controlled_audio_router(&cable.playback_id, output_id, &control)
+    }
+}
+
 const DEVICE_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> Result<()> {
+    run_router(source_selector, target_selector, None)
+}
+
+pub fn run_controlled_audio_router(
+    source_selector: &str,
+    target_selector: &str,
+    control: &RouteControl,
+) -> Result<()> {
+    let result = run_router(source_selector, target_selector, Some(control));
+    control.set_state(RouteState::Stopped);
+    result
+}
+
+fn run_router(
+    source_selector: &str,
+    target_selector: &str,
+    control: Option<&RouteControl>,
+) -> Result<()> {
     let _com = ComGuard::new()?;
     let watch = if source_selector.eq_ignore_ascii_case("default")
         || target_selector.eq_ignore_ascii_case("default")
@@ -64,14 +117,25 @@ pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> 
     let mut started_once = false;
 
     loop {
+        if control.is_some_and(RouteControl::is_stopped) {
+            return Ok(());
+        }
         let generation = watch.as_ref().map_or(0, DefaultEndpointWatch::generation);
-        match run_audio_session(source_selector, target_selector, &mut started_once, watch.as_ref())
-        {
+        match run_audio_session(
+            source_selector,
+            target_selector,
+            &mut started_once,
+            watch.as_ref(),
+            control,
+        ) {
             Ok(()) => info!("Default audio output changed; reconnecting to the current endpoints"),
             Err(error)
                 if started_once
                     || watch.as_ref().is_some_and(|watch| watch.generation() != generation) =>
             {
+                if let Some(control) = control {
+                    control.set_state(RouteState::Recovering);
+                }
                 warn!(
                     "Audio routing interrupted, likely due to a device change; waiting to reconnect: {error:#}"
                 );
@@ -87,10 +151,14 @@ fn run_audio_session(
     target_selector: &str,
     started_once: &mut bool,
     watch: Option<&DefaultEndpointWatch>,
+    control: Option<&RouteControl>,
 ) -> Result<()> {
     // Snapshot before resolving either selector so changes during setup cannot be lost.
     let generation = watch.map_or(0, DefaultEndpointWatch::generation);
-    let changed = || watch.is_some_and(|watch| watch.generation() != generation);
+    let changed = || {
+        watch.is_some_and(|watch| watch.generation() != generation)
+            || control.is_some_and(RouteControl::is_stopped)
+    };
     let source = select_output_device(source_selector)
         .with_context(|| format!("failed to resolve source device '{source_selector}'"))?;
     let target = select_output_device(target_selector)
@@ -109,7 +177,7 @@ fn run_audio_session(
     let source_device = output_device_by_id(&source.id)?;
     let target_device = output_device_by_id(&target.id)?;
 
-    let capture_stream = open_loopback_capture(&source_device)
+    let capture_stream = open_capture(&source_device, control.is_some())
         .with_context(|| format!("failed to open loopback capture on {}", source.friendly_name))?;
     debug!("Source loopback mix format={}", capture_stream.format.describe());
 
@@ -129,8 +197,14 @@ fn run_audio_session(
         *started_once = true;
     }
 
+    if let Some(control) = control {
+        control.set_state(RouteState::Running);
+    }
+    let mut gain =
+        control.map(|c| GainRamp::new(capture_stream.format.sample_rate(), c.target_gain()));
+
     loop {
-        if pump_audio(&capture_stream, &render_stream, &changed)? {
+        if pump_audio(&capture_stream, &render_stream, &changed, control, gain.as_mut())? {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(3));
@@ -141,6 +215,8 @@ fn pump_audio(
     capture: &AudioCaptureStream,
     render: &AudioRenderStream,
     changed: &impl Fn() -> bool,
+    control: Option<&RouteControl>,
+    mut gain: Option<&mut GainRamp>,
 ) -> Result<bool> {
     loop {
         if changed() {
@@ -194,6 +270,14 @@ fn pump_audio(
                 let src_ptr = unsafe { data.add(src_offset) };
                 unsafe {
                     std::ptr::copy_nonoverlapping(src_ptr, render_ptr, bytes);
+                    if let (Some(control), Some(gain)) = (control, gain.as_mut()) {
+                        let samples = slice::from_raw_parts_mut(render_ptr, bytes);
+                        gain.process_f32_bytes(
+                            samples,
+                            render.format.channels(),
+                            control.target_gain(),
+                        );
+                    }
                     render.render.ReleaseBuffer(frames_to_write, 0)?;
                 }
             }
@@ -218,9 +302,17 @@ struct AudioCaptureStream {
     format: WaveFormatOwned,
 }
 
+#[cfg(test)]
 fn open_loopback_capture(device: &IMMDevice) -> Result<AudioCaptureStream> {
+    open_capture(device, false)
+}
+
+fn open_capture(device: &IMMDevice, float_samples: bool) -> Result<AudioCaptureStream> {
     let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
-    let format = WaveFormatOwned::from_mix_format(&client)?;
+    let mut format = WaveFormatOwned::from_mix_format(&client)?;
+    if float_samples {
+        format = format.float32()?;
+    }
 
     unsafe {
         client.Initialize(
@@ -307,6 +399,38 @@ struct WaveFormatOwned {
 }
 
 impl WaveFormatOwned {
+    fn channels(&self) -> usize {
+        usize::from(u16::from_le_bytes([self.bytes[2], self.bytes[3]]))
+    }
+    fn sample_rate(&self) -> u32 {
+        u32::from_le_bytes([self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7]])
+    }
+    fn float32(&self) -> Result<Self> {
+        let channels = u16::try_from(self.channels())?;
+        let rate = self.sample_rate();
+        if channels == 0 || rate == 0 {
+            bail!("Invalid audio mix format");
+        }
+        let align = channels.checked_mul(4).context("Too many audio channels")?;
+        let byte_rate = rate.checked_mul(u32::from(align)).context("Audio rate overflow")?;
+        let mut bytes = Vec::with_capacity(40);
+        bytes.extend(0xfffe_u16.to_le_bytes());
+        bytes.extend(channels.to_le_bytes());
+        bytes.extend(rate.to_le_bytes());
+        bytes.extend(byte_rate.to_le_bytes());
+        bytes.extend(align.to_le_bytes());
+        bytes.extend(32_u16.to_le_bytes());
+        bytes.extend(22_u16.to_le_bytes());
+        bytes.extend(32_u16.to_le_bytes());
+        let mask = if self.bytes.len() >= 40 && self.bytes[..2] == [0xfe, 0xff] {
+            &self.bytes[20..24]
+        } else {
+            &[0_u8; 4]
+        };
+        bytes.extend(mask);
+        bytes.extend([3, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+        Ok(Self { bytes, block_align: usize::from(align) })
+    }
     fn from_mix_format(client: &IAudioClient) -> Result<Self> {
         let raw = unsafe { client.GetMixFormat() }?;
         let format = unsafe { wave_format_from_ptr(raw) };

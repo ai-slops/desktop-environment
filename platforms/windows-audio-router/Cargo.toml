@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+audio-cable-core = { path = "../../libs/audio-cable-core" }
 anyhow.workspace = true
 tracing.workspace = true
 windows.workspace = true
