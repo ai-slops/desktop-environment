@@ -102,9 +102,17 @@ fn capture(id: &str, seconds: u64) -> Result<(Vec<f32>, u32)> {
 fn capture_with_tick(
     id: &str,
     seconds: u64,
-    mut tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
+    tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
 ) -> Result<(Vec<f32>, u32)> {
     let stream = open_loopback_capture(&output_device_by_id(id)?)?;
+    capture_stream_with_tick(stream, seconds, tick)
+}
+
+fn capture_stream_with_tick(
+    stream: AudioCaptureStream,
+    seconds: u64,
+    mut tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
+) -> Result<(Vec<f32>, u32)> {
     let (_, rate, bytes, float) = layout(&stream.format)?;
     unsafe { stream.client.Start() }?;
     let started = Instant::now();
@@ -148,6 +156,164 @@ fn capture_with_tick(
         );
     }
     Ok((samples, rate))
+}
+
+fn capture_recording(id: &str, seconds: u64) -> Result<(Vec<f32>, u32)> {
+    let device = output_device_by_id(id)?;
+    let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
+    let format = WaveFormatOwned::from_mix_format(&client)?;
+    unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            RENDER_STREAM_FLAGS,
+            0,
+            0,
+            format.as_ptr(),
+            None,
+        )
+    }?;
+    let capture = unsafe { client.GetService::<IAudioCaptureClient>() }?;
+    capture_stream_with_tick(AudioCaptureStream { client, capture, format }, seconds, |_, _, _| {
+        Ok(())
+    })
+}
+
+struct ControlledRoute {
+    control: Arc<RouteControl>,
+    thread: Option<std::thread::JoinHandle<Result<()>>>,
+}
+impl Drop for ControlledRoute {
+    fn drop(&mut self) {
+        self.control.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[test]
+#[ignore = "VM-only; records a virtual cable and live software attenuation"]
+fn live_cable_gain_acceptance() -> Result<()> {
+    if std::env::var("DESKTOP_AUDIO_VM_PROBE").as_deref() != Ok("1") {
+        bail!("Explicit VM probe opt-in required");
+    }
+    let guard = command("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", "$c=Get-CimInstance Win32_ComputerSystem; if (($c.Model -notmatch 'Virtual Machine|VirtualBox|VMware|KVM|QEMU|HVM domU|Parallels') -and ($c.Manufacturer -notmatch '^QEMU$|^VMware|^innotek GmbH$')) {exit 1}"]).status()?;
+    if !guard.success() {
+        bail!("Refusing cable probe outside a VM");
+    }
+    let _com = ComGuard::new()?;
+    let backend = WindowsAudioBackend;
+    let endpoints = backend.endpoints()?;
+    let cables: Vec<_> = backend
+        .installed_cables(&endpoints)
+        .into_iter()
+        .filter(|c| c.name == "CABLE Input (VB-Audio Virtual Cable)")
+        .collect();
+    let cable = match cables.as_slice() {
+        [cable] => cable.clone(),
+        _ => bail!("Missing or ambiguous cable fixture"),
+    };
+    let targets: Vec<_> = endpoints
+        .iter()
+        .filter(|e| {
+            e.flow == EndpointFlow::Playback
+                && e.name == "Voicemeeter AUX Input (VB-Audio Voicemeeter VAIO)"
+        })
+        .collect();
+    let target = match targets.as_slice() {
+        [target] => target.id.clone(),
+        _ => bail!("Missing or ambiguous monitor fixture"),
+    };
+    let root =
+        std::path::PathBuf::from(std::env::var("DESKTOP_AUDIO_PROBE_OUTPUT")?).join("cable-gain");
+    std::fs::create_dir_all(&root)?;
+    let _source = Tone::start(cable.playback_id.clone(), 440.0)?;
+    let _clock = Tone::start(target.clone(), 0.0)?;
+    let (raw, rate) = capture_recording(&cable.capture_id, 2)?;
+    let rms = |samples: &[f32]| -> f64 {
+        (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
+    };
+    let baseline = rms(&raw[rate as usize / 4..]);
+    if baseline < 0.05 || raw.iter().any(|s| !s.is_finite()) {
+        bail!("Virtual cable playback -> recording did not carry the fixture tone");
+    }
+    save_wave(&root.join("cable-recording.wav"), &raw, rate)?;
+    let control = Arc::new(RouteControl::new(-20.0, false)?);
+    let monitor = control.clone();
+    let selected = cable.clone();
+    let output = target.clone();
+    let mut route = ControlledRoute {
+        control: control.clone(),
+        thread: Some(std::thread::spawn(move || backend.monitor(&selected, &output, monitor))),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.state() != RouteState::Running {
+        if route.thread.as_ref().is_some_and(|t| t.is_finished()) {
+            route
+                .thread
+                .take()
+                .context("Route missing")?
+                .join()
+                .map_err(|_| anyhow::anyhow!("Route panicked"))??;
+            bail!("Route ended before starting");
+        }
+        if Instant::now() >= deadline {
+            bail!("Controlled route did not start");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    for db in [-20.0, -40.0, -60.0, -96.0, -30.0] {
+        control.set_gain(db)?;
+        thread::sleep(Duration::from_millis(300));
+        let (samples, rate) = capture(&target, 2)?;
+        if samples.iter().any(|s| !s.is_finite()) {
+            bail!("Nonfinite monitor samples");
+        }
+        let measured = rms(&samples[rate as usize / 4..]);
+        let measured_db = 20.0 * (measured / baseline).log10();
+        let report =
+            format!("{{\"gain_db\":{db},\"measured_db\":{measured_db},\"rms\":{measured}}}");
+        println!("CABLE_GAIN_METRIC {report}");
+        std::fs::write(root.join(format!("gain-{}.json", -db)), report)?;
+        save_wave(&root.join(format!("gain-{}.wav", -db)), &samples, rate)?;
+        if !measured_db.is_finite() || (measured_db - f64::from(db)).abs() > 1.0 {
+            bail!("Gain mismatch: requested {db}, measured {measured_db}");
+        }
+        if route.thread.as_ref().is_some_and(|t| t.is_finished()) {
+            bail!("Gain adjustment restarted/ended the monitor");
+        }
+    }
+    control.set_mute(true);
+    thread::sleep(Duration::from_millis(300));
+    let (muted, rate) = capture(&target, 2)?;
+    if rms(&muted[rate as usize / 4..]) > 0.000_001 {
+        bail!("Mute did not reach silence");
+    }
+    control.set_mute(false);
+    thread::sleep(Duration::from_millis(300));
+    let (resumed, rate) = capture(&target, 2)?;
+    if (20.0 * (rms(&resumed[rate as usize / 4..]) / baseline).log10() + 30.0).abs() > 1.0 {
+        bail!("Unmute did not preserve attenuation");
+    }
+    let (unaltered, rate) = capture_recording(&cable.capture_id, 2)?;
+    if (rms(&unaltered[rate as usize / 4..]) / baseline - 1.0).abs() > 0.1 {
+        bail!("Monitor attenuation changed the cable recording endpoint");
+    }
+    control.stop();
+    route
+        .thread
+        .take()
+        .context("Route missing")?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Route panicked"))??;
+    if control.state() != RouteState::Stopped {
+        bail!("Monitor did not stop");
+    }
+    println!(
+        "PASS: cable playback -> recording, live -20/-40/-60/-96 dB gain, mute/unmute, unchanged recording and owned monitor shutdown; evidence {}",
+        root.display()
+    );
+    Ok(())
 }
 
 fn amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {

@@ -49,6 +49,7 @@ function Invoke-SignalAcceptance {
         $env:DESKTOP_AUDIO_DEFAULT_HELPER = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-fixtures/SoundVolumeView/SoundVolumeView.exe'
         $env:DESKTOP_AUDIO_ROUTER = Join-Path $binaryDirectory 'audio-output-router.exe'
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_cable_gain_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'desktop-control', 'gui_live_default_switch_keeps_child_and_symbolic_settings', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
     } finally {
         foreach ($variable in $probeVariables) { [Environment]::SetEnvironmentVariable($variable, $previousProbeEnvironment[$variable]) }
@@ -148,6 +149,33 @@ try {
     } finally {
         $env:DESKTOP_CONTROL_SCREENSHOT = $previousScreenshot
         if ($guiProcess -and -not $guiProcess.HasExited) { $guiProcess.Kill(); $guiProcess.WaitForExit() }
+    }
+    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'audio-cable', '--features', 'ui-smoke', '-j', "$BuildJobs")
+    $cableGuiId = [guid]::NewGuid().ToString()
+    $cableGuiRoot = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/cable-gui-tests/' + $cableGuiId)
+    New-Item -ItemType Directory -Path $cableGuiRoot -Force | Out-Null
+    $cablePng = Join-Path $cableGuiRoot 'panel.png'
+    $previousCableScreenshot = $env:AUDIO_CABLE_SCREENSHOT
+    $cableGuiProcess = $null
+    try {
+        $env:AUDIO_CABLE_SCREENSHOT = $cablePng
+        $cableConfig = Join-Path $cableGuiRoot 'settings.json'
+        $cableErrors = Join-Path $cableGuiRoot 'errors.log'
+        $cableGuiProcess = Start-Process -FilePath (Join-Path $binaryDirectory 'audio-cable.exe') -ArgumentList @('--config', ('"' + $cableConfig + '"')) -RedirectStandardError $cableErrors -PassThru
+        $null = $cableGuiProcess.Handle
+        if (-not $cableGuiProcess.WaitForExit(20000)) { throw 'Audio Cable GUI capture timed out.' }
+        if ($cableGuiProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $cablePng)) {
+            if (Test-Path -LiteralPath $cableErrors) { Get-Content -LiteralPath $cableErrors -Tail 30 }
+            throw 'Audio Cable native GUI did not render.'
+        }
+        $png = [IO.File]::ReadAllBytes($cablePng)
+        if ($png.Length -gt 2MB) { throw 'Cable GUI screenshot exceeds evidence budget.' }
+        $hash = (Get-FileHash -LiteralPath $cablePng -Algorithm SHA256).Hash.ToLowerInvariant()
+        Write-Output ('VM_AUDIO_CABLE_GUI_SCREENSHOT|' + $cableGuiId + '|' + $hash + '|' + [Convert]::ToBase64String($png))
+        Write-Output 'PASS: native Audio Cable viewport rendered and closed in the VM.'
+    } finally {
+        $env:AUDIO_CABLE_SCREENSHOT = $previousCableScreenshot
+        if ($cableGuiProcess -and -not $cableGuiProcess.HasExited) { $cableGuiProcess.Kill(); $cableGuiProcess.WaitForExit() }
     }
     Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', '-p', 'desktop-presets', '-j', "$BuildJobs")
     Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'desktop-control', '-p', 'audio-output-router', '-p', 'display-relay', '-j', "$BuildJobs")

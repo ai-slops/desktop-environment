@@ -1,4 +1,7 @@
-param([Parameter(Mandatory)] [string] $LogPath)
+param(
+    [Parameter(Mandatory)] [string] $LogPath,
+    [ValidateSet('DesktopControl', 'AudioCable')] [string] $App = 'DesktopControl'
+)
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $log = (Resolve-Path -LiteralPath $LogPath).Path
@@ -7,8 +10,10 @@ if (-not $log.StartsWith($responseRoot, [StringComparison]::OrdinalIgnoreCase) -
 $receipt = Get-Content -LiteralPath ([IO.Path]::ChangeExtension($log,'.json')) -Raw | ConvertFrom-Json
 if (-not $receipt.ok) { throw 'The VM worker did not report success.' }
 $count = 0
+$prefix = if ($App -eq 'AudioCable') { 'VM_AUDIO_CABLE_GUI_SCREENSHOT|' } else { 'VM_GUI_SCREENSHOT|' }
+$outputRoot = if ($App -eq 'AudioCable') { 'target/vm-audio-cable-gui-evidence/' } else { 'target/vm-gui-evidence/' }
 foreach ($line in (Get-Content -LiteralPath $log)) {
-    if (-not $line.StartsWith('VM_GUI_SCREENSHOT|')) { continue }
+    if (-not $line.StartsWith($prefix)) { continue }
     $parts = $line -split '\|',4
     if ($parts.Count -ne 4 -or $parts[1] -notmatch '^[a-fA-F0-9-]{36}$' -or $parts[2] -notmatch '^[a-f0-9]{64}$' -or $parts[3].Length -gt 2800000) { throw 'Invalid GUI evidence envelope.' }
     $bytes = [Convert]::FromBase64String($parts[3])
@@ -16,7 +21,7 @@ foreach ($line in (Get-Content -LiteralPath $log)) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $hash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
     if ($hash -ne $parts[2]) { throw 'GUI screenshot SHA256 mismatch.' }
-    $destination = Join-Path $workspace ('target/vm-gui-evidence/' + $parts[1])
+    $destination = Join-Path $workspace ($outputRoot + $parts[1])
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
     [IO.File]::WriteAllBytes((Join-Path $destination 'panel.png'), $bytes)
     Write-Output ('Imported verified native guest GUI viewport: ' + (Join-Path $destination 'panel.png'))
