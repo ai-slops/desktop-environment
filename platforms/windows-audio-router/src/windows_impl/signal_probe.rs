@@ -234,7 +234,7 @@ fn live_cable_gain_acceptance() -> Result<()> {
         (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
     };
     let baseline = rms(&raw[rate as usize / 4..]);
-    let baseline_tone = amplitude(&raw[rate as usize / 4..], rate, 440.0);
+    let baseline_tone = windowed_amplitude(&raw[rate as usize / 4..], rate, 440.0);
     if baseline < 0.05 || raw.iter().any(|s| !s.is_finite()) {
         bail!("Virtual cable playback -> recording did not carry the fixture tone");
     }
@@ -274,10 +274,11 @@ fn live_cable_gain_acceptance() -> Result<()> {
         }
         let measured = rms(&samples[rate as usize / 4..]);
         let rms_db = 20.0 * (measured / baseline).log10();
-        // Attribute the known signal separately from endpoint noise. At -96 dB
-        // total RMS can include the virtual driver's conversion noise floor.
+        // Attribute the known signal separately from endpoint quantization.
+        // This fixture truncates to 2^-18 steps, including a negative DC offset.
         let measured_db = 20.0
-            * (amplitude(&samples[rate as usize / 4..], rate, 440.0) / baseline_tone).log10();
+            * (windowed_amplitude(&samples[rate as usize / 4..], rate, 440.0) / baseline_tone)
+                .log10();
         let report = format!(
             "{{\"gain_db\":{db},\"measured_db\":{measured_db},\"rms_db\":{rms_db},\"rms\":{measured}}}"
         );
@@ -286,6 +287,11 @@ fn live_cable_gain_acceptance() -> Result<()> {
         save_wave(&root.join(format!("gain-{}.wav", -db)), &samples, rate)?;
         if !measured_db.is_finite() || (measured_db - f64::from(db)).abs() > 1.0 {
             bail!("Gain mismatch: requested {db}, measured {measured_db}");
+        }
+        if !rms_db.is_finite()
+            || (rms_db - f64::from(db)).abs() > if db == -96.0 { 5.0 } else { 1.0 }
+        {
+            bail!("Unexpected total signal energy: requested {db}, RMS {rms_db}");
         }
         if route.thread.as_ref().is_some_and(|t| t.is_finished()) {
             bail!("Gain adjustment restarted/ended the monitor");
@@ -322,6 +328,17 @@ fn live_cable_gain_acceptance() -> Result<()> {
         root.display()
     );
     Ok(())
+}
+
+// Short windows avoid phase cancellation across virtual-clock discontinuities.
+// Report the median known-tone amplitude; total RMS is validated separately.
+fn windowed_amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {
+    let mut values: Vec<_> = samples
+        .chunks_exact((rate / 10) as usize)
+        .map(|window| amplitude(window, rate, frequency))
+        .collect();
+    values.sort_by(f64::total_cmp);
+    values.get(values.len() / 2).copied().unwrap_or(0.0)
 }
 
 fn amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {
