@@ -264,7 +264,9 @@ fn live_cable_gain_acceptance() -> Result<()> {
     }
     for db in [-20.0, -40.0, -60.0, -96.0, -30.0] {
         control.set_gain(db)?;
-        thread::sleep(Duration::from_millis(300));
+        // The fixture driver can retain old samples beyond the DSP's 20 ms ramp.
+        // Use the same two-second endpoint settling bound as the switch probe.
+        thread::sleep(Duration::from_secs(2));
         let (samples, rate) = capture(&target, 2)?;
         if samples.iter().any(|s| !s.is_finite()) {
             bail!("Nonfinite monitor samples");
@@ -284,13 +286,13 @@ fn live_cable_gain_acceptance() -> Result<()> {
         }
     }
     control.set_mute(true);
-    thread::sleep(Duration::from_millis(300));
+    thread::sleep(Duration::from_secs(2));
     let (muted, rate) = capture(&target, 2)?;
     if rms(&muted[rate as usize / 4..]) > 0.000_001 {
         bail!("Mute did not reach silence");
     }
     control.set_mute(false);
-    thread::sleep(Duration::from_millis(300));
+    thread::sleep(Duration::from_secs(2));
     let (resumed, rate) = capture(&target, 2)?;
     if (20.0 * (rms(&resumed[rate as usize / 4..]) / baseline).log10() + 30.0).abs() > 1.0 {
         bail!("Unmute did not preserve attenuation");
