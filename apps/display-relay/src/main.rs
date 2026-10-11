@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use desktop_presets::{WindowPlacement, WindowStateFile, default_store_path, window_state_path};
-use display_relay_core::RelayConfig;
+mod interaction;
+use display_relay_core::{PointerSample, RelayConfig};
+use interaction::ClickTracker;
 use std::ffi::{OsString, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,22 +25,26 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT,
     IDXGIDevice, IDXGIFactory2, IDXGISwapChain1,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::GetDoubleClickTime;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, GWLP_WNDPROC, GetClientRect, GetPropW, GetWindowRect,
     RemovePropW, SetPropW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_ENTERSIZEMOVE,
     WM_EXITSIZEMOVE, WM_NCDESTROY, WM_SIZING, WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_BOTTOMRIGHT,
     WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDOUBLECLK, SM_CYDOUBLECLK};
 use windows::core::{Interface, PCSTR, w};
-use windows_desktop_duplication::{DesktopDuplicator, DuplicationAccessLost, enumerate_displays};
+use windows_desktop_duplication::{
+    DesktopDuplicator, DisplayInfo, DuplicationAccessLost, enumerate_displays,
+};
 use windows_input::RemoteInputController;
 use winit::application::ApplicationHandler;
-use winit::dpi::PhysicalSize;
-use winit::event::{ElementState, StartCause, WindowEvent};
+use winit::dpi::{PhysicalPosition, PhysicalSize};
+use winit::event::{ElementState, MouseButton, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use winit::window::{Fullscreen, Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Fullscreen, Window, WindowAttributes, WindowId};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -77,6 +83,24 @@ fn run_relay(config: RelayConfig, window_state_file: PathBuf) -> Result<()> {
     let mut app = RelayApp::new(config, window_state_file)?;
     event_loop.run_app(&mut app)?;
     Ok(())
+}
+
+#[allow(clippy::cast_possible_truncation)] // Physical client coordinates are checked by the mapper.
+fn jump_to_display(
+    display: &DisplayInfo,
+    size: (u32, u32),
+    pointer: PhysicalPosition<f64>,
+) -> Result<(i32, i32)> {
+    let point = display
+        .virtual_desktop
+        .map_window_pointer(
+            display.area,
+            size,
+            PointerSample { x: pointer.x as f32, y: pointer.y as f32 },
+        )
+        .context("미러 화면의 커서 위치를 변환할 수 없습니다.")?;
+    RemoteInputController::new(display.virtual_desktop).move_mouse(point.0, point.1)?;
+    Ok(point)
 }
 
 enum Command {
@@ -154,6 +178,9 @@ struct RelayApp {
     next_capture_recovery_attempt: Instant,
     window_state: Option<WindowStateFile>,
     pending_placement: Option<WindowPlacement>,
+    local_pointer: Option<PhysicalPosition<f64>>,
+    clicks: ClickTracker,
+    relay_hint_until: Option<Instant>,
 }
 
 const CAPTURE_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -196,6 +223,9 @@ impl RelayApp {
             next_capture_recovery_attempt: Instant::now(),
             window_state,
             pending_placement: None,
+            local_pointer: None,
+            clicks: ClickTracker::default(),
+            relay_hint_until: None,
         })
     }
 
@@ -246,7 +276,13 @@ impl RelayApp {
         // whatever was last captured, so the window shows a frozen frame (matching how
         // other remote-display tools behave while the secure desktop is up) instead of
         // going unresponsive, and resumes live updates as soon as capture comes back.
-        let cursor_overlay = self.cursor_overlay();
+        let mut cursor_overlay = self.cursor_overlay();
+        cursor_overlay.relay_hint =
+            if self.relay_hint_until.is_some_and(|until| Instant::now() < until) {
+                1.0
+            } else {
+                0.0
+            };
         let renderer = self.renderer.as_mut().context("renderer not ready")?;
         if let Err(error) = renderer.render(cursor_overlay, true) {
             if error.is::<DuplicationAccessLost>() {
@@ -311,7 +347,22 @@ impl RelayApp {
             position: [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)],
             visible: 1.0,
             radius_px: 14.0,
+            relay_hint: 0.0,
+            padding: [0.0; 3],
         }
+    }
+    fn move_pointer_to_source(&self, pointer: PhysicalPosition<f64>) -> Result<()> {
+        let window = self.window.as_ref().context("미러 창이 없습니다.")?;
+        let captured = self.duplicator.display_info();
+        let current = enumerate_displays()?
+            .into_iter()
+            .find(|d| d.name == captured.name)
+            .context("대상 화면이 연결되지 않았습니다.")?;
+        if !self.duplicator.has_duplication() || current.area != captured.area {
+            bail!("화면 구성이 변경됐습니다. 미러가 다시 연결된 뒤 시도하세요.");
+        }
+        let size = window.inner_size();
+        jump_to_display(&current, (size.width, size.height), pointer).map(|_| ())
     }
 }
 
@@ -331,7 +382,10 @@ impl ApplicationHandler for RelayApp {
         let (resize_step_width, resize_step_height) =
             reduce_ratio(display.area.width.max(1), display.area.height.max(1));
         let attributes = WindowAttributes::default()
-            .with_title(format!("Relay {} (view only)", display.name))
+            .with_title(format!(
+                "Display Relay — {} · 미러 화면 (더블클릭: 원본으로 커서 이동)",
+                display.name
+            ))
             .with_inner_size(PhysicalSize::new(display.area.width, display.area.height))
             .with_resize_increments(PhysicalSize::new(resize_step_width, resize_step_height));
 
@@ -380,6 +434,7 @@ impl ApplicationHandler for RelayApp {
         };
 
         self.window_id = Some(window.id());
+        window.set_cursor(CursorIcon::Crosshair);
         self.last_window_size = Some(window.inner_size());
         self.renderer = Some(renderer);
         self.window = Some(window);
@@ -397,6 +452,43 @@ impl ApplicationHandler for RelayApp {
         }
 
         match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.local_pointer = Some(position);
+                self.clicks.motion(
+                    position,
+                    (
+                        f64::from(unsafe { GetSystemMetrics(SM_CXDOUBLECLK) }.max(2)) / 2.0,
+                        f64::from(unsafe { GetSystemMetrics(SM_CYDOUBLECLK) }.max(2)) / 2.0,
+                    ),
+                );
+            }
+            WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                self.local_pointer = None;
+                self.clicks.cancel();
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                if let Some(position) = self.local_pointer {
+                    if state == ElementState::Pressed {
+                        self.clicks.press(position);
+                        self.relay_hint_until = Some(Instant::now() + Duration::from_millis(1200));
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    } else {
+                        let interval =
+                            Duration::from_millis(u64::from(unsafe { GetDoubleClickTime() }));
+                        let tolerance = (
+                            f64::from(unsafe { GetSystemMetrics(SM_CXDOUBLECLK) }.max(2)) / 2.0,
+                            f64::from(unsafe { GetSystemMetrics(SM_CYDOUBLECLK) }.max(2)) / 2.0,
+                        );
+                        if self.clicks.release(position, Instant::now(), interval, tolerance)
+                            && let Err(error) = self.move_pointer_to_source(position)
+                        {
+                            warn!("원본 화면으로 커서를 이동하지 못했습니다: {error:#}");
+                        }
+                    }
+                }
+            }
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Moved(_) => self.remember_window_placement(),
             WindowEvent::ScaleFactorChanged { mut inner_size_writer, .. } => {
@@ -495,11 +587,19 @@ struct CursorOverlay {
     position: [f32; 2],
     visible: f32,
     radius_px: f32,
+    relay_hint: f32,
+    padding: [f32; 3],
 }
 
 impl CursorOverlay {
     const fn hidden() -> Self {
-        Self { position: [0.0, 0.0], visible: 0.0, radius_px: 0.0 }
+        Self {
+            position: [0.0, 0.0],
+            visible: 0.0,
+            radius_px: 0.0,
+            relay_hint: 0.0,
+            padding: [0.0; 3],
+        }
     }
 }
 
@@ -928,8 +1028,7 @@ VSOut main(uint vertex_id : SV_VertexID) {
     shader.context("CreateVertexShader returned no shader")
 }
 
-fn compile_pixel_shader(device: &ID3D11Device) -> Result<ID3D11PixelShader> {
-    let source = br#"
+const PIXEL_SHADER_SOURCE: &[u8] = br#"
 Texture2D relay_texture : register(t0);
 SamplerState relay_sampler : register(s0);
 
@@ -937,6 +1036,8 @@ cbuffer CursorOverlay : register(b0) {
     float2 cursor_position;
     float cursor_visible;
     float cursor_radius_px;
+    float relay_hint;
+    float3 hint_padding;
 };
 
 struct VSOut {
@@ -946,6 +1047,11 @@ struct VSOut {
 
 float4 main(VSOut input) : SV_TARGET {
     float4 base = relay_texture.Sample(relay_sampler, input.uv);
+    // Local feedback is drawn only on the mirror, never onto the source desktop.
+    if (relay_hint > 0.5) {
+        float2 edge = min(input.uv, 1.0 - input.uv);
+        if (min(edge.x, edge.y) < 0.012) { base.rgb = lerp(base.rgb, float3(0.65, 0.2, 1.0), 0.9); }
+    }
     if (cursor_visible < 0.5) {
         return base;
     }
@@ -964,7 +1070,8 @@ float4 main(VSOut input) : SV_TARGET {
     return float4(mixed, base.a);
 }
 "#;
-    let blob = compile_shader_blob(source, b"main\0", b"ps_5_0\0")?;
+fn compile_pixel_shader(device: &ID3D11Device) -> Result<ID3D11PixelShader> {
+    let blob = compile_shader_blob(PIXEL_SHADER_SOURCE, b"main\0", b"ps_5_0\0")?;
     let mut shader = None;
     unsafe {
         device.CreatePixelShader(shader_bytes(&blob), None, Some(&mut shader))?;
@@ -1098,6 +1205,53 @@ fn gcd(mut a: u32, mut b: u32) -> u32 {
 #[cfg(test)]
 mod command_tests {
     use super::*;
+    #[test]
+    fn mirror_feedback_shader_compiles_and_constant_buffer_matches_hlsl() -> Result<()> {
+        assert_eq!(std::mem::size_of::<CursorOverlay>(), 32);
+        compile_shader_blob(PIXEL_SHADER_SOURCE, b"main\0", b"ps_5_0\0")?;
+        Ok(())
+    }
+    #[test]
+    #[ignore = "VM-only native cursor movement; run via the guest acceptance script"]
+    fn relay_pointer_jump_vm_acceptance() -> Result<()> {
+        if std::env::var("DESKTOP_RELAY_VM_PROBE").as_deref() != Ok("1") {
+            bail!("Explicit VM opt-in required");
+        }
+        let guard = std::process::Command::new("powershell.exe").args(["-NoProfile", "-Command",
+            "if ((Get-CimInstance Win32_ComputerSystem).Model -ne 'Virtual Machine') { exit 1 }"]).status()?;
+        if !guard.success() {
+            bail!("Refusing cursor movement outside the Windows VM fixture");
+        }
+        let displays = enumerate_displays()?;
+        let display = displays.first().context("No guest display")?;
+        let controller = RemoteInputController::new(display.virtual_desktop);
+        let original = controller.cursor_position()?;
+        struct Restore {
+            controller: RemoteInputController,
+            original: (i32, i32),
+            moved: Option<(i32, i32)>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                if self.moved.is_some() && self.controller.cursor_position().ok() == self.moved {
+                    let _ = self.controller.move_mouse(self.original.0, self.original.1);
+                }
+            }
+        }
+        let mut restore = Restore { controller, original, moved: None };
+        let expected = jump_to_display(display, (800, 600), PhysicalPosition::new(200.0, 450.0))?;
+        let actual = restore.controller.cursor_position()?;
+        restore.moved = Some(actual);
+        if (i64::from(actual.0) - i64::from(expected.0)).abs() > 1
+            || (i64::from(actual.1) - i64::from(expected.1)).abs() > 1
+        {
+            bail!("Cursor did not reach the mapped source position");
+        }
+        println!(
+            "PASS: relay mapped pointer moved to the guest display; restoring unchanged fixture pointer"
+        );
+        Ok(())
+    }
 
     #[test]
     fn explicit_geometry_path_and_mirror_options_are_preserved() -> Result<()> {

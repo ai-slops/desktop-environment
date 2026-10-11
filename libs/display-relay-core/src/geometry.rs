@@ -50,6 +50,8 @@ impl VirtualDesktop {
         let (window_width, window_height) = window_size;
         if window_width == 0
             || window_height == 0
+            || source_display.width == 0
+            || source_display.height == 0
             || !pointer.x.is_finite()
             || !pointer.y.is_finite()
         {
@@ -63,13 +65,21 @@ impl VirtualDesktop {
         let y_ratio = clamped_y / f64::from(window_height);
 
         let display_x = rounded_coordinate(
-            f64::from(source_display.left) + (x_ratio * f64::from(source_display.width)).round(),
+            f64::from(source_display.left)
+                + (x_ratio * f64::from(source_display.width))
+                    .round()
+                    .min(f64::from(source_display.width - 1)),
         )?;
         let display_y = rounded_coordinate(
-            f64::from(source_display.top) + (y_ratio * f64::from(source_display.height)).round(),
+            f64::from(source_display.top)
+                + (y_ratio * f64::from(source_display.height))
+                    .round()
+                    .min(f64::from(source_display.height - 1)),
         )?;
 
-        if source_display.contains(display_x, display_y) {
+        if source_display.contains(display_x, display_y)
+            && self.bounds.contains(display_x, display_y)
+        {
             Some((display_x, display_y))
         } else {
             None
@@ -129,6 +139,27 @@ mod tests {
         let absolute = desktop.absolute_mouse(1919, 1079);
 
         assert_eq!(absolute, Some((65_535, 65_535)));
+    }
+    #[test]
+    fn maps_scaled_negative_origin_and_last_pixel_without_crossing_monitor_edge() {
+        let area = DisplayArea { left: -1920, top: -1080, width: 1920, height: 1080 };
+        let desktop = VirtualDesktop { bounds: area };
+        assert_eq!(
+            desktop.map_window_pointer(area, (960, 540), PointerSample { x: 480.0, y: 270.0 }),
+            Some((-960, -540))
+        );
+        assert_eq!(
+            desktop.map_window_pointer(area, (960, 540), PointerSample { x: 960.0, y: 540.0 }),
+            Some((-1, -1))
+        );
+        assert_eq!(
+            desktop.map_window_pointer(
+                DisplayArea { width: 0, ..area },
+                (960, 540),
+                PointerSample { x: 0.0, y: 0.0 }
+            ),
+            None
+        );
     }
 
     #[test]

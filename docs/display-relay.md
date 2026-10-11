@@ -4,7 +4,7 @@ This workspace now includes a Windows-first relay app that targets the "monitor 
 
 - capture a desktop-attached output with Desktop Duplication
 - mirror it into a controllable local window
-- forward mouse and keyboard input back into the hidden source display
+- jump the cursor to the source display using a double-click on its mirror
 
 ## Crate split
 
@@ -28,6 +28,14 @@ Keeping those concerns separate makes it easier to reuse the platform crates lat
 - an OBS-facing helper tool
 
 ## Usage
+
+The pointer becomes a crosshair over the mirror. Clicking flashes a purple border
+for 1.2 seconds to identify the Display Relay surface, including fullscreen.
+Double-click the video area to move the cursor to the corresponding position on
+the source display. Mapping uses physical client pixels, including resized and
+mixed-DPI windows and displays with negative desktop origins. Single clicks,
+drags, and keyboard input are not forwarded to source applications. A disconnected
+or changing source display rejects the jump until capture reconnects.
 
 For graphical display selection, fullscreen/FPS/capture-timeout controls, and saved
 presets shared with the audio router, run `just desktop-control`.

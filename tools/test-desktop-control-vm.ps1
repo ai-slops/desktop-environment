@@ -184,6 +184,11 @@ try {
     # This enumerates endpoints only; it does not start cloning or change defaults.
     Invoke-TestTool (Join-Path $binaryDirectory 'audio-output-router.exe') @('list-audio-devices')
     Write-Output "Guest binaries: $binaryDirectory"
+    $previousRelayProbe = $env:DESKTOP_RELAY_VM_PROBE
+    try {
+        $env:DESKTOP_RELAY_VM_PROBE = '1'
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'display-relay', 'relay_pointer_jump_vm_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+    } finally { $env:DESKTOP_RELAY_VM_PROBE = $previousRelayProbe }
     if (-not $DesktopControlOnly) {
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
     }
