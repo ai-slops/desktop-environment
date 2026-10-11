@@ -100,7 +100,18 @@ mod tests {
         candidate: &Candidate,
     ) -> Result<(State, Plan, Receiver<Event>)> {
         let mut config = Configuration::default();
-        let observed = windows_window_manager::bind(candidate, false)?;
+        let mut monitors = windows_window_manager::MonitorMappings::default();
+        monitors.update(windows_window_manager::monitor_inventory()?)?;
+        let epoch = monitors.epoch().to_owned();
+        // Virtual/RDP monitors may have no durable hardware ID. Fixtures explicitly
+        // confirm their current topology just as the production monitor editor does.
+        for monitor in monitors.inventory().to_vec() {
+            if monitors.resolve(&monitor.device).is_err() {
+                monitors.confirm(&epoch, &monitor.device, format!("fixture:{}", monitor.device))?;
+            }
+        }
+        let binding = windows_window_manager::bind(candidate, false)?.binding;
+        let observed = windows_window_manager::observe_mapped(&binding, false, &monitors)?;
         let slot = DisplaySlot {
             id: "work".into(),
             name: "fixture".into(),
@@ -147,7 +158,7 @@ mod tests {
             undoing: None,
             gestures: BTreeMap::new(),
             pending: VecDeque::new(),
-            monitors: windows_window_manager::MonitorMappings::default(),
+            monitors,
         };
         state.runtime.generations.insert("unrelated".into(), 7);
         state.refresh()?;
