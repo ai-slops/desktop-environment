@@ -30,40 +30,6 @@ function Invoke-SignalAcceptance {
     $cargo = Get-Command cargo -ErrorAction Stop
     $guestTarget = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target'
     $binaryDirectory = Join-Path $guestTarget 'debug'
-    # Run native regressions before optional GPU viewport checks so a renderer
-    # failure in another app does not prevent window-management validation.
-    if (-not $DesktopControlOnly) {
-        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
-        Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'window-manager', '--features', 'ui-smoke', '-j', "$BuildJobs")
-        $managerGuiRoot = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/window-manager-gui-tests/' + [guid]::NewGuid())
-        New-Item -ItemType Directory -Path $managerGuiRoot -Force | Out-Null
-        $managerPng = Join-Path $managerGuiRoot 'panel.png'
-        $previousManagerScreenshot = $env:WINDOW_MANAGER_SCREENSHOT
-        $managerProcess = $null
-        try {
-            # A missing configuration exercises real first-launch onboarding.
-            $env:WINDOW_MANAGER_SCREENSHOT = $managerPng
-            $managerConfig = Join-Path $managerGuiRoot 'settings.json'
-            $managerErrors = Join-Path $managerGuiRoot 'errors.log'
-            $managerProcess = Start-Process -FilePath (Join-Path $binaryDirectory 'window-manager.exe') -ArgumentList @('--config', ('"' + $managerConfig + '"')) -RedirectStandardError $managerErrors -PassThru
-            $null = $managerProcess.Handle
-            if (-not $managerProcess.WaitForExit(20000)) { throw 'Window Manager first-launch GUI capture timed out.' }
-            if ($managerProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $managerPng)) {
-                if (Test-Path -LiteralPath $managerErrors) { Get-Content -LiteralPath $managerErrors -Tail 30 }
-                throw 'Window Manager first-launch GUI did not render.'
-            }
-            $png = [IO.File]::ReadAllBytes($managerPng)
-            if ($png.Length -gt 2MB) { throw 'Window Manager screenshot exceeds evidence budget.' }
-            $hash = (Get-FileHash -LiteralPath $managerPng -Algorithm SHA256).Hash.ToLowerInvariant()
-            Write-Output ('VM_WINDOW_MANAGER_GUI_SCREENSHOT|' + $hash + '|' + [Convert]::ToBase64String($png))
-            Write-Output 'PASS: Window Manager first-launch viewport rendered without control-monitor designation.'
-        } finally {
-            $env:WINDOW_MANAGER_SCREENSHOT = $previousManagerScreenshot
-            if ($managerProcess -and -not $managerProcess.HasExited) { $managerProcess.Kill(); $managerProcess.WaitForExit() }
-        }
-    }
-    Push-Location $workspace
-    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'audio-output-router', '-j', "$BuildJobs")
     # Real, recorded signal acceptance uses only the dedicated guest fixtures.
     $engine = $null
     $probeVariables = @('DESKTOP_AUDIO_VM_PROBE', 'DESKTOP_AUDIO_PROBE_OUTPUT', 'DESKTOP_AUDIO_DEFAULT_HELPER', 'DESKTOP_AUDIO_ROUTER')
@@ -153,6 +119,40 @@ try {
     # A guest-local target directory avoids replacing binaries in a shared host checkout.
     $guestTarget = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/vm-test-target'
     $binaryDirectory = Join-Path $guestTarget 'debug'
+    # Run native regressions before optional GPU viewport checks so a renderer
+    # failure in another app does not prevent window-management validation.
+    if (-not $DesktopControlOnly) {
+        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
+        Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'window-manager', '--features', 'ui-smoke', '-j', "$BuildJobs")
+        $managerGuiRoot = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/window-manager-gui-tests/' + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $managerGuiRoot -Force | Out-Null
+        $managerPng = Join-Path $managerGuiRoot 'panel.png'
+        $previousManagerScreenshot = $env:WINDOW_MANAGER_SCREENSHOT
+        $managerProcess = $null
+        try {
+            # A missing configuration exercises real first-launch onboarding.
+            $env:WINDOW_MANAGER_SCREENSHOT = $managerPng
+            $managerConfig = Join-Path $managerGuiRoot 'settings.json'
+            $managerErrors = Join-Path $managerGuiRoot 'errors.log'
+            $managerProcess = Start-Process -FilePath (Join-Path $binaryDirectory 'window-manager.exe') -ArgumentList @('--config', ('"' + $managerConfig + '"')) -RedirectStandardError $managerErrors -PassThru
+            $null = $managerProcess.Handle
+            if (-not $managerProcess.WaitForExit(20000)) { throw 'Window Manager first-launch GUI capture timed out.' }
+            if ($managerProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $managerPng)) {
+                if (Test-Path -LiteralPath $managerErrors) { Get-Content -LiteralPath $managerErrors -Tail 30 }
+                throw 'Window Manager first-launch GUI did not render.'
+            }
+            $png = [IO.File]::ReadAllBytes($managerPng)
+            if ($png.Length -gt 2MB) { throw 'Window Manager screenshot exceeds evidence budget.' }
+            $hash = (Get-FileHash -LiteralPath $managerPng -Algorithm SHA256).Hash.ToLowerInvariant()
+            Write-Output ('VM_WINDOW_MANAGER_GUI_SCREENSHOT|' + $hash + '|' + [Convert]::ToBase64String($png))
+            Write-Output 'PASS: Window Manager first-launch viewport rendered without control-monitor designation.'
+        } finally {
+            $env:WINDOW_MANAGER_SCREENSHOT = $previousManagerScreenshot
+            if ($managerProcess -and -not $managerProcess.HasExited) { $managerProcess.Kill(); $managerProcess.WaitForExit() }
+        }
+    }
+    Push-Location $workspace
+    Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'audio-output-router', '-j', "$BuildJobs")
     # Render the real native GUI on the guest desktop. The existing ui-smoke
     # feature captures only its own viewport and closes without starting routing.
     Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'desktop-control', '--features', 'ui-smoke', '-j', "$BuildJobs")
