@@ -42,6 +42,7 @@ impl Tone {
         let (ready, receive) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || -> Result<()> {
             let _com = ComGuard::new()?;
+            let _scheduling = AudioScheduling::new()?;
             let device = output_device_by_id(&id)?;
             let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
             let format = WaveFormatOwned::from_mix_format(&client)?;
@@ -113,6 +114,7 @@ fn capture_stream_with_tick(
     seconds: u64,
     mut tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
 ) -> Result<(Vec<f32>, u32)> {
+    let _scheduling = AudioScheduling::new()?;
     let (_, rate, bytes, float) = layout(&stream.format)?;
     unsafe { stream.client.Start() }?;
     let started = Instant::now();
@@ -191,9 +193,7 @@ impl Drop for ControlledRoute {
     }
 }
 
-#[test]
-#[ignore = "VM-only; records a virtual cable and live software attenuation"]
-fn live_cable_gain_acceptance() -> Result<()> {
+fn cable_probe_guard() -> Result<()> {
     if std::env::var("DESKTOP_AUDIO_VM_PROBE").as_deref() != Ok("1") {
         bail!("Explicit VM probe opt-in required");
     }
@@ -201,7 +201,10 @@ fn live_cable_gain_acceptance() -> Result<()> {
     if !guard.success() {
         bail!("Refusing cable probe outside a VM");
     }
-    let _com = ComGuard::new()?;
+    Ok(())
+}
+
+fn cable_probe_endpoints() -> Result<(Cable, String)> {
     let backend = WindowsAudioBackend;
     let endpoints = backend.endpoints()?;
     let cables: Vec<_> = backend
@@ -224,6 +227,16 @@ fn live_cable_gain_acceptance() -> Result<()> {
         [target] => target.id.clone(),
         _ => bail!("Missing or ambiguous monitor fixture"),
     };
+    Ok((cable, target))
+}
+
+#[test]
+#[ignore = "VM-only; records a virtual cable and live software attenuation"]
+fn live_cable_gain_acceptance() -> Result<()> {
+    cable_probe_guard()?;
+    let _com = ComGuard::new()?;
+    let backend = WindowsAudioBackend;
+    let (cable, target) = cable_probe_endpoints()?;
     let root =
         std::path::PathBuf::from(std::env::var("DESKTOP_AUDIO_PROBE_OUTPUT")?).join("cable-gain");
     std::fs::create_dir_all(&root)?;
@@ -328,6 +341,141 @@ fn live_cable_gain_acceptance() -> Result<()> {
         root.display()
     );
     Ok(())
+}
+
+// Short windows avoid phase cancellation across virtual-clock discontinuities.
+struct CpuLoad {
+    stop: Arc<AtomicBool>,
+    threads: Vec<thread::JoinHandle<()>>,
+}
+impl CpuLoad {
+    fn start() -> Result<Self> {
+        let mut load = Self { stop: Arc::new(AtomicBool::new(false)), threads: Vec::new() };
+        for _ in 0..thread::available_parallelism()?.get() {
+            let stop = load.stop.clone();
+            load.threads.push(thread::spawn(move || {
+                let mut value = 1_u64;
+                while !stop.load(Ordering::Relaxed) {
+                    for _ in 0..4096 {
+                        value = std::hint::black_box(value.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
+                    }
+                }
+            }));
+        }
+        Ok(load)
+    }
+}
+impl Drop for CpuLoad {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        for worker in self.threads.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn cpu_times() -> Result<(u64, u64)> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetSystemTimes;
+    let mut idle = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe { GetSystemTimes(Some(&raw mut idle), Some(&raw mut kernel), Some(&raw mut user)) }?;
+    let ticks = |time: FILETIME| u64::from(time.dwLowDateTime) | (u64::from(time.dwHighDateTime) << 32);
+    Ok((ticks(idle), ticks(kernel) + ticks(user)))
+}
+
+fn longest_silence_ms(samples: &[f32], rate: u32) -> f64 {
+    let mut longest = 0;
+    let mut current = 0;
+    for sample in samples {
+        if sample.abs() < 0.000_01 {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    f64::from(longest) * 1000.0 / f64::from(rate)
+}
+
+#[test]
+#[ignore = "VM-only; saturates guest CPUs and records the cable monitor"]
+fn live_cable_cpu_load_acceptance() -> Result<()> {
+    cable_probe_guard()?; // Must precede CPU load, endpoint activation and all test threads.
+    let _com = ComGuard::new()?;
+    let (cable, target) = cable_probe_endpoints()?;
+    let _source = Tone::start(cable.playback_id.clone(), 440.0)?;
+    let _clock = Tone::start(target.clone(), 0.0)?;
+    let control = Arc::new(RouteControl::new(-6.0, false)?);
+    let monitor = control.clone();
+    let selected = cable.clone();
+    let output = target.clone();
+    let route = ControlledRoute {
+        control: control.clone(),
+        thread: Some(thread::spawn(move || WindowsAudioBackend.monitor(&selected, &output, monitor))),
+    };
+    thread::sleep(Duration::from_secs(2));
+    let (baseline, rate) = capture(&target, 3)?;
+    let baseline = &baseline[rate as usize / 4..];
+    let baseline_amplitude = windowed_amplitude(baseline, rate, 440.0);
+    if baseline_amplitude < 0.05 {
+        bail!("Monitor fixture did not carry the unloaded reference tone");
+    }
+    let load = CpuLoad::start()?;
+    thread::sleep(Duration::from_secs(2));
+    let before = cpu_times()?;
+    // Record the VB-CABLE input alongside the routed output to distinguish upstream glitches.
+    let input_id = cable.capture_id.clone();
+    let input = thread::spawn(move || -> Result<_> {
+        let _com = ComGuard::new()?;
+        capture_recording(&input_id, 8)
+    });
+    let output_result = capture(&target, 8);
+    let input_result = input.join().map_err(|_| anyhow::anyhow!("Input capture panicked"))?;
+    let (samples, rate) = output_result?;
+    let (raw, input_rate) = input_result?;
+    let after = cpu_times()?;
+    let busy = 100.0 * (1.0 - (after.0 - before.0) as f64 / (after.1 - before.1) as f64);
+    let samples = &samples[rate as usize / 4..];
+    let raw = &raw[input_rate as usize / 4..];
+    let output_gap = longest_silence_ms(samples, rate);
+    let input_gap = longest_silence_ms(raw, input_rate);
+    let amplitude = windowed_amplitude(samples, rate, 440.0);
+    println!("CABLE_CPU_LOAD cpu_percent={busy:.2} input_gap_ms={input_gap:.3} output_gap_ms={output_gap:.3} unloaded_amplitude={baseline_amplitude:.6} loaded_amplitude={amplitude:.6}");
+    let root = std::path::PathBuf::from(std::env::var("DESKTOP_AUDIO_PROBE_OUTPUT")?).join("cpu-load");
+    std::fs::create_dir_all(&root)?;
+    save_wave(&root.join("input.wav"), raw, input_rate)?;
+    save_wave(&root.join("output.wav"), samples, rate)?;
+    if busy < 90.0 {
+        bail!("CPU saturation not achieved: {busy:.2}%");
+    }
+    if input_gap > 5.0 || windowed_amplitude(raw, input_rate, 440.0) < 0.1 {
+        bail!("Upstream cable/fixture signal also interrupted under load; cannot attribute to router");
+    }
+    if output_gap > longest_silence_ms(baseline, rate).max(5.0)
+        || !amplitude.is_finite()
+        || (amplitude / baseline_amplitude - 1.0).abs() > 0.1
+        || control.state() != RouteState::Running
+        || route.thread.as_ref().is_some_and(|worker| worker.is_finished())
+    {
+        bail!("Cable monitor interrupted under CPU load");
+    }
+    drop(load);
+    drop(route);
+    println!("PASS: cable monitor remains continuous under measured guest CPU saturation");
+    Ok(())
+}
+
+#[test]
+fn silence_probe_detects_missing_audio_without_counting_tone_zero_crossings() {
+    let rate = 48_000;
+    let mut samples: Vec<_> = (0..rate)
+        .map(|index| (0.15 * (TAU * 440.0 * f64::from(index) / f64::from(rate)).sin()) as f32)
+        .collect();
+    assert!(longest_silence_ms(&samples, rate) < 1.0);
+    samples[1000..1480].fill(0.0);
+    assert!((longest_silence_ms(&samples, rate) - 10.0).abs() < 0.1);
 }
 
 // Short windows avoid phase cancellation across virtual-clock discontinuities.

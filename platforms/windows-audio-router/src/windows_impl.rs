@@ -11,6 +11,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
+use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
@@ -23,7 +24,11 @@ use windows::Win32::System::Com::{
     CoUninitialize, STGM_READ,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
-use windows::core::PWSTR;
+use windows::Win32::System::Threading::{
+    AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
+    AvSetMmThreadPriority,
+};
+use windows::core::{PWSTR, w};
 
 mod default_endpoint;
 mod installed_cables;
@@ -89,6 +94,29 @@ impl AudioBackend for WindowsAudioBackend {
 }
 
 const DEVICE_RECOVERY_RETRY_DELAY: Duration = Duration::from_millis(500);
+// Shared-mode timer-driven streams need headroom for late scheduling under load.
+// REFERENCE_TIME is in 100 ns units. Keep exclusive mode and engine periods unchanged.
+const ROUTE_BUFFER_DURATION: i64 = 1_000_000; // 100 ms capacity.
+const ROUTE_PREROLL_MS: u32 = 50;
+
+/// MMCSS registration belongs to this thread and must be reverted on the same thread.
+struct AudioScheduling(HANDLE);
+impl AudioScheduling {
+    fn new() -> Result<Self> {
+        let mut index = 0;
+        let handle = unsafe { AvSetMmThreadCharacteristicsW(w!("Pro Audio"), &raw mut index) }
+            .context("failed to register the audio routing thread with MMCSS")?;
+        let scheduling = Self(handle);
+        unsafe { AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH) }
+            .context("failed to set the audio routing thread's MMCSS priority")?;
+        Ok(scheduling)
+    }
+}
+impl Drop for AudioScheduling {
+    fn drop(&mut self) {
+        let _ = unsafe { AvRevertMmThreadCharacteristics(self.0) };
+    }
+}
 
 pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> Result<()> {
     run_router(source_selector, target_selector, None)
@@ -110,6 +138,14 @@ fn run_router(
     control: Option<&RouteControl>,
 ) -> Result<()> {
     let _com = ComGuard::new()?;
+    // Register only the buffer-servicing thread, never raise the entire GUI/process priority.
+    let _scheduling = match AudioScheduling::new() {
+        Ok(scheduling) => Some(scheduling),
+        Err(error) => {
+            warn!("Audio scheduling protection unavailable: {error:#}");
+            None
+        }
+    };
     let watch = if source_selector.eq_ignore_ascii_case("default")
         || target_selector.eq_ignore_ascii_case("default")
     {
@@ -191,6 +227,7 @@ fn run_audio_session(
     if changed() {
         return Ok(());
     }
+    render_stream.prime()?;
     unsafe { render_stream.client.Start() }.context("failed to start render client")?;
     unsafe { capture_stream.client.Start() }.context("failed to start capture client")?;
     debug!("Started source capture and target render streams");
@@ -299,6 +336,21 @@ struct AudioRenderStream {
     format: WaveFormatOwned,
 }
 
+impl AudioRenderStream {
+    fn prime(&self) -> Result<()> {
+        // Actual queued frames, not merely a larger empty capacity, absorb scheduler jitter.
+        let frames = (self.format.sample_rate() / 1000 * ROUTE_PREROLL_MS)
+            .min(self.buffer_frames);
+        if frames != 0 {
+            unsafe {
+                self.render.GetBuffer(frames)?;
+                self.render.ReleaseBuffer(frames, AUDCLNT_BUFFERFLAGS_SILENT.0 as u32)?;
+            }
+        }
+        Ok(())
+    }
+}
+
 struct AudioCaptureStream {
     client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -321,7 +373,7 @@ fn open_capture(device: &IMMDevice, float_samples: bool) -> Result<AudioCaptureS
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             CAPTURE_STREAM_FLAGS,
-            0,
+            ROUTE_BUFFER_DURATION,
             0,
             format.as_ptr(),
             None,
@@ -342,7 +394,7 @@ fn open_render_client(device: &IMMDevice, format: &WaveFormatOwned) -> Result<Au
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             RENDER_STREAM_FLAGS,
-            0,
+            ROUTE_BUFFER_DURATION,
             0,
             format.as_ptr(),
             None,

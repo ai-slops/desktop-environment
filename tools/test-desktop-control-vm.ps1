@@ -2,6 +2,7 @@ param(
     [ValidateRange(1, 4)] [int] $BuildJobs = 1,
     [switch] $DesktopControlOnly,
     [switch] $WindowManagerOnly,
+    [switch] $AudioOnly,
     [switch] $InteractiveChild,
     [string] $ResultPath
 )
@@ -22,10 +23,11 @@ $optionsPath = Join-Path $workspace 'target/vm-test-options.json'
 if (Test-Path -LiteralPath $optionsPath) {
     if ((Get-Item -LiteralPath $optionsPath).Length -gt 1024) { throw 'VM test options exceed budget.' }
     $options = Get-Content -LiteralPath $optionsPath -Raw | ConvertFrom-Json
-    if (@($options.PSObject.Properties.Name).Count -ne 1 -or $options.scope -ne 'window-manager') { throw 'Unknown VM test scope.' }
-    $WindowManagerOnly = $true
+    if (@($options.PSObject.Properties.Name).Count -ne 1 -or $options.scope -notin @('window-manager', 'audio')) { throw 'Unknown VM test scope.' }
+    $WindowManagerOnly = $options.scope -eq 'window-manager'
+    $AudioOnly = $options.scope -eq 'audio'
 }
-if ($WindowManagerOnly -and $DesktopControlOnly) { throw 'Choose one VM test scope.' }
+if (([int]$WindowManagerOnly.IsPresent + [int]$DesktopControlOnly.IsPresent + [int]$AudioOnly.IsPresent) -gt 1) { throw 'Choose one VM test scope.' }
 $sessionId = (Get-Process -Id $PID).SessionId
 function Invoke-TestTool {
     param([string] $File, [string[]] $Arguments)
@@ -57,14 +59,22 @@ function Invoke-SignalAcceptance {
         $env:DESKTOP_AUDIO_PROBE_OUTPUT = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/audio-signal-tests/' + [guid]::NewGuid())
         $env:DESKTOP_AUDIO_DEFAULT_HELPER = Join-Path $env:LOCALAPPDATA 'DesktopEnvironment/audio-fixtures/SoundVolumeView/SoundVolumeView.exe'
         $env:DESKTOP_AUDIO_ROUTER = Join-Path $binaryDirectory 'audio-output-router.exe'
+        if ($AudioOnly) {
+            Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', '-p', 'audio-cable-core', '--all-targets', '-j', "$BuildJobs")
+            Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_cable_cpu_load_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+        }
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_cable_gain_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
+        if ($AudioOnly) { return }
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'windows-audio-router', 'live_default_switch_signal_acceptance', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
         Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'desktop-control', 'gui_live_default_switch_keeps_child_and_symbolic_settings', '-j', "$BuildJobs", '--', '--ignored', '--nocapture', '--test-threads=1')
     } finally {
         foreach ($variable in $probeVariables) { [Environment]::SetEnvironmentVariable($variable, $previousProbeEnvironment[$variable]) }
         if ($engine -and -not $engine.HasExited) { $engine.Kill(); $engine.WaitForExit() }
-        Pop-Location
     }
+}
+if ($AudioOnly) {
+    Invoke-SignalAcceptance
+    return
 }
 if ($sessionId -eq 0) {
     if ($InteractiveChild) { throw 'Interactive task unexpectedly started in session 0.' }

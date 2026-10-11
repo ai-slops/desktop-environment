@@ -21,6 +21,14 @@ volume step. The percentage scales signal amplitude, rather than perceived loudn
 20 ms. This app does not change Windows defaults or endpoint volume. Listening
 starts only on request and stops when the app closes.
 
+The Windows routing thread registers with MMCSS (`Pro Audio`) so ordinary CPU
+work does not share its scheduling priority. Shared WASAPI buffers request
+100 ms capacity, and listening starts with 50 ms of queued silence to absorb
+scheduling jitter. This adds roughly 50 ms of monitoring delay; it does not
+change the cable recording stream. If MMCSS is unavailable, the router logs a
+warning and continues with buffering alone. Long scheduler stalls can still
+exhaust the reserve.
+
 A preset stores the cable, listening output and volume. Clicking an unavailable
 preset shows an error and preserves the current route. Reusing the same output
 updates gain in place; changing outputs stops the old owned route before starting
@@ -46,4 +54,16 @@ A future own Windows driver can supply another discovered pair without replacing
 the GUI or gain processing. A Linux backend can implement the same contract using
 PipeWire. **Native Linux routing and an own Windows driver are not implemented in
 this initial version.** This application does not create or install audio devices.
+
+## VM CPU-load validation
+
+Inside the dedicated Windows test VM, run
+`mise exec -- powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-desktop-control-vm.ps1 -AudioOnly`.
+The runner refuses physical hosts. It verifies attenuation and runs one bounded
+CPU worker per guest logical processor while recording the cable input and
+listening output together. The probe requires measured CPU usage of at least
+90%, verifies the upstream tone, and checks output tone amplitude and sustained
+silence. Recordings go to the guest's local test output directory, not tracked
+reports. The VM source archive also accepts the ignored per-run option
+`target/vm-test-options.json` containing `{"scope":"audio"}` for the scoped worker.
 
