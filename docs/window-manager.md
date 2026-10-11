@@ -17,7 +17,7 @@ cargo run -p window-manager
 
 After building, run `target\debug\window-manager.exe`. No companion tool is required: the same executable starts its hidden recovery helper. Configuration defaults to `%LOCALAPPDATA%\DesktopEnvironment\window-manager.json`. `--config <absolute-or-relative-path>` selects an isolated store.
 
-1. On first launch, explicitly designate a monitor for the private control surface. Once it fits, open **화면 / 영역** and create named regions. Bounds are fractions of that monitor's work area. Two regions on a portrait monitor are separate stable slots, not additional physical monitors.
+1. On first launch, choose **제어창 표시** on a monitor for the private control surface. This chooses where the management UI can show titles and notifications; it does not limit managed monitors or change actual broadcast capture. If that monitor has public-designated slots, the button explicitly states that their designation will be cleared. Once it fits, open **화면 / 영역** and create named regions on any available monitor. Bounds are fractions of that monitor's work area. Two regions on a portrait monitor are separate stable slots, not additional physical monitors.
 2. In **창 목록**, select **배치에 추가** for existing applications. Management is opt-in. Choose the target Group in **배치 / 그룹** before adding to a nested Group.
 3. Choose horizontal/vertical split, grid, free placement, semantic tabs, or responsive tabs. Save structure explicitly. A tab can contain a whole nested Group. Removing references or unwrapping a Group never closes applications.
 4. Select the View and destination slot. **전환 미리보기** reports movement-only, resizing, visibility, focus, unchanged counts, missing bindings, and conflicts; **계획 적용** performs the final changes.

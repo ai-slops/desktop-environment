@@ -357,11 +357,19 @@ impl Manager {
                     })
         }) {
             egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("비공개 제어 영역을 사용할 수 없습니다");
-                ui.label("제어 내용은 가려져 있습니다. 사용할 화면을 비공개 제어 영역으로 명시적으로 지정하세요.");
+                ui.heading("관리 제어창을 표시할 모니터를 선택하세요");
+                ui.label("창 제목·알림을 보여주는 이 제어창의 위치를 지정합니다. 관리할 모니터 수를 제한하지 않습니다.");
+                ui.label("지정 후 화면 / 영역에서 다른 모니터의 작업 영역을 추가할 수 있습니다. 제어 영역을 벗어나면 관리 내용이 가려집니다.");
+                ui.small("모니터 지정은 실제 방송 캡처 상태를 확인하거나 변경하지 않습니다.");
                 let displays: Vec<_> = self.snapshot.displays.values().cloned().collect();
                 for display in displays {
-                    if ui.button(format!("{} → 공개 지정을 해제하고 제어 영역 지정", display.name)).clicked() {
+                    let has_public = self.config.slots.values().any(|slot| slot.display == display.id && slot.designated_public);
+                    let label = if has_public {
+                        format!("{}에 제어창 표시 · 이 모니터의 공개 지정 해제", display.name)
+                    } else {
+                        format!("{}에 제어창 표시", display.name)
+                    };
+                    if ui.button(label).clicked() {
                         let mut draft = self.config.clone();
                         for slot in draft.slots.values_mut() { if slot.display == display.id { slot.designated_public = false; } }
                         let id = new_id("slot");

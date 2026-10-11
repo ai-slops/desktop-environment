@@ -24,6 +24,6 @@ image = { version = "0.25", default-features = false, features = ["png"], option
 [dev-dependencies]
 tempfile.workspace = true
 
-[target.'cfg(windows)'.dev-dependencies]
-windows.workspace = true
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_Console"] }
 
