@@ -131,25 +131,6 @@ From the Windows guest run `mise run vm-test`, then perform the
 Hyper-V and QEMU guests. Automated source checks alone do not certify live audio;
 record the guest's routed/captured signal because host audio passthrough is disabled.
 
-## Evidence and remaining setup
-
-mise user installation is complete. Both host configurations reflect 32 GiB /
-12 vCPUs; PowerShell parsing, read-only Windows plan and pure Linux XML tests are
-checked on the Windows host. After retrying the canceled UAC request, Hyper-V
-creation and startup succeeded on 2026-10-10. The owned VM reports **Running**,
-32 GiB startup RAM, 12 vCPUs and a 40% CPU execution limit; its interactive console
-was opened for Windows installation. Windows 11 Pro build 26200 was subsequently
-installed; PowerShell Direct verified the guest model, 32 GiB RAM, 12 logical
-processors and internet access. Guest C++ Build Tools, mise 2026.9.18 and
-Rust/Cargo 1.99.0 installation completed. The guest passed 7 audio-router and 9
-preset tests with zero failures. Desktop Control GUI/tool compilation completed,
-and interactive full workspace tests passed 133/133 with 5 ignored tests across
-19 suites. Audio fixtures are installed and ten virtual render endpoints are
-active. The live VM default-source/default-target/fixed-source/feedback-resume
-stream checks passed; captured signal fidelity and GUI interaction acceptance
-remain pending. Linux native libvirt definition, boot
-and live guest audio checks require a Linux host and remain unverified.
-
 ## Keep one scoped Hyper-V management session
 
 `tools/desktop-test-vm-session.ps1` keeps an elevated host worker and a guest

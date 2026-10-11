@@ -14,7 +14,7 @@ Concrete utilities now included:
 - `desktop-control`: a shared Windows GUI for saving audio/display presets and managing multiple mirror windows
 - `display-relay`: mirror one Windows display into a local control window
 - `audio-output-router`: clone the audio of one Windows output device into another output device
-- `audio-cable`: minimal Windows virtual cable control and additional 0–96 dB listening attenuation; see [usage and backend boundaries](docs/audio-cable.md)
+- `audio-cable`: minimal Windows virtual cable control and one-click listening presets and percentage volume; see [usage and backend boundaries](docs/audio-cable.md)
 
 ## Saved-settings GUI
 
@@ -24,10 +24,7 @@ and commit **전환 미리보기 → 계획 적용**. Startup and editing never 
 This is a Windows feasibility implementation with a usable manual interface; the
 complete P1 acceptance/compatibility gate is still open. See the
 [window-manager guide and coverage](docs/window-manager.md) and the
-[provided specification](docs/window-management-system-specification.md). The
-[acceptance/support matrix](docs/window-manager-conformance.md) and
-[reference measurements](docs/window-manager-performance.md) identify tested fixtures
-and remaining application/hardware gates.
+[provided specification](docs/window-management-system-specification.md).
 
 Run `just desktop-control` (or `mise run desktop-control`) to build both tools and open
 the control panel. Choose audio outputs and a display, enable the tools you need,
