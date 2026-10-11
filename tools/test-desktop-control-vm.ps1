@@ -1,6 +1,7 @@
 param(
     [ValidateRange(1, 4)] [int] $BuildJobs = 1,
     [switch] $DesktopControlOnly,
+    [switch] $WindowManagerOnly,
     [switch] $InteractiveChild,
     [string] $ResultPath
 )
@@ -15,6 +16,16 @@ if (-not $isGuest) {
 }
 
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+# An ignored per-run option may travel with the source archive used by the scoped
+# VM worker. It selects a fixed test suite, never a command or external target.
+$optionsPath = Join-Path $workspace 'target/vm-test-options.json'
+if (Test-Path -LiteralPath $optionsPath) {
+    if ((Get-Item -LiteralPath $optionsPath).Length -gt 1024) { throw 'VM test options exceed budget.' }
+    $options = Get-Content -LiteralPath $optionsPath -Raw | ConvertFrom-Json
+    if (@($options.PSObject.Properties.Name).Count -ne 1 -or $options.scope -ne 'window-manager') { throw 'Unknown VM test scope.' }
+    $WindowManagerOnly = $true
+}
+if ($WindowManagerOnly -and $DesktopControlOnly) { throw 'Choose one VM test scope.' }
 $sessionId = (Get-Process -Id $PID).SessionId
 function Invoke-TestTool {
     param([string] $File, [string[]] $Arguments)
@@ -58,7 +69,7 @@ function Invoke-SignalAcceptance {
 if ($sessionId -eq 0) {
     if ($InteractiveChild) { throw 'Interactive task unexpectedly started in session 0.' }
     # Fixture audio is visible here; enhanced desktop sessions expose only Remote Audio.
-    Invoke-SignalAcceptance
+    if (-not $WindowManagerOnly) { Invoke-SignalAcceptance }
     # PowerShell Direct runs in session 0, where there is no interactive display.
     # Use this same VM account's existing desktop token, without storing its
     # password in Task Scheduler or running the native tests as Administrator.
@@ -71,6 +82,7 @@ if ($sessionId -eq 0) {
     $quotedResult = $resultFile.Replace("'", "''")
     $quotedLog = $logFile.Replace("'", "''")
     $onlyArgument = if ($DesktopControlOnly) { ' -DesktopControlOnly' } else { '' }
+    if ($WindowManagerOnly) { $onlyArgument = ' -WindowManagerOnly' }
     $command = "& '$scriptPath' -BuildJobs $BuildJobs -InteractiveChild -ResultPath '$quotedResult'$onlyArgument *>&1 | Out-File -LiteralPath '$quotedLog' -Encoding utf8"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $taskName = 'DesktopEnvironment-Test-' + $jobId
@@ -122,7 +134,11 @@ try {
     # Run native regressions before optional GPU viewport checks so a renderer
     # failure in another app does not prevent window-management validation.
     if (-not $DesktopControlOnly) {
-        Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
+        if ($WindowManagerOnly) {
+            Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '-p', 'window-manager-core', '-p', 'windows-window-manager', '-p', 'window-manager', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
+        } else {
+            Invoke-TestTool $cargo.Source @('test', '--target-dir', $guestTarget, '--workspace', '--all-targets', '--all-features', '--no-fail-fast', '-j', "$BuildJobs")
+        }
         Invoke-TestTool $cargo.Source @('build', '--target-dir', $guestTarget, '-p', 'window-manager', '--features', 'ui-smoke', '-j', "$BuildJobs")
         $managerGuiRoot = Join-Path $env:LOCALAPPDATA ('DesktopEnvironment/window-manager-gui-tests/' + [guid]::NewGuid())
         New-Item -ItemType Directory -Path $managerGuiRoot -Force | Out-Null
@@ -149,6 +165,11 @@ try {
         } finally {
             $env:WINDOW_MANAGER_SCREENSHOT = $previousManagerScreenshot
             if ($managerProcess -and -not $managerProcess.HasExited) { $managerProcess.Kill(); $managerProcess.WaitForExit() }
+        }
+        if ($WindowManagerOnly) {
+            $result.ok = $true
+            Write-Output 'PASS: Window Manager native regressions and first-launch GUI passed in the VM.'
+            return
         }
     }
     Push-Location $workspace

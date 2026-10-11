@@ -163,6 +163,8 @@ cargo test --workspace --all-targets --all-features
 
 Native and atomic-replace tests require a normal desktop user token; an AppContainer sandbox may deny file replacement even inside its own temporary directory. Tests manipulate only disposable fixture windows/processes, not the user's existing applications.
 
+Inside the test VM, run `powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-desktop-control-vm.ps1 -WindowManagerOnly` to check window-management regressions and first-launch GUI independently of audio fixtures. The runner requires a VM and dispatches native tests to the logged-in guest desktop. Existing configuration fields `public_content`, `output_protection`, and `designated_public` are ignored when loading and omitted when saving; they impose no placement restrictions.
+
 Native API contracts were checked against Microsoft's [SetWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowpos), [SetPropW](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setpropw), and [SetWinEventHook](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwineventhook) documentation. API availability is not evidence of application-specific compatibility.
 
 Native batch and explicit-state contracts additionally follow Microsoft's [DeferWindowPos](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-deferwindowpos) and [ShowWindowAsync](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindowasync) documentation. Tests separately pump the disposable window's message queue and observe state settlement.
