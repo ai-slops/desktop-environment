@@ -21,8 +21,8 @@ pub fn journal_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use window_manager_core::{
-        CapabilityProfile, DisplaySlot, Node, OutputProtection, Placement, Preference, Protection,
-        Target, WindowRef, context_key,
+        CapabilityProfile, DisplaySlot, Node, Placement, Preference, Protection, Target, WindowRef,
+        context_key,
     };
     use windows::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
@@ -106,7 +106,6 @@ mod tests {
             name: "fixture".into(),
             display: observed.display.clone(),
             region: [0.0, 0.0, 1.0, 1.0],
-            designated_public: false,
             fallback_displays: vec![],
         };
         let mut placement = Placement::new("fixture".into(), "fixture".into());
@@ -123,9 +122,7 @@ mod tests {
                 tags: vec![],
                 application_hint: None,
                 allow_hide: false,
-                public_content: false,
                 protection: Protection::default(),
-                output_protection: OutputProtection::None,
                 capabilities: CapabilityProfile::default(),
             },
         );
@@ -156,62 +153,6 @@ mod tests {
         state.refresh()?;
         let plan = plan_independent(&state.config, &state.runtime, &state.snapshot, &request)?;
         Ok((state, plan, receiver))
-    }
-
-    #[test]
-    fn provider_disconnect_received_during_application_prevents_scope_commit() -> anyhow::Result<()>
-    {
-        let (_fixture, candidate) = stalled_window()?;
-        let directory = tempfile::tempdir()?;
-        let (mut state, mut plan, events) =
-            fixture_state(directory.path().join("recovery.json"), &candidate)?;
-        let reference = state
-            .config
-            .windows
-            .get_mut("fixture")
-            .ok_or_else(|| anyhow::anyhow!("fixture missing"))?;
-        reference.output_protection = OutputProtection::RequireVerifiedPrivate;
-        let now = window_manager_core::unix_millis();
-        state.runtime.providers.register(
-            "capture".into(),
-            "session".into(),
-            BTreeSet::from(["fixture".into()]),
-            true,
-            false,
-        )?;
-        state.runtime.providers.accept(
-            window_manager_core::ProviderMessage {
-                provider: "capture".into(),
-                session: "session".into(),
-                sequence: 1,
-                window: "fixture".into(),
-                observed_ms: now,
-                ttl_ms: 60000,
-                output: Some(window_manager_core::OutputState::VerifiedPrivate),
-                attention: None,
-            },
-            now,
-        )?;
-        let current = state
-            .snapshot
-            .windows
-            .get("fixture")
-            .ok_or_else(|| anyhow::anyhow!("observation missing"))?;
-        let desired =
-            plan.desired.get_mut("fixture").ok_or_else(|| anyhow::anyhow!("desired missing"))?;
-        desired.frame = current.frame;
-        desired.client_target = current.client.map(Some);
-        desired.dpi = current.dpi;
-        plan.mutations[0].geometry = Some(current.frame);
-        plan.mutations[0].move_only = true;
-        let (commands, receive) = mpsc::channel();
-        let (_native, native) = mpsc::channel();
-        commands.send(Command::Provider(ProviderCommand::Disconnect("capture".into())))?;
-        state.apply(&plan, &receive, &native)?;
-        assert!(state.runtime.suspended.contains("work"));
-        assert!(!state.runtime.claims.contains_key("fixture"));
-        assert!(events.try_iter().any(|event| matches!(event,Event::Result(result) if result.status == Status::Failed && result.windows.iter().any(|window| window.error.as_ref().is_some_and(|error| error.code == ErrorCode::OutputStateUnknown)))));
-        Ok(())
     }
 
     #[test]
@@ -296,7 +237,6 @@ pub enum Command {
     Undo(Id),
     Promote(Id, Id, bool, bool),
     ProtectPresentation(Id, window_manager_core::Protection),
-    PlaceControl(window_manager_core::Rect),
     AttentionTarget(Id, window_manager_core::Target),
     Pause(bool),
     Recover,
@@ -308,7 +248,7 @@ pub enum Command {
 }
 
 pub enum ProviderCommand {
-    Register(Id, Id, std::collections::BTreeSet<Id>, bool, bool),
+    Register(Id, Id, std::collections::BTreeSet<Id>, bool),
     Publish(window_manager_core::ProviderMessage),
     Disconnect(Id),
 }
@@ -322,7 +262,6 @@ pub enum Event {
     Error(Error),
     Notice(String),
     ManualEdit(ManualEdit),
-    ControlReady(window_manager_core::Rect, bool),
     Barrier(Id),
     Monitors(Id, Vec<windows_window_manager::MonitorIdentity>),
 }
@@ -421,24 +360,15 @@ impl State {
 
     fn provider(&mut self, command: ProviderCommand) -> Result<()> {
         match command {
-            ProviderCommand::Register(id, session, resources, output, attention) => {
+            ProviderCommand::Register(id, session, resources, attention) => {
                 if resources.iter().any(|id| !self.config.windows.contains_key(id)) {
                     Err(Error::new(ErrorCode::TargetMissing, "Provider resource missing", id))
                 } else {
-                    self.runtime.providers.register(id, session, resources, output, attention)
+                    self.runtime.providers.register(id, session, resources, attention)
                 }
             }
             ProviderCommand::Publish(message) => {
-                let linked = (message.output
-                    == Some(window_manager_core::OutputState::OutputLinked))
-                .then(|| message.window.clone());
-                self.runtime.providers.accept(message, window_manager_core::unix_millis()).map(
-                    |()| {
-                        if let Some(window) = linked {
-                            self.runtime.public_content.insert(window);
-                        }
-                    },
-                )
+                self.runtime.providers.accept(message, window_manager_core::unix_millis())
             }
             ProviderCommand::Disconnect(id) => {
                 self.runtime.providers.disconnect(&id);
@@ -455,15 +385,7 @@ impl State {
         root.placements(&mut leaves);
         let windows: BTreeMap<_, _> = leaves
             .iter()
-            .map(|placement| {
-                (
-                    &placement.window,
-                    (
-                        self.snapshot.windows.get(&placement.window),
-                        self.runtime.providers.output(&placement.window, self.snapshot.now_ms),
-                    ),
-                )
-            })
+            .map(|placement| (&placement.window, (self.snapshot.windows.get(&placement.window),)))
             .collect();
         let bytes = serde_json::to_vec(&(
             self.config.revision,
@@ -822,19 +744,6 @@ impl State {
                     .extend(component.mutations.iter().map(|mutation| mutation.window.clone()));
             }
         }
-        self.runtime.public_content.extend(
-            plan.desired
-                .iter()
-                .filter(|(_, desired)| {
-                    committed_slots.contains(&desired.slot)
-                        && self
-                            .config
-                            .slots
-                            .get(&desired.slot)
-                            .is_some_and(|slot| slot.designated_public)
-                })
-                .map(|(window, _)| window.clone()),
-        );
         if !committed_slots.is_empty() && self.undoing.as_ref() != Some(&plan.id) {
             self.undo.push(UndoRecord::capture(
                 &plan.scoped_subset(&committed_slots, &prior_runtime),
@@ -1152,11 +1061,6 @@ fn run(
                 } else {
                     Err(Error::new(ErrorCode::TargetMissing, "Presentation is not active", slot))
                 }
-            }
-            Command::PlaceControl(bounds) => {
-                let result = windows_window_manager::position_control(bounds);
-                let _ = state.events.send(Event::ControlReady(bounds, result.is_ok()));
-                result
             }
             Command::AttentionTarget(window, target) => {
                 state.config.validate_target(&target).map(|()| {

@@ -20,7 +20,6 @@ pub enum ErrorCode {
     FormulaInvalid,
     FormulaBudgetExceeded,
     ApplicationTimeout,
-    OutputStateUnknown,
     PermissionDenied,
     InvalidConfiguration,
     StorageFailure,
@@ -135,15 +134,6 @@ impl Protection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputProtection {
-    #[default]
-    None,
-    RequireVerifiedPrivate,
-    FreezeWhileLinkedOrUnknown,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)] // Independent operation opt-ins are not mutually exclusive states.
@@ -174,7 +164,7 @@ pub struct Tag {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "WindowRefDocument")]
 pub struct WindowRef {
     pub id: Id,
     pub alias: String,
@@ -183,12 +173,41 @@ pub struct WindowRef {
     /// Hide is opt-in per reference after compatibility testing, not inferred from the executable.
     pub allow_hide: bool,
     #[serde(default)]
-    pub public_content: bool,
     pub protection: Protection,
     #[serde(default)]
-    pub output_protection: OutputProtection,
-    #[serde(default)]
     pub capabilities: CapabilityProfile,
+}
+
+// Read-only compatibility for retired broadcast settings. New documents contain
+// only window-management fields; unrelated unknown keys are still rejected.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowRefDocument {
+    id: Id,
+    alias: String,
+    tags: Vec<Tag>,
+    application_hint: Option<String>,
+    allow_hide: bool,
+    protection: Protection,
+    #[serde(default)]
+    capabilities: CapabilityProfile,
+    #[serde(default, rename = "public_content")]
+    _legacy_public: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "output_protection")]
+    _legacy_output: Option<serde::de::IgnoredAny>,
+}
+impl From<WindowRefDocument> for WindowRef {
+    fn from(document: WindowRefDocument) -> Self {
+        Self {
+            id: document.id,
+            alias: document.alias,
+            tags: document.tags,
+            application_hint: document.application_hint,
+            allow_hide: document.allow_hide,
+            protection: document.protection,
+            capabilities: document.capabilities,
+        }
+    }
 }
 
 impl WindowRef {
@@ -200,9 +219,7 @@ impl WindowRef {
             tags: Vec::new(),
             application_hint: None,
             allow_hide: false,
-            public_content: false,
             protection: Protection::default(),
-            output_protection: OutputProtection::None,
             capabilities: CapabilityProfile::default(),
         }
     }
@@ -233,7 +250,8 @@ pub enum Query {
     Tag(String),
     Application(String),
     Alias(String),
-    Private,
+    #[serde(alias = "private")]
+    Unknown,
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
@@ -262,7 +280,7 @@ impl Query {
                 .application_hint
                 .as_ref()
                 .map_or(Truth::Unknown, |value| if value == app { Truth::Yes } else { Truth::No }),
-            Self::Private => Truth::Unknown,
+            Self::Unknown => Truth::Unknown,
             Self::Not(query) => query.matches(window).invert(),
             Self::And(queries) => {
                 let results: Vec<_> = queries.iter().map(|query| query.matches(window)).collect();
@@ -541,17 +559,40 @@ pub struct Workspace {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "DisplaySlotDocument")]
 pub struct DisplaySlot {
     pub id: Id,
     pub name: String,
     pub display: Id,
     /// Fraction of monitor work area: x, y, width, height. Does not depend on monitor order.
     pub region: [f64; 4],
-    pub designated_public: bool,
     /// Explicit ordered display choices. Fallback never rewrites original preferences.
     #[serde(default)]
     pub fallback_displays: Vec<Id>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisplaySlotDocument {
+    id: Id,
+    name: String,
+    display: Id,
+    region: [f64; 4],
+    #[serde(default)]
+    fallback_displays: Vec<Id>,
+    #[serde(default, rename = "designated_public")]
+    _legacy_public: Option<serde::de::IgnoredAny>,
+}
+impl From<DisplaySlotDocument> for DisplaySlot {
+    fn from(document: DisplaySlotDocument) -> Self {
+        Self {
+            id: document.id,
+            name: document.name,
+            display: document.display,
+            region: document.region,
+            fallback_displays: document.fallback_displays,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

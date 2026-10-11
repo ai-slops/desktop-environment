@@ -1,6 +1,6 @@
 use crate::{
-    Configuration, Desired, Error, ErrorCode, Id, Impact, Mutation, OutputProtection, OutputState,
-    Plan, Result, Runtime, ShowState, Snapshot, effective_protection, new_id, slot_bounds,
+    Configuration, Desired, Error, ErrorCode, Id, Impact, Mutation, Plan, Result, Runtime,
+    ShowState, Snapshot, effective_protection, new_id, slot_bounds,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -139,15 +139,6 @@ pub fn plan_window_action(
                 impact.moved = 1;
             }
         }
-    }
-    if reference.output_protection != OutputProtection::None
-        && runtime.providers.output(&action.window, snapshot.now_ms) != OutputState::VerifiedPrivate
-    {
-        return Err(Error::new(
-            ErrorCode::OutputStateUnknown,
-            "Output protection prevents unverified explicit action",
-            &action.window,
-        ));
     }
     let mut result = Plan {
         mode: None,

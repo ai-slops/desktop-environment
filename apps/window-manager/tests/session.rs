@@ -18,7 +18,6 @@ fn read_only_session_simulates_without_native_authority_or_configuration_changes
             name: "simulation source".into(),
             display: "absent-real-display".into(),
             region: [0.0, 0.0, 1.0, 1.0],
-            designated_public: false,
             fallback_displays: Vec::new(),
         },
     );

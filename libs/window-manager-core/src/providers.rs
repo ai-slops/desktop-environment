@@ -4,14 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OutputState {
-    VerifiedPrivate,
-    OutputLinked,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AttentionKind {
     Working,
     ApprovalNeeded,
@@ -30,7 +22,6 @@ pub struct ProviderMessage {
     pub window: Id,
     pub observed_ms: u64,
     pub ttl_ms: u64,
-    pub output: Option<OutputState>,
     pub attention: Option<AttentionKind>,
 }
 
@@ -39,7 +30,6 @@ struct Provider {
     session: Id,
     sequence: u64,
     resources: BTreeSet<Id>,
-    output: bool,
     attention: bool,
     connected: bool,
 }
@@ -57,7 +47,6 @@ impl ProviderRegistry {
         id: Id,
         session: Id,
         resources: BTreeSet<Id>,
-        output: bool,
         attention: bool,
     ) -> Result<()> {
         if id.is_empty()
@@ -74,10 +63,8 @@ impl ProviderRegistry {
             ));
         }
         self.evidence.retain(|(provider, _), _| provider != &id);
-        self.providers.insert(
-            id,
-            Provider { session, sequence: 0, resources, output, attention, connected: true },
-        );
+        self.providers
+            .insert(id, Provider { session, sequence: 0, resources, attention, connected: true });
         Ok(())
     }
 
@@ -89,7 +76,6 @@ impl ProviderRegistry {
             || provider.session != message.session
             || message.sequence <= provider.sequence
             || !provider.resources.contains(&message.window)
-            || message.output.is_some() && !provider.output
             || message.attention.is_some() && !provider.attention
             || !(1..=60_000).contains(&message.ttl_ms)
             || message.observed_ms > now_ms
@@ -118,31 +104,6 @@ impl ProviderRegistry {
             .is_some_and(|provider| provider.connected && provider.session == message.session)
             && now_ms >= message.observed_ms
             && now_ms - message.observed_ms < message.ttl_ms
-    }
-
-    #[must_use]
-    pub fn output(&self, window: &str, now_ms: u64) -> OutputState {
-        let states: Vec<_> = self
-            .evidence
-            .values()
-            .filter(|message| message.window == window && message.output.is_some())
-            .map(|message| {
-                if self.fresh(message, now_ms) {
-                    message.output.unwrap_or(OutputState::Unknown)
-                } else {
-                    OutputState::Unknown
-                }
-            })
-            .collect();
-        if states.contains(&OutputState::OutputLinked) {
-            OutputState::OutputLinked
-        } else if !states.is_empty()
-            && states.iter().all(|state| *state == OutputState::VerifiedPrivate)
-        {
-            OutputState::VerifiedPrivate
-        } else {
-            OutputState::Unknown
-        }
     }
 
     #[must_use]

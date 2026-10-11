@@ -110,9 +110,7 @@ pub fn simulate(config: &Configuration, input: &Simulation) -> Result<Simulation
                 tags: Vec::new(),
                 application_hint: None,
                 allow_hide: true,
-                public_content: false,
                 protection: crate::Protection::default(),
-                output_protection: crate::OutputProtection::None,
                 capabilities: crate::CapabilityProfile::default(),
             },
         );
@@ -127,7 +125,6 @@ pub fn simulate(config: &Configuration, input: &Simulation) -> Result<Simulation
     let original_display = slot.display.clone();
     slot.display = "simulation-display".into();
     slot.region = [0.0, 0.0, 1.0, 1.0];
-    slot.designated_public = false;
     slot.fallback_displays.clear();
     let mut snapshot = Snapshot { topology_revision: 1, ..Snapshot::default() };
     if input.display_present {

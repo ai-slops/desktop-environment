@@ -265,19 +265,6 @@ pub fn expansion_layout<'a>(
         }
     };
     area.validate()?;
-    if !config.slots[slot].designated_public
-        && config.slots.values().filter(|other| other.designated_public).any(|other| {
-            resolve_slot(config, other, snapshot)
-                .and_then(|resolved| slot_bounds(&resolved, snapshot))
-                .is_ok_and(|bounds| bounds.overlaps(area))
-        })
-    {
-        return Err(Error::new(
-            ErrorCode::PermissionDenied,
-            "Private expansion would enter a public-designated region",
-            slot,
-        ));
-    }
     Ok(Some(ExpansionLayout { node: target, area, immutable, memory }))
 }
 

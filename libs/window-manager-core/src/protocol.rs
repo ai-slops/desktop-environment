@@ -1,5 +1,5 @@
 use crate::{
-    Configuration, Error, ErrorCode, Id, OutputState, Rect, Result, Runtime, ShowState, Snapshot,
+    Configuration, Error, ErrorCode, Id, Rect, Result, Runtime, ShowState, Snapshot,
     TransitionResult, new_id,
 };
 use serde::{Deserialize, Serialize};
@@ -111,9 +111,7 @@ pub struct PublicWindow {
     pub placement: Option<Id>,
     pub capabilities: PublicCapabilities,
     pub owned_dialog: bool,
-    pub output: OutputState,
     pub rendering_readiness: String,
-    pub shared_public_content: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -206,14 +204,7 @@ impl PublicSnapshot {
                                 }),
                             },
                             owned_dialog: window.is_some_and(|window| window.has_owned_dialog),
-                            output: runtime.providers.output(id, snapshot.now_ms),
                             rendering_readiness: "unknown".into(),
-                            shared_public_content: crate::shared_public_content(
-                                config,
-                                runtime,
-                                id,
-                                snapshot.now_ms,
-                            ),
                         },
                     )
                 })

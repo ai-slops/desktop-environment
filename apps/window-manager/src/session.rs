@@ -98,7 +98,6 @@ enum SessionCommand {
         provider: Id,
         session: Id,
         resources: BTreeSet<Id>,
-        output: bool,
         attention: bool,
     },
     ProviderPublish {
@@ -415,18 +414,11 @@ impl Session {
                 self.plans.clear();
                 Ok(self.public_snapshot())
             }
-            SessionCommand::ProviderRegister {
-                provider,
-                session,
-                resources,
-                output,
-                attention,
-            } => {
+            SessionCommand::ProviderRegister { provider, session, resources, attention } => {
                 self.exchange(Command::Provider(ProviderCommand::Register(
                     provider.clone(),
                     session,
                     resources,
-                    output,
                     attention,
                 )))?;
                 self.log.push(DomainEvent::ProviderChanged { provider });

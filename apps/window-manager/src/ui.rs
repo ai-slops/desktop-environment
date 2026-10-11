@@ -107,8 +107,6 @@ struct Manager {
     inventory: Vec<Candidate>,
     selected_view: Id,
     selected_root: String,
-    control_position: Option<Rect>,
-    settled_control: Option<Rect>,
     selected_slot: Id,
     selected_group: Id,
     selected_window: Option<Id>,
@@ -230,7 +228,7 @@ impl Manager {
         let package_path =
             path.with_file_name("layout-package.json").to_string_lossy().into_owned();
         #[allow(unused_mut)] // Smoke fixtures prepare a pure preview after normal initialization.
-        let mut manager = Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, control_position: None, settled_control: None, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), reference_search: String::new(), capture_windows: BTreeSet::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
+        let mut manager = Self { path, _lock: lock, watchdog: watchdog.ok(), draft: config.clone(), config, safe_mode, worker, snapshot: Snapshot::default(), runtime: Runtime::default(), inventory: Vec::new(), selected_view, selected_root, selected_slot, selected_group, selected_window: None, retained: BTreeSet::new(), mode: TransitionMode::Open, focus_target: false, search: String::new(), reference_search: String::new(), capture_windows: BTreeSet::new(), page, name: String::new(), display_choice: String::new(), region: [0.0, 0.0, 1.0, 1.0], undo: Vec::new(), preview: None, latest_request: None, apply_when_previewed: false, pending_requests: Vec::new(), applying: false, structure_source: None, size_context: String::new(), size_destinations: BTreeSet::new(), transient_filter: None, shortcut_selection: ShortcutSelection::View, last_transition: None, monitor_epoch: String::new(), monitor_inventory: Vec::new(), monitor_alias: String::new(), error, notice: "영역을 만들고 창을 추가한 뒤 미리보기로 시작하세요. 저장된 배치는 자동 적용하지 않습니다.".into(), result: None,
             tag_input: String::new(),
             expansion_node: String::new(),
             expansion_slots: BTreeSet::new(),
@@ -342,54 +340,7 @@ impl Manager {
             });
         }
     }
-    fn guard_control(&mut self, ctx: &egui::Context) -> bool {
-        if window_manager_core::control_bounds(&self.config, &self.snapshot).is_none_or(|bounds| {
-            self.settled_control != Some(bounds)
-                || !windows_window_manager::control_fits(bounds)
-                || self.config.slots.values().any(|slot| slot.designated_public)
-                    && self.monitor_inventory.iter().any(|monitor| {
-                        monitor.work_area.overlaps(bounds)
-                            && !self
-                                .snapshot
-                                .displays
-                                .values()
-                                .any(|display| display.name == monitor.name)
-                    })
-        }) {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.heading("관리 제어창을 표시할 모니터를 선택하세요");
-                ui.label("창 제목·알림을 보여주는 이 제어창의 위치를 지정합니다. 관리할 모니터 수를 제한하지 않습니다.");
-                ui.label("지정 후 화면 / 영역에서 다른 모니터의 작업 영역을 추가할 수 있습니다. 제어 영역을 벗어나면 관리 내용이 가려집니다.");
-                ui.small("모니터 지정은 실제 방송 캡처 상태를 확인하거나 변경하지 않습니다.");
-                let displays: Vec<_> = self.snapshot.displays.values().cloned().collect();
-                for display in displays {
-                    let has_public = self.config.slots.values().any(|slot| slot.display == display.id && slot.designated_public);
-                    let label = if has_public {
-                        format!("{}에 제어창 표시 · 이 모니터의 공개 지정 해제", display.name)
-                    } else {
-                        format!("{}에 제어창 표시", display.name)
-                    };
-                    if ui.button(label).clicked() {
-                        let mut draft = self.config.clone();
-                        for slot in draft.slots.values_mut() { if slot.display == display.id { slot.designated_public = false; } }
-                        let id = new_id("slot");
-                        draft.slots.insert(id.clone(), DisplaySlot { id, name: "비공개 제어".into(), display: display.id, region: [0.0, 0.0, 1.0, 1.0], designated_public: false, fallback_displays: Vec::new() });
-                        self.control_position = None;
-                        self.commit(draft);
-                    }
-                }
-                if ui.button("숨긴 창 복구").clicked() { self.send(Command::Recover); }
-                self.monitor_mapping_ui(ui);
-                if let Some(bounds) = window_manager_core::control_bounds(&self.config, &self.snapshot)
-                    && ui.button("기존 비공개 제어 영역으로 돌아가기").clicked() {
-                    self.settled_control = None; self.send(Command::PlaceControl(bounds));
-                }
-            });
-            ctx.request_repaint_after(Duration::from_millis(200));
-            return false;
-        }
-        true
-    }
+
     fn manual_edit(&mut self, edit: window_manager_core::ManualEdit) {
         if self.safe_mode.is_some()
             || self
@@ -442,26 +393,10 @@ impl Manager {
         while let Ok(event) = self.worker.receiver.try_recv() {
             match event {
                 Event::ManualEdit(edit) => self.manual_edit(edit),
-                Event::ControlReady(bounds, ready) => {
-                    if self.control_position == Some(bounds) {
-                        self.settled_control = ready.then_some(bounds);
-                    }
-                }
                 Event::Inventory(inventory) => self.inventory = inventory,
                 Event::State(snapshot, runtime) => {
                     self.snapshot = snapshot;
                     self.runtime = runtime;
-                    if let Some(bounds) =
-                        window_manager_core::control_bounds(&self.config, &self.snapshot)
-                    {
-                        if self.control_position != Some(bounds) {
-                            self.control_position = Some(bounds);
-                            self.settled_control = None;
-                            self.send(Command::PlaceControl(bounds));
-                        }
-                    } else {
-                        self.settled_control = None;
-                    }
                     if self.display_choice.is_empty() {
                         self.display_choice =
                             self.snapshot.displays.keys().next().cloned().unwrap_or_default();
@@ -691,7 +626,6 @@ impl Manager {
             }
         }
         ui.add_space(16.0);
-        ui.colored_label(Color32::from_rgb(221, 177, 105), "출력 / 캡처 상태: 미검증");
         ui.small("같은 실제 창은 여러 배치에서도 내용을 공유합니다.");
     }
     #[allow(clippy::too_many_lines)] // One inventory/inspector UI panel.
@@ -776,17 +710,6 @@ impl Manager {
                         )
                     },
                 ));
-                if window_manager_core::shared_public_content(
-                    &self.config,
-                    &self.runtime,
-                    &reference.id,
-                    self.snapshot.now_ms,
-                ) {
-                    ui.colored_label(
-                        Color32::YELLOW,
-                        "공개 배치와 앱 콘텐츠 공유 · 복사해도 같은 창",
-                    );
-                }
                 let mut capture = self.capture_windows.contains(&reference.id);
                 if ui
                     .add_enabled(
@@ -839,32 +762,12 @@ impl Manager {
         {
             ui.separator();
             ui.text_edit_singleline(&mut edit.alias);
-            ui.checkbox(
-                &mut edit.public_content,
-                "이 창의 콘텐츠는 공개 출력에 사용됨 (공유 경고 유지)",
-            );
             ui.horizontal(|ui| {
                 ui.checkbox(&mut edit.protection.geometry_lock, "위치·크기 잠금");
                 ui.checkbox(&mut edit.protection.maintain_visible, "계속 표시");
                 ui.checkbox(&mut edit.protection.keep_monitor, "모니터 유지");
                 ui.checkbox(&mut edit.protection.prohibit_focus, "포커스 요청 금지");
             });
-            egui::ComboBox::from_id_salt("output-protection")
-                .selected_text(format!("출력 보호: {:?}", edit.output_protection))
-                .show_ui(ui, |ui| {
-                    for policy in [
-                        window_manager_core::OutputProtection::None,
-                        window_manager_core::OutputProtection::RequireVerifiedPrivate,
-                        window_manager_core::OutputProtection::FreezeWhileLinkedOrUnknown,
-                    ] {
-                        ui.selectable_value(
-                            &mut edit.output_protection,
-                            policy,
-                            format!("{policy:?}"),
-                        );
-                    }
-                });
-            ui.small("비공개 지정은 캡처 안전 증명이 아닙니다. 검증 공급자가 없으면 출력 증거는 unknown입니다.");
             ui.horizontal(|ui| {
                 ui.checkbox(&mut edit.capabilities.allow_move, "이 앱 이동 허용");
                 ui.checkbox(&mut edit.capabilities.allow_resize, "크기 변경 허용");
@@ -997,9 +900,7 @@ impl Manager {
             tags: Vec::new(),
             application_hint: Some(candidate.class.clone()),
             allow_hide: false,
-            public_content: false,
             protection: Protection::default(),
-            output_protection: window_manager_core::OutputProtection::None,
             capabilities: window_manager_core::CapabilityProfile::default(),
         });
         let Some(view) = draft.views.get_mut(&self.selected_view) else {
@@ -1075,7 +976,6 @@ impl Manager {
                     },
                     display: self.display_choice.clone(),
                     region: self.region,
-                    designated_public: false,
                     fallback_displays: Vec::new(),
                 },
             );
@@ -1087,7 +987,6 @@ impl Manager {
         ui.separator();
         if let Some(slot) = self.draft.slots.get_mut(&self.selected_slot) {
             ui.text_edit_singleline(&mut slot.name);
-            ui.checkbox(&mut slot.designated_public, "공개 출력 지정 (실제 캡처는 미검증)");
             ui.label("원본 화면이 없을 때 사용할 명시적 대체 화면 (선택 순서)");
             for display in
                 self.snapshot.displays.values().filter(|display| display.id != slot.display)
@@ -1241,24 +1140,6 @@ impl Manager {
             }
         }
         ui.label("구조 저장은 실제 창을 이동하지 않습니다. 미리보기와 적용으로 반영하세요.");
-        if let Some(view) = self.config.views.get(&self.selected_view) {
-            let mut placements = Vec::new();
-            for root in view.roots.values() {
-                root.placements(&mut placements);
-            }
-            let shared =
-                placements.iter().map(|placement| &placement.window).collect::<BTreeSet<_>>();
-            for window in shared {
-                if window_manager_core::shared_public_content(
-                    &self.config,
-                    &self.runtime,
-                    window,
-                    self.snapshot.now_ms,
-                ) {
-                    ui.colored_label(Color32::YELLOW, format!("{} · 공개 출력과 콘텐츠를 공유합니다. 배치 복사는 앱 내용을 복제하지 않습니다.", self.config.windows[window].alias));
-                }
-            }
-        }
         let mut tab_action = None;
         if let Some(view) = self.draft.views.get_mut(&self.selected_view) {
             ui.horizontal(|ui| {
@@ -1669,9 +1550,7 @@ impl Manager {
                             tags: Vec::new(),
                             application_hint: None,
                             allow_hide: false,
-                            public_content: false,
                             protection: Protection::default(),
-                            output_protection: window_manager_core::OutputProtection::None,
                             capabilities: window_manager_core::CapabilityProfile::default(),
                         },
                     );
@@ -2140,9 +2019,6 @@ impl eframe::App for Manager {
         self.poll();
         #[cfg(feature = "ui-smoke")]
         self.capture_smoke(ctx);
-        if !self.guard_control(ctx) {
-            return;
-        }
         ctx.request_repaint_after(Duration::from_millis(200));
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -2303,7 +2179,7 @@ fn query_node(ui: &mut egui::Ui, query: &mut Query, depth: usize) {
         Query::Tag(_) => 1,
         Query::Application(_) => 2,
         Query::Alias(_) => 3,
-        Query::Private => 4,
+        Query::Unknown => 4,
         Query::Not(_) => 5,
         Query::And(_) => 6,
         Query::Or(_) => 7,
@@ -2311,11 +2187,11 @@ fn query_node(ui: &mut egui::Ui, query: &mut Query, depth: usize) {
     let mut kind = original;
     egui::ComboBox::from_id_salt("query-kind")
         .selected_text(
-            ["전체", "태그", "앱 힌트", "별칭 포함", "개인 분류", "NOT", "AND", "OR"][kind],
+            ["전체", "태그", "앱 힌트", "별칭 포함", "미지원 조건", "NOT", "AND", "OR"][kind],
         )
         .show_ui(ui, |ui| {
             for (index, label) in
-                ["전체", "태그", "앱 힌트", "별칭 포함", "개인 분류", "NOT", "AND", "OR"]
+                ["전체", "태그", "앱 힌트", "별칭 포함", "미지원 조건", "NOT", "AND", "OR"]
                     .iter()
                     .enumerate()
             {
@@ -2327,7 +2203,7 @@ fn query_node(ui: &mut egui::Ui, query: &mut Query, depth: usize) {
             1 => Query::Tag(String::new()),
             2 => Query::Application(String::new()),
             3 => Query::Alias(String::new()),
-            4 => Query::Private,
+            4 => Query::Unknown,
             5 => Query::Not(Box::new(query.clone())),
             6 => Query::And(vec![query.clone()]),
             7 => Query::Or(vec![query.clone()]),
@@ -2372,7 +2248,7 @@ fn query_node(ui: &mut egui::Ui, query: &mut Query, depth: usize) {
         Query::All => {
             ui.label("등록된 모든 창");
         }
-        Query::Private => {
+        Query::Unknown => {
             ui.label("공급자 분류 증거 없음: unknown");
         }
     }
@@ -2500,7 +2376,7 @@ fn tree_editor(
                     egui::ComboBox::from_id_salt((&group.id, "reflow-policy")).selected_text(format!("재배치 정책: {:?}", group.reflow)).show_ui(ui, |ui| {
                         for (policy, label) in [(window_manager_core::ReflowPolicy::ExistingPositionFirst, "기존 위치 우선 (기본)"), (window_manager_core::ReflowPolicy::OnEntryOrRequest, "진입·명시 요청 시 재배치"), (window_manager_core::ReflowPolicy::ContinuousRule, "연속 규칙 · 감지된 상호작용 중 보류")] { ui.selectable_value(&mut group.reflow, policy, label); }
                     });
-                    ui.small("구성원 계산·저장은 별도 단계입니다. 연속 규칙은 공개/확장/보호 영역과 전경 관리 창·드래그·모달 중 보류합니다. 앱 내부 입력 상태는 완전히 감지할 수 없습니다.");
+                    ui.small("구성원 계산·저장은 별도 단계입니다. 연속 규칙은 확장/보호 영역과 전경 관리 창·드래그·모달 중 보류합니다. 앱 내부 입력 상태는 완전히 감지할 수 없습니다.");
                     ui.horizontal(|ui| { ui.label("자동 선택 규칙 우선순위 (큰 값 우선)"); ui.add(egui::DragValue::new(&mut group.rule_priority).range(-1_000_000..=1_000_000)); });
                     ui.horizontal(|ui| {
                         ui.label("간격 수식");

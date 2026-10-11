@@ -129,7 +129,6 @@ pub fn plan_independent(
             | ErrorCode::UnsupportedOperation
             | ErrorCode::TargetMissing
             | ErrorCode::ClaimConflict
-            | ErrorCode::OutputStateUnknown
             | ErrorCode::FormulaInvalid
             | ErrorCode::FormulaBudgetExceeded
     ) {

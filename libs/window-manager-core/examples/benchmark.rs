@@ -18,7 +18,6 @@ fn fixture(count: usize) -> (Configuration, Snapshot, Target) {
         name: "Fixture".into(),
         display: "monitor".into(),
         region: [0.0, 0.0, 1.0, 1.0],
-        designated_public: false,
         fallback_displays: vec![],
     };
     config.slots.insert(slot.id.clone(), slot);

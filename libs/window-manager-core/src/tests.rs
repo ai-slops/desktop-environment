@@ -13,9 +13,7 @@ fn fixture() -> (Configuration, Snapshot, Target) {
             tags: vec![],
             application_hint: None,
             allow_hide: true,
-            public_content: false,
             protection: Protection::default(),
-            output_protection: OutputProtection::None,
             capabilities: CapabilityProfile {
                 allow_dpi_transfer: true,
                 ..CapabilityProfile::default()
@@ -27,7 +25,6 @@ fn fixture() -> (Configuration, Snapshot, Target) {
         name: "Work".into(),
         display: "monitor".into(),
         region: [0.0, 0.0, 1.0, 1.0],
-        designated_public: false,
         fallback_displays: Vec::new(),
     };
     let mut placement = Placement::new("preview".into(), "preview".into());
@@ -632,15 +629,6 @@ fn borrowed_expansion_requires_exact_authority_and_restores_empty_slots() -> Res
     collapsed.commit(&mut runtime);
     assert!(!runtime.presentations.contains_key("borrowed"));
     assert!(runtime.presentations["work"].expansion.is_none());
-    config
-        .slots
-        .get_mut("borrowed")
-        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture missing", "test"))?
-        .designated_public = true;
-    assert_eq!(
-        plan(&config, &Runtime::default(), &snapshot, &request).err().map(|error| error.code),
-        Some(ErrorCode::PermissionDenied)
-    );
     Ok(())
 }
 
@@ -877,10 +865,10 @@ fn formulas_are_bounded_pure_typed_and_lazy() -> Result<()> {
 }
 
 #[test]
-fn unknown_negative_query_never_proves_public_and_exclusions_win() {
+fn unknown_negative_query_stays_unknown_and_exclusions_win() {
     let (config, _, _) = fixture();
     let window = &config.windows["preview"];
-    assert_eq!(Query::Not(Box::new(Query::Private)).matches(window), Truth::Unknown);
+    assert_eq!(Query::Not(Box::new(Query::Unknown)).matches(window), Truth::Unknown);
     let collection = Collection {
         id: "c".into(),
         name: "c".into(),
@@ -1525,7 +1513,6 @@ fn game_in_unrelated_slot_receives_zero_operations_and_stale_protection_is_detec
             name: "Game".into(),
             display: "monitor".into(),
             region: [0.5, 0.0, 0.5, 1.0],
-            designated_public: false,
             fallback_displays: Vec::new(),
         },
     );
@@ -1740,24 +1727,12 @@ fn manual_edit_saves_only_changed_properties_and_promotion_keeps_other_exception
 }
 
 #[test]
-fn output_provider_expiry_disconnect_and_capability_scope_are_enforced() -> Result<()> {
-    let (mut config, mut snapshot, target) = fixture();
-    config
-        .windows
-        .get_mut("preview")
-        .ok_or_else(|| Error::new(ErrorCode::TargetMissing, "fixture", "preview"))?
-        .output_protection = OutputProtection::RequireVerifiedPrivate;
-    let mut runtime = Runtime::default();
-    let request = Request::open(&config, target);
-    assert_eq!(
-        plan(&config, &runtime, &snapshot, &request).err().map(|error| error.code),
-        Some(ErrorCode::OutputStateUnknown)
-    );
-    runtime.providers.register(
+fn attention_provider_expiry_disconnect_and_capability_scope_are_enforced() -> Result<()> {
+    let mut registry = ProviderRegistry::default();
+    registry.register(
         "fixture-provider".into(),
         "session".into(),
         BTreeSet::from(["preview".into()]),
-        true,
         true,
     )?;
     let message = ProviderMessage {
@@ -1767,26 +1742,57 @@ fn output_provider_expiry_disconnect_and_capability_scope_are_enforced() -> Resu
         window: "preview".into(),
         observed_ms: 1000,
         ttl_ms: 100,
-        output: Some(OutputState::VerifiedPrivate),
         attention: Some(AttentionKind::ApprovalNeeded),
     };
-    runtime.providers.accept(message.clone(), 1000)?;
-    let transition = plan(&config, &runtime, &snapshot, &request)?;
-    assert!(runtime.providers.accept(message.clone(), 1000).is_err());
+    registry.accept(message.clone(), 1000)?;
+    assert_eq!(registry.attention(1000).len(), 1);
+    assert!(registry.accept(message.clone(), 1000).is_err());
     let mut malicious = message;
     malicious.sequence = 2;
     malicious.window = "ungranted".into();
-    assert!(runtime.providers.accept(malicious, 1000).is_err());
-    snapshot.now_ms = 1100;
-    assert_eq!(runtime.providers.output("preview", 1100), OutputState::Unknown);
-    assert_eq!(
-        transition.revalidate(&config, &runtime, &snapshot).err().map(|error| error.code),
-        Some(ErrorCode::OutputStateUnknown)
-    );
-    snapshot.now_ms = 1000;
-    runtime.providers.disconnect("fixture-provider");
-    assert_eq!(runtime.providers.output("preview", 1000), OutputState::Unknown);
-    assert!(runtime.providers.attention(1000).is_empty());
+    assert!(registry.accept(malicious, 1000).is_err());
+    assert!(registry.attention(1100).is_empty());
+    registry.disconnect("fixture-provider");
+    assert!(registry.attention(1000).is_empty());
+    Ok(())
+}
+
+#[test]
+fn retired_broadcast_settings_load_without_restricting_window_layout()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (config, snapshot, target) = fixture();
+    let before =
+        plan(&config, &Runtime::default(), &snapshot, &Request::open(&config, target.clone()))?;
+    let mut document = serde_json::to_value(&config)?;
+    document["windows"]["preview"]["public_content"] = serde_json::json!(true);
+    document["windows"]["preview"]["output_protection"] =
+        serde_json::json!("require_verified_private");
+    document["slots"]["work"]["designated_public"] = serde_json::json!(true);
+    let migrated: Configuration = serde_json::from_value(document)?;
+    let after = plan(&migrated, &Runtime::default(), &snapshot, &Request::open(&migrated, target))?;
+    assert_eq!(serde_json::to_value(before.desired)?, serde_json::to_value(after.desired)?);
+    let saved = serde_json::to_string(&migrated)?;
+    for field in ["public_content", "output_protection", "designated_public"] {
+        assert!(!saved.contains(field));
+    }
+    assert!(migrated.windows["preview"].capabilities.allow_move);
+    assert_eq!(migrated.slots["work"].region, config.slots["work"].region);
+    Ok(())
+}
+
+#[test]
+fn legacy_compatibility_keeps_unknown_field_rejection()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let (config, _, _) = fixture();
+    for (section, id) in [("windows", "preview"), ("slots", "work")] {
+        let mut document = serde_json::to_value(&config)?;
+        document[section][id]["unexpected_setting"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Configuration>(document).is_err());
+    }
+    let old: Query = serde_json::from_str(r#"{"kind":"private"}"#)?;
+    assert_eq!(old, Query::Unknown);
+    assert_eq!(old.matches(&config.windows["preview"]), Truth::Unknown);
+    assert_eq!(serde_json::to_string(&old)?, r#"{"kind":"unknown"}"#);
     Ok(())
 }
 
@@ -1843,32 +1849,6 @@ fn manual_minimization_is_not_undone_by_force_restore() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn control_fallback_never_uses_public_intersections_or_changes_saved_topology() {
-    let (mut config, mut snapshot, _) = fixture();
-    assert!(control_bounds(&config, &snapshot).is_some());
-    let mut public = config.slots["work"].clone();
-    public.id = "public".into();
-    public.designated_public = true;
-    config.slots.insert(public.id.clone(), public);
-    assert!(control_bounds(&config, &snapshot).is_none());
-    let mut private = config.slots["work"].clone();
-    private.id = "private-control".into();
-    private.display = "private-monitor".into();
-    config.slots.insert(private.id.clone(), private);
-    let mut display = snapshot.displays["monitor"].clone();
-    display.id = "private-monitor".into();
-    display.work_area.x = -2000;
-    snapshot.displays.insert(display.id.clone(), display.clone());
-    let expected = control_bounds(&config, &snapshot);
-    assert!(expected.is_some_and(|bounds| bounds.x < 0));
-    snapshot.displays.remove("private-monitor");
-    assert!(control_bounds(&config, &snapshot).is_none());
-    assert_eq!(config.slots["private-control"].display, "private-monitor");
-    snapshot.displays.insert(display.id.clone(), display);
-    assert_eq!(control_bounds(&config, &snapshot), expected);
-}
-
 fn two_window_fixture() -> Result<(Configuration, Snapshot, Target)> {
     let (mut config, mut snapshot, target) = fixture();
     let mut reference = config.windows["preview"].clone();
@@ -1921,7 +1901,7 @@ fn temporary_filter_clear_restores_layout_without_authored_state_drift() -> Resu
     }
     assert_eq!(serde_json::to_string(&config).unwrap_or_default(), authored);
     let mut unknown = Request::open(&config, target);
-    unknown.filter = Some(Query::Not(Box::new(Query::Private)));
+    unknown.filter = Some(Query::Not(Box::new(Query::Unknown)));
     assert!(plan(&config, &runtime, &filtered_snapshot, &unknown)?.desired.is_empty());
     if let Some(window) = config.windows.get_mut("preview") {
         window.protection.maintain_visible = true;
@@ -2151,20 +2131,14 @@ fn explicit_topology_fallback_has_independent_preferences_and_reconnect_restores
 }
 
 #[test]
-fn private_fallback_rejects_public_intersection_and_unrelated_missing_monitor_does_not_block()
--> Result<()> {
+fn unrelated_missing_monitor_does_not_block_available_scopes() -> Result<()> {
     let (mut config, snapshot, target) = fixture();
-    let mut public = config.slots["work"].clone();
-    public.id = "public".into();
-    public.designated_public = true;
-    config.slots.insert(public.id.clone(), public);
     let mut missing = config.slots["work"].clone();
     missing.id = "missing".into();
     missing.display = "absent".into();
     missing.fallback_displays.push("monitor".into());
-    assert!(resolve_slot(&config, &missing, &snapshot).is_err());
+    assert_eq!(resolve_slot(&config, &missing, &snapshot)?.display, "monitor");
     config.slots.insert(missing.id.clone(), missing);
-    config.slots.remove("public");
     config
         .slots
         .get_mut("missing")
@@ -2185,8 +2159,7 @@ fn private_fallback_rejects_public_intersection_and_unrelated_missing_monitor_do
 
 #[test]
 #[allow(clippy::unwrap_used)] // Fixture resources are constructed immediately above.
-fn settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_effects()
--> Result<()> {
+fn settled_scope_rechecks_modal_and_style_without_rejecting_own_effects() -> Result<()> {
     let (mut config, snapshot, target) = fixture();
     let mut runtime = Runtime::default();
     let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
@@ -2209,39 +2182,6 @@ fn settled_scope_rechecks_output_lifetime_modal_and_style_without_rejecting_own_
             .map(|error| error.code),
         Some(ErrorCode::StaleBinding)
     );
-    config.windows.get_mut("preview").unwrap().output_protection =
-        OutputProtection::RequireVerifiedPrivate;
-    runtime.providers.register(
-        "capture".into(),
-        "session".into(),
-        BTreeSet::from(["preview".into()]),
-        true,
-        false,
-    )?;
-    runtime.providers.accept(
-        ProviderMessage {
-            provider: "capture".into(),
-            session: "session".into(),
-            sequence: 1,
-            window: "preview".into(),
-            observed_ms: 1000,
-            ttl_ms: 100,
-            output: Some(OutputState::VerifiedPrivate),
-            attention: None,
-        },
-        1000,
-    )?;
-    let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target.clone()))?;
-    after = settled_snapshot(&transition, &snapshot);
-    after.now_ms = 1100;
-    assert_eq!(
-        transition
-            .settled_scope(&transition.scope, &config, &runtime, &after)
-            .err()
-            .map(|error| error.code),
-        Some(ErrorCode::OutputStateUnknown)
-    );
-    config.windows.get_mut("preview").unwrap().output_protection = OutputProtection::None;
     config.windows.get_mut("preview").unwrap().capabilities.allow_show_state = true;
     let transition = plan(&config, &runtime, &snapshot, &Request::open(&config, target))?;
     transition.commit(&mut runtime);
@@ -2353,8 +2293,8 @@ fn saved_query_is_an_independent_arrangement_without_changing_resources_or_sourc
     assert_eq!(serde_json::to_value(&config.windows).unwrap(), references);
     let unknown = config.save_filtered_view(
         &target.view,
-        "Unknown not public".into(),
-        &Query::Not(Box::new(Query::Private)),
+        "Unknown application hint".into(),
+        &Query::Not(Box::new(Query::Unknown)),
     )?;
     let mut missing = Vec::new();
     config.views[&unknown].roots["main"].placements(&mut missing);
@@ -2392,26 +2332,6 @@ fn explicit_formula_replacement_and_default_promotion_are_property_local() -> Re
         Some([500.0, 350.0])
     );
     assert_eq!(snapshot.windows["preview"].client, [600, 400]);
-    Ok(())
-}
-
-#[test]
-#[allow(clippy::unwrap_used)] // Constructed fixture slot.
-fn copied_private_view_retains_shared_public_content_warning() -> Result<()> {
-    let (mut config, snapshot, target) = fixture();
-    config.slots.get_mut("work").unwrap().designated_public = true;
-    config
-        .shortcuts
-        .push(Shortcut { number: 1, target: ShortcutTarget::FixedView(target.clone()) });
-    let copied = config.copy_view(&target.view, "Private copy".into())?;
-    let runtime = Runtime::default();
-    assert!(shared_public_content(&config, &runtime, "preview", snapshot.now_ms));
-    let mut placements = Vec::new();
-    config.views[&copied].roots["main"].placements(&mut placements);
-    assert_eq!(placements[0].window, "preview");
-    let public =
-        PublicSnapshot::capture(&config, &runtime, &snapshot, EventLog::default().cursor());
-    assert!(public.windows["preview"].shared_public_content);
     Ok(())
 }
 
@@ -2469,8 +2389,6 @@ fn continuous_rules_defer_interaction_and_reflow_only_opted_in_groups() -> Resul
     );
     current.focused = None;
     assert!(continuous_request(&config, &runtime, &current, "work", true).is_err());
-    config.slots.get_mut("work").unwrap().designated_public = true;
-    assert!(continuous_request(&config, &runtime, &current, "work", false).is_err());
     Ok(())
 }
 
@@ -2660,7 +2578,7 @@ fn approved_resize_is_visit_local_scoped_and_never_rewrites_rules() -> Result<()
 
 #[test]
 #[allow(clippy::unwrap_used)] // Constructed fixture keys.
-fn approved_resize_enforces_minima_capabilities_output_and_geometry_locks() -> Result<()> {
+fn approved_resize_enforces_minima_capabilities_and_geometry_locks() -> Result<()> {
     let (mut config, mut snapshot, target) = fixture();
     snapshot.displays.get_mut("monitor").unwrap().work_area =
         Rect { x: 0, y: 0, width: 300, height: 250 };
@@ -2679,13 +2597,6 @@ fn approved_resize_enforces_minima_capabilities_output_and_geometry_locks() -> R
         ErrorCode::UnsupportedOperation
     );
     config.windows.get_mut("preview").unwrap().capabilities.allow_resize = true;
-    config.windows.get_mut("preview").unwrap().output_protection =
-        OutputProtection::RequireVerifiedPrivate;
-    assert_eq!(
-        plan(&config, &Runtime::default(), &snapshot, &request).unwrap_err().code,
-        ErrorCode::OutputStateUnknown
-    );
-    config.windows.get_mut("preview").unwrap().output_protection = OutputProtection::None;
     config.windows.get_mut("preview").unwrap().protection.geometry_lock = true;
     assert!(plan(&config, &Runtime::default(), &snapshot, &request).is_err());
     Ok(())

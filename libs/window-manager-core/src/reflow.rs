@@ -1,6 +1,6 @@
 use crate::{
-    Configuration, Error, ErrorCode, Id, Node, OutputProtection, OutputState, Placement,
-    ReflowPolicy, Request, Result, Runtime, Snapshot, Target, TransitionMode, effective_protection,
+    Configuration, Error, ErrorCode, Id, Node, Placement, ReflowPolicy, Request, Result, Runtime,
+    Snapshot, Target, TransitionMode, effective_protection,
 };
 use std::collections::BTreeMap;
 
@@ -59,11 +59,9 @@ pub fn continuous_permission(
     }
     if !active.approved_resize.is_empty()
         || active.expansion.is_some()
-        || config.slots.get(slot).is_none_or(|slot| slot.designated_public)
+        || !config.slots.contains_key(slot)
     {
-        return Err(deferred(
-            "Expanded or public-designated presentation requires explicit reflow",
-        ));
+        return Err(deferred("Expanded or unavailable presentation requires explicit reflow"));
     }
     let mut leaves = Vec::new();
     root.placements(&mut leaves);
@@ -83,16 +81,6 @@ pub fn continuous_permission(
         {
             return Err(deferred(
                 "Protection, Visit exception or modal/show-state interaction defers reflow",
-            ));
-        }
-        if config.windows[&placement.window].output_protection != OutputProtection::None
-            && runtime.providers.output(&placement.window, snapshot.now_ms)
-                != OutputState::VerifiedPrivate
-        {
-            return Err(Error::new(
-                ErrorCode::OutputStateUnknown,
-                "Fresh output evidence required before continuous reflow",
-                &placement.window,
             ));
         }
     }

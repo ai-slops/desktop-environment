@@ -17,13 +17,6 @@ fn unsupported<T>() -> Result<T> {
 pub const fn foreground_handle() -> u64 {
     0
 }
-pub fn position_control(_: window_manager_core::Rect) -> Result<()> {
-    unsupported()
-}
-#[must_use]
-pub const fn control_fits(_: window_manager_core::Rect) -> bool {
-    false
-}
 pub fn inventory() -> Result<Vec<Candidate>> {
     unsupported()
 }

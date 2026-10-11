@@ -20,7 +20,7 @@ The proposed delivery stages are:
 |---|---|
 | **P0 — Feasibility gate** | Test real-window transitions, event handling, visibility, recovery, and application compatibility before building the complete interface. |
 | **P1 — Core personal release** | Deliver the coherent Windows-first product: independent layouts, recursive groups, partial transitions, tags, basic formulas, multi-monitor composition, and recovery. |
-| **P2 — Advanced workflows** | Add linked templates, richer providers, output-system integration, and optional observation surfaces. |
+| **P2 — Advanced workflows** | Add linked templates, richer providers, optional observation surfaces. |
 
 A feature marked P2 is deferred, not silently replaced with a weaker P1 guarantee. Safety and state-ownership rules apply as soon as the related feature exists. Proposed defaults and performance targets are design decisions, not measured results. Platform observations are separately sourced in Section 23.
 
@@ -38,7 +38,7 @@ A feature marked P2 is deferred, not silently replaced with a weaker P1 guarante
 10. Manual changes, automatic changes, and precedence
 11. Formula and layout-package requirements
 12. Interaction and accessibility requirements
-13. Concurrent work, attention, and output protection
+13. Concurrent work, attention, and window protection
 14. Window lifecycle, compatibility, and recovery
 15. Architecture boundaries and platform execution contract
 16. Performance and observability
@@ -56,7 +56,7 @@ A feature marked P2 is deferred, not silently replaced with a weaker P1 guarante
 
 ### 1.1 Problem statement
 
-The intended user works with existing applications across multiple tasks and monitors. Some applications are remote-development frontends, AI interfaces, terminals, browsers, games, or broadcast tools, but the product must not assume that every activity is software development.
+The intended user works with existing applications across multiple tasks and monitors. Some applications are remote-development frontends, AI interfaces, terminals, browsers, games, or other applications, but the product must not assume that every activity is software development.
 
 Conventional single-desktop membership is insufficient: the same browser, editor, or monitoring window may be useful in several task contexts, with a different position and size in each. Conversely, restoring every saved rectangle on every transition is sometimes undesirable. A user may want to keep a preview at its current size, keep a game exactly where it is, or replace only one monitor region while monitoring continues elsewhere.
 
@@ -102,9 +102,9 @@ The first release is useful when a user can reliably return to a named working a
 
 ### 2.2 Non-goals for the initial release
 
-The initial release does not provide a new OS compositor, universal embedding of third-party windows, independent interactive copies of one real window, universal recovery of application-internal state, cross-machine window migration, a remote-desktop protocol, an AI execution scheduler, or a broadcast application.
+The initial release does not provide a new OS compositor, universal embedding of third-party windows, independent interactive copies of one real window, universal recovery of application-internal state, cross-machine window migration, a remote-desktop protocol, an AI execution scheduler.
 
-It does not promise zero-latency transitions, frame-atomic redraw across unrelated applications, live rendering of every hidden window, reliable suppression of all third-party focus changes, or privacy protection against arbitrary capture software. Unsupported or unverified capabilities must remain visible as such.
+It does not promise zero-latency transitions, frame-atomic redraw across unrelated applications, live rendering of every hidden window, reliable suppression of all third-party focus changes. Unsupported or unverified capabilities must remain visible as such.
 
 ### 2.3 Operating assumptions
 
@@ -121,13 +121,12 @@ The system stores local configuration and layout metadata by default. Accounts, 
 | ID | Workflow | What changes | What remains continuous |
 |---|---|---|---|
 | UC-01 | Implementation to review | Editor region becomes diff/review; preview may retain its size. | Actual application sessions and unrelated regions. |
-| UC-02 | AI work while gaming and broadcasting | AI region switches project, conversation, or review layout. | Game geometry, operating monitors, and automatic non-interference with focus. |
+| UC-02 | AI work while gaming | AI region switches project, conversation, or review layout. | Game geometry, operating monitors, and automatic non-interference with focus. |
 | UC-03 | Multiple AI projects | One task region switches from project A to B. | A's execution, shared operating information, and other visible Workspaces. |
 | UC-04 | Shared reference browser | The same browser participates in several Views with independent placements. | One actual browser session; its content is not cloned. |
 | UC-05 | Group-level modes | A tab replaces an entire implementation subgroup with a review subgroup. | Sibling groups and application execution. |
 | UC-06 | Responsive side panel | Side-by-side subgroups become tabs when the parent region narrows. | Logical membership, preferred sizes, and focused content when feasible. |
 | UC-07 | Large portrait displays | Several named regions occupy each physical monitor. | Stable region identities and selective switching. |
-| UC-08 | Presentation plus private notes | The user changes private working material while presenting. | Explicit output target; no claim of capture safety without integration. |
 | UC-09 | Temporary interruption | A utility or incident window is brought into the current context and then returned. | The saved layout and original placement preference. |
 | UC-10 | Monitor removal/reconnection | Runtime layout adapts to remaining displays. | Original topology-specific preferences and protection constraints. |
 | UC-11 | Imported responsive layout | Roles, tags, and display targets are mapped before applying. | Current live arrangement until explicit application. |
@@ -135,14 +134,14 @@ The system stores local configuration and layout metadata by default. Accounts, 
 
 ### 3.1 Reference concurrent-work composition
 
-A Screen Composition named `Broadcast: game + AI` contains:
+A Screen Composition named `Game + AI` contains:
 
 - Center display: `Game / Play`, with geometry preservation and no automatic focus requests.
 - Left display: `Project A / AI work`, replaceable independently with `Project A / Review` or `Project B / Status`.
-- Right upper region: `Broadcast / Operations`, continuously allocated and not eligible for automatic tab hiding.
-- Right lower region: `Broadcast / Chat`, unchanged during AI-region switching.
+- Right upper region: `Operations`, continuously allocated and not eligible for automatic tab hiding.
+- Right lower region: `Chat`, unchanged during AI-region switching.
 
-Starting this composition arranges already available windows. It does not start a stream, start a game, submit an AI task, or alter the capture scene. Those are separate optional commands.
+Starting this composition arranges already available windows. It does not start a game or submit an AI task.
 
 An AI approval request creates attention in the operating interface. It does not activate the AI window automatically. Selecting it opens the required tab path in the configured AI region. The game and operating regions are excluded from the resulting mutation set.
 
@@ -162,7 +161,7 @@ An AI approval request creates attention in the operating interface. It does not
 | **Group** | A recursive container of Window Placements and child Groups. | Application lifetime or project ownership. |
 | **Placement** | One occurrence of a Window in a particular arrangement, including its local role and layout preferences. | A second application instance. |
 | **Display Slot** | A named region of a physical display, with topology mapping and bounds. | The task or View that occupies it. |
-| **Screen Composition** | A saved mapping of View roots to Display Slots, with continuity constraints. | Application-internal or broadcast state. |
+| **Screen Composition** | A saved mapping of View roots to Display Slots, with continuity constraints. | Application-internal state. |
 | **Layout Preset** | Reusable group structure, responsive rules, and parameters. | Implicitly shared live selection or focus state. |
 
 A Group can use an inline selector without requiring a named Collection. A default Workspace and View are created automatically. Users need not understand every concept before grouping their first windows.
@@ -205,7 +204,7 @@ Screen Composition
     View Presentation: Game / Play
       main root -> center-game
   Display Slot: right-operations
-    View Presentation: Broadcast / Operations
+    View Presentation: Operations
       main root -> right-operations
 ```
 
@@ -237,7 +236,6 @@ Screen Composition
 | Observed platform state | Live Window Binding | Runtime truth, not automatically authored intent. |
 | Preserve-on-transition exception | Visit ID / Placement or Group / property mask | Temporary; never automatically committed to a View. |
 | Last-known-good layout | Presentation / topology context | Recovery checkpoint; not a replacement for authored preferences. |
-| Output/capture state | Explicit provider, if installed | Includes evidence and freshness; unknown is a valid state. |
 
 **STATE-01 — Independent occurrences.** Geometry belongs to a Placement and layout context, not to the Window reference. Two tabs in one View can use the same window with different saved sizes, just as two Views can.
 
@@ -267,7 +265,7 @@ Screen Composition
 **STATE-07 — Invariants.** The planner, executor, and persistence layer MUST enforce all of the following:
 
 1. One real window receives at most one final geometric target in a plan.
-2. No implicit app launch, termination, input injection, approval, or broadcast change occurs during layout switching.
+2. No implicit app launch, termination, input injection, or approval occurs during layout switching.
 3. An inactive View may recompute metadata but cannot move a window currently used elsewhere.
 4. Preserving current geometry does not change the destination's saved geometry.
 5. Explicit hard constraints are not silently relaxed to satisfy a formula or fill space.
@@ -285,7 +283,7 @@ Screen Composition
 
 After restart, an exact provider identity may be rebound automatically. Ambiguous matches MUST require selection rather than silently attaching a similarly titled window. Missing references may keep a reserved Placement without launching an application.
 
-**MEM-02 — Available metadata only.** Queries MUST distinguish known, unknown, unavailable, and stale attributes. Project identity, URL, document path, AI status, or capture state is usable only when a provider actually supplies it. Unknown values are not false, zero, or empty strings. In particular, `NOT private` must not turn an unknown classification into proof that a window is public-safe.
+**MEM-02 — Available metadata only.** Queries MUST distinguish known, unknown, unavailable, and stale attributes. Project identity, URL, document path, or AI status is usable only when a provider actually supplies it. Unknown values are not false, zero, or empty strings. Negating an unavailable attribute must remain unknown rather than becoming a positive match.
 
 ### 6.2 Tags, queries, and manual membership
 
@@ -399,7 +397,7 @@ The Group defines an ordered list of allowed fallbacks: wrap/reorder, fold eligi
 
 **DSP-06 — Slot overlap.** Normal active Display Slots MUST not overlap unless an explicit overlay/floating composition permits it. Temporary retained windows reserve occupied rectangles before other layout is computed. Overlapping protected reservations produce a conflict rather than a best-effort violation.
 
-**DSP-07 — Topology adaptation.** Disconnect, reconnect, work-area change, rotation, and scaling changes MUST create a new validated runtime plan. Original layouts remain saved. When all constraints cannot be satisfied, the system reports which constraints conflict and offers explicit alternatives. It must not automatically move private operating content into a known public output region.
+**DSP-07 — Topology adaptation.** Disconnect, reconnect, work-area change, rotation, and scaling changes MUST create a new validated runtime plan. Original layouts remain saved. When all constraints cannot be satisfied, the system reports which constraints conflict and offers explicit alternatives.
 
 **DSP-08 — Return from fallback.** Reconnecting a previously used topology offers or performs the configured restoration policy without restarting applications. User changes made in the fallback context are retained in that context. Windows created while displays were missing remain discoverable and are not discarded during restoration.
 
@@ -498,7 +496,7 @@ While the temporary size is active, select Save here:
 **EDIT-06 — Hard constraints before preferences.** Resolution order is:
 
 1. Validate authority, scope, live identities, and platform capability.
-2. Combine all applicable hard constraints: physical availability, explicit geometry/visibility protection, active output restrictions, and strict preservation requests.
+2. Combine all applicable hard constraints: physical availability, explicit geometry/visibility protection, strict preservation requests.
 3. If hard constraints conflict, block or use an explicitly permitted fallback. No arbitrary priority winner is allowed to violate another hard constraint.
 4. Apply Visit-local preferences and property overrides where not constrained.
 5. Apply persisted local overrides and shared-size defaults.
@@ -537,7 +535,7 @@ The exact grammar is an implementation selection. The P1 semantic minimum is ari
 | State | Current variant, prior stable ordering, explicit user parameters. |
 | Capabilities | Whether the adapter can move, resize, observe, or preserve the requested property. |
 
-Outputs are strategy/variant selection, child rectangles, ordering, and proposed folding/overflow. Hard visibility, geometry, scope, and output restrictions are validated after evaluation and cannot be weakened by its result.
+Outputs are strategy/variant selection, child rectangles, ordering, and proposed folding/overflow. Hard visibility, geometry, and scope restrictions are validated after evaluation and cannot be weakened by its result.
 
 **FORM-04 — Acyclic dependencies.** Layout-output visibility MUST NOT feed back into its own candidate-selection predicate. Parent/child size dependencies require a directed, validated relationship or bounded negotiation. Cycles or repeated variant oscillation freeze the affected Group at its last valid arrangement and produce a diagnostic.
 
@@ -555,7 +553,7 @@ strategy      = available_width < compact_threshold ? tabs : horizontal_split
 
 **FORM-06 — Actionable errors.** Diagnostics MUST identify the Group/property and the conflicting values, for example: `Required minimum width 640; available content width 420`. Offer relevant actions such as resize the Group, choose folding, keep the prior placement, or permit an explicit size exception. Invalid draft expressions never replace the last committed valid rule.
 
-**FORM-07 — Commit boundary.** Applying a draft is explicit. A layout-package update or changed expression does not modify public/retained regions automatically. The resulting plan passes the same validation and undo pipeline as a manual layout edit.
+**FORM-07 — Commit boundary.** Applying a draft is explicit. A layout-package update or changed expression does not modify retained regions automatically. The resulting plan passes the same validation and undo pipeline as a manual layout edit.
 
 ### 11.4 Import, export, and reuse
 
@@ -605,11 +603,11 @@ strategy      = available_width < compact_threshold ? tabs : horizontal_split
 
 ---
 
-## 13. Concurrent work, attention, and output protection
+## 13. Concurrent work, attention, and window protection
 
 ### 13.1 Protection properties
 
-**PRO-01 — Independent protection dimensions.** Define independent constraints for geometry, monitor placement, continued display allocation, manager-initiated focus changes, and output-linked changes. Each constraint has a scope and lifetime: Placement, Group, presentation, or Screen Composition. `Always visible in this composition` does not mean globally on top in every Workspace.
+**PRO-01 — Independent protection dimensions.** Define independent constraints for geometry, monitor placement, continued display allocation, manager-initiated focus changes. Each constraint has a scope and lifetime: Placement, Group, presentation, or Screen Composition. `Always visible in this composition` does not mean globally on top in every Workspace.
 
 Maintaining visibility means the manager does not hide, fold, or intentionally cover the target through its own operations. It cannot guarantee that arbitrary external applications never cover it. Report detected violations; do not claim exclusive control of the desktop.
 
@@ -621,25 +619,7 @@ Maintaining visibility means the manager does not hide, fold, or intentionally c
 
 **PRO-04 — No automatic activation.** Attention may aggregate through Group tabs, Views, and a central inventory. Receiving attention MUST NOT switch a semantic tab, replace a View, request foreground activation, or resize a protected game. User selection routes to the configured work slot and required tab path.
 
-**PRO-05 — Separate acknowledgment.** Opening an event, reviewing a result, and approving an application action are separate operations. A layout command does not approve AI or application work. Attention previews obey the privacy policy of the surface where they appear.
-
-### 13.3 Broadcast and presentation boundary
-
-**PRO-06 — Designated versus verified public state.** The system MUST distinguish a user-designated public region from a provider-verified current output/capture state. P1 can enforce conservative local constraints on designated regions but must label actual output state as unverified without integration. Hiding or covering a local window is not evidence that capture has stopped; OBS documents window capture that remains visible despite foreground windows. [S12]
-
-**PRO-07 — Shared content warning.** A real window reused in private and public placements still shares application content. When known or designated as public, editing it elsewhere must retain that warning. A copied View is not a private content clone.
-
-**PRO-08 — Restricted automatic output changes.** Automatic membership additions, template updates, and replacement bindings in output-linked regions are staged as candidates rather than silently published. Explicit output changes use a separate command and, when available, an output provider. The window manager does not become a broadcaster merely by naming a slot `public`.
-
-**PRO-09 — Management UI placement.** Switchers, thumbnails, titles, notifications, and error details may be sensitive. Provide a private control surface and an explicit fallback when it is unavailable. Do not quietly route sensitive management UI into a designated public slot after a monitor is disconnected.
-
-**PRO-10 — Unknown output is not safe output.** If capture integration disconnects or its state becomes stale, stop making verified-safety claims and restrict dependent automatic changes. Any optional safe-output action requires actual provider support and acknowledged completion. Local blanking alone is not a sufficient fallback for every capture method.
-
-### 13.4 Impossible concurrent constraints
-
-**PRO-11 — Explicit infeasibility.** When a one-monitor fallback cannot simultaneously maintain a full-screen game, a private input area, continuously visible operations, and an unchanged public output, show an unsatisfied-constraints state. Offer explicit alternatives, such as reducing the game area, selecting another control device, or changing output through a supported provider. Do not silently weaken privacy or visibility constraints.
-
----
+**PRO-05 — Separate acknowledgment.** Opening an event, reviewing a result, and approving an application action are separate operations. A layout command does not approve AI or application work. Attention previews use the same explicit routing and focus rules.
 
 ## 14. Window lifecycle, compatibility, and recovery
 
@@ -799,9 +779,9 @@ These are initial targets to validate, not advertised guarantees or existing ben
 | Recovery | Main-process failure cannot remove access to the independent recovery action. Supported manager-hidden windows pass the crash-recovery suite. |
 | Idle behavior | No full-desktop busy polling or continuous full-resolution screenshot capture by default. |
 
-**PERF-02 — Reference fixtures.** P0 MUST test 4, 8, and 16 windows with: movement only; partial and widespread resizing; hide/show; semantic and responsive tabs; same and mixed DPI; disconnected monitors; hung applications; and rapid A/B/C requests. Use actual editor/browser/terminal applications and the game-plus-broadcast configuration where available.
+**PERF-02 — Reference fixtures.** P0 MUST test 4, 8, and 16 windows with: movement only; partial and widespread resizing; hide/show; semantic and responsive tabs; same and mixed DPI; disconnected monitors; hung applications; and rapid A/B/C requests. Use actual editor/browser/terminal applications and concurrent game workloads where available.
 
-**PERF-03 — Concurrent-load measurement.** Record CPU/GPU load, memory, game frame-time distribution, and available broadcaster render/encode statistics while switching only the work region. Not touching the game's geometry is necessary but does not prove there is no shared-resource performance impact.
+**PERF-03 — Concurrent-load measurement.** Record CPU/GPU load, memory, game frame-time distribution while switching only the work region. Not touching the game's geometry is necessary but does not prove there is no shared-resource performance impact.
 
 **PERF-04 — Structured diagnostics.** Each committed transition logs request ID, scope, revisions, selected mode, affected bindings, mutation counts, settlement results, supersession, and fallback reasons. Logs redact titles/paths by default and avoid screenshot capture unless explicitly enabled. A human-readable impact report is derived from the same plan.
 
@@ -811,13 +791,13 @@ These are initial targets to validate, not advertised guarantees or existing ben
 
 ## 17. Extension, automation, and security boundaries
 
-**EXT-01 — Stable extension responsibilities.** Define separate interfaces for metadata/binding providers, layout strategies, application capability profiles, visibility strategies, attention sources, output-state providers, command contributions, and optional observation surfaces. A provider reports capability and evidence; it does not acquire unrestricted authority over every window.
+**EXT-01 — Stable extension responsibilities.** Define separate interfaces for metadata/binding providers, layout strategies, application capability profiles, visibility strategies, attention sources, command contributions, and optional observation surfaces. A provider reports capability and evidence; it does not acquire unrestricted authority over every window.
 
 **EXT-02 — One command pathway.** GUI actions, shortcuts, a local CLI, and future AI clients use the same validated command layer. Commands declare arguments, resolved scope, required capabilities, side effects, dry-run support, and undo behavior. A future AI agent must not need to simulate UI clicks to use supported operations.
 
 P1 requires command-layer conformance; a public remote API and autonomous-agent client are P2 delivery features.
 
-**EXT-03 — Authority and confirmation.** Pure layout/package data cannot invoke app execution, arbitrary shell commands, input injection, output switching, or credential access. Commands that close real windows or affect verified output require separate authority from ordinary arrangement changes. Confirmation policy may be configured for an explicitly trusted local user action, not bypassed by a formula.
+**EXT-03 — Authority and confirmation.** Pure layout/package data cannot invoke app execution, arbitrary shell commands, input injection, or credential access. Commands that close real windows require separate authority from ordinary arrangement changes. Confirmation policy may be configured for an explicitly trusted local user action, not bypassed by a formula.
 
 **EXT-04 — Local transport boundaries.** If IPC is exposed, authenticate the same-user client and constrain its permissions. Do not bind an unauthenticated control API to the network. Remote access is a separate feature with its own authentication, authorization, and audit design.
 
@@ -865,7 +845,7 @@ A missing binding and an unresolved template role are different states. A role m
 | Composition | Bind roots to slots; open target in scope; restore display profile. | Saved composition or runtime presentation, explicitly selected. |
 | Transition | Plan; apply; preserve size; retain here; temporarily bring; cancel pending request. | Runtime mutations and Visit-local exceptions. |
 | Persist geometry | Save selected properties here; copy size; clear local override. | Specified LayoutPreference records only. |
-| Protection | Set geometry/visibility/focus/output restrictions with lifetime. | Explicit scoped constraint. |
+| Protection | Set geometry/visibility/focus restrictions with lifetime. | Explicit scoped constraint. |
 | Recovery | Pause; reveal manager-hidden; recover off-screen; undo action. | Validated manager-owned changes. |
 | Application control | Close window; launch target; provider-specific action. | Separate permission and command family. |
 
@@ -875,7 +855,7 @@ A missing binding and an unresolved template role are different states. A role m
 
 **API-02 — Idempotency.** Mutating command requests accept a request/idempotency identifier. Retrying an accepted command must not create duplicate Groups, duplicate application launches, or additional Visits unintentionally. Plan IDs are valid only for their declared snapshot; stale application requires revalidation/replanning.
 
-**API-03 — Explicit error model.** Use machine-readable error classes at minimum: `STALE_REVISION`, `STALE_BINDING`, `TARGET_MISSING`, `AMBIGUOUS_BINDING`, `CLAIM_CONFLICT`, `OUT_OF_SCOPE`, `UNSATISFIABLE_CONSTRAINTS`, `UNSUPPORTED_OPERATION`, `FORMULA_INVALID`, `FORMULA_BUDGET_EXCEEDED`, `APPLICATION_TIMEOUT`, `OUTPUT_STATE_UNKNOWN`, and `PERMISSION_DENIED`. Include a human-readable explanation and affected object IDs.
+**API-03 — Explicit error model.** Use machine-readable error classes at minimum: `STALE_REVISION`, `STALE_BINDING`, `TARGET_MISSING`, `AMBIGUOUS_BINDING`, `CLAIM_CONFLICT`, `OUT_OF_SCOPE`, `UNSATISFIABLE_CONSTRAINTS`, `UNSUPPORTED_OPERATION`, `FORMULA_INVALID`, `FORMULA_BUDGET_EXCEEDED`, `APPLICATION_TIMEOUT`, and `PERMISSION_DENIED`. Include a human-readable explanation and affected object IDs.
 
 **API-04 — Events.** Publish domain events for committed configuration edits, binding lifecycle, membership changes, attention, plan/result status, topology changes, and recovery actions. Native platform event names are adapter details. Event subscription must support obtaining a current snapshot after a missed-event interval; clients must not assume their local cache is complete forever.
 
@@ -923,7 +903,7 @@ A passing result must be demonstrated with both deterministic planner tests and 
 | AT-03 | Rename/reorder a View, Group, and Placement. | IDs, geometry preferences, and fixed shortcuts remain attached to the same targets. | MODEL-01, DSP-04 |
 | AT-04 | Add a nonmatching window to a View. | It is included locally; global tags and source View membership are unchanged. | MEM-03, MEM-08 |
 | AT-05 | A window matches a query but has an explicit exclusion. | It stays excluded; inspector names the responsible exclusion and re-include action. | MEM-03, MEM-07 |
-| AT-06 | A negative filter references unavailable privacy metadata. | Unknown does not become proof of public safety. | MEM-02, PRO-06 |
+| AT-06 | A negative filter references unavailable application metadata. | Unknown remains unknown rather than matching a window. | MEM-02 |
 | AT-07 | Dynamic query results reorder or briefly disappear and return. | Persistent dynamic children retain identity and eligible saved preferences. | MEM-05 |
 | AT-08 | An active typing window no longer matches its selector. | Pending removal is shown; no manager-induced disruptive hide occurs during detected interaction. | MEM-11, EDIT-04 |
 | AT-09 | A temporary filter is applied and cleared. | Saved View revision and geometry remain unchanged; prior presentation is restored subject to availability. | MEM-10 |
@@ -970,11 +950,8 @@ A passing result must be demonstrated with both deterministic planner tests and 
 | AT-35 | User selects that attention event. | The designated AI slot and required tab path open; unrelated slots are not replaced. | UX-06, PRO-04 |
 | AT-36 | A continuously displayed monitor is nested under a Group that wants to fold it. | Ancestor folding is blocked or uses an explicitly allowed summary; no silent loss of visibility. | PRO-02 |
 | AT-37 | One real window is selected by two simultaneously visible Views. | Existing valid owner stays; other occurrence reports a conflict and offers explicit transfer. | MODEL-04, MEM-06 |
-| AT-38 | The source window is protected or known output-linked; request transfer from another scope. | Transfer is blocked pending explicit resolution; unrelated ownership is not stolen. | DSP-03, PRO-01, PRO-08 |
-| AT-39 | Remove a monitor during a designated-public composition. | Private controls are not silently relocated into a public region; original layout remains saved. | DSP-07, PRO-09, PRO-11 |
+| AT-38 | The source window is protected; request transfer from another scope. | Transfer is blocked pending explicit resolution; unrelated ownership is not stolen. | DSP-03, PRO-01 |
 | AT-40 | Restore the original monitor topology. | Saved context returns under the chosen policy; fallback edits and new windows remain accounted for. | STATE-06, DSP-08 |
-| AT-41 | Capture provider disconnects while reporting public output. | State becomes unknown/stale; verified-safety claims stop and dependent automatic changes are restricted. | PRO-06, PRO-10 |
-| AT-42 | Reuse a publicly designated browser in a private View. | Shared-content warning remains; no false claim of isolated browser state. | PRO-07 |
 | AT-43 | Expand a Group toward a protected operating slot. | Only explicitly permitted scope is used; expansion cannot silently cover the protected slot. | LAY-14, DSP-06 |
 
 ### 19.5 Platform failures and recovery
@@ -1042,21 +1019,21 @@ Required demonstrations:
 
 ### P1 — Coherent personal-use release
 
-Deliver all requirements not explicitly identified as P2, including stable Workspace/View organization; reusable Window references; tags and basic query editing; independent Placement preferences; recursive Groups and both tab semantics; Display Slots and Screen Compositions; partial switching; size-preserving/keep-here/temporary-bring operations; responsive fallbacks; basic bounded formulas with import/export mapping; local manual overrides; undo; private-designated control UI; and crash recovery.
+Deliver all requirements not explicitly identified as P2, including stable Workspace/View organization; reusable Window references; tags and basic query editing; independent Placement preferences; recursive Groups and both tab semantics; Display Slots and Screen Compositions; partial switching; size-preserving/keep-here/temporary-bring operations; responsive fallbacks; basic bounded formulas with import/export mapping; local manual overrides; undo; and crash recovery.
 
-P1 must include the command-layer semantics even when the CLI is minimal. It may use built-in adapters only. Output state may remain unverified, but the UI must make that limitation explicit.
+P1 must include the command-layer semantics even when the CLI is minimal. It may use built-in adapters only.
 
 **P1 gate:** Pass applicable AT-01 through AT-56 and VG-01 through VG-10 against the published support matrix. Provider-dependent tests use test providers for contract validation and are not advertised as real integrations until validated against the actual application. Document unsupported application categories and privacy/output limitations prominently.
 
 ### P2 — Advanced providers and reuse
 
-Potential additions are linked size profiles, linked/versioned Layout Presets, richer metadata and attention providers, verified output integration, observation-only mirrors, additional layout algorithms, richer application-internal state adapters, authenticated remote control/PWA control surfaces, and third-party executable plugins.
+Potential additions are linked size profiles, linked/versioned Layout Presets, richer metadata and attention providers, observation-only mirrors, additional layout algorithms, richer application-internal state adapters, authenticated remote control/PWA control surfaces, and third-party executable plugins.
 
 P2 does not relax P1 invariants. Its providers must participate in scope validation, effect planning, permission checks, privacy handling, and undo/recovery classification.
 
 ### Release compatibility statement
 
-Every release must list tested Windows builds, privileges, display configurations, application profiles, known failed operations, visibility strategy, and recovery support. Features depending on private APIs must be individually identified. No release should be described as universally application-compatible or broadcast-safe solely because ordinary placement tests pass.
+Every release must list tested Windows builds, privileges, display configurations, application profiles, known failed operations, visibility strategy, and recovery support. Features depending on private APIs must be individually identified. No release should be described as universally application-compatible solely because ordinary placement tests pass.
 
 ---
 
@@ -1081,7 +1058,6 @@ Every release must list tested Windows builds, privileges, display configuration
 | Imported layouts | Preview and environment mapping; independent copy by default. |
 | Automatic motion | Existing-position-first by default; no real-window animation requirement. |
 | Native integration | Logical group tree with top-level native windows; no mandatory reparenting. |
-| Broadcast awareness | Conservative designated-region handling; verified output requires a provider. |
 | Application lifetime | Independent of View and Group lifetime. |
 
 ### 21.2 Implementation selections to validate, not unresolved UX
@@ -1098,7 +1074,6 @@ Every release must list tested Windows builds, privileges, display configuration
 | Topology identity heuristics | Reconnect, docking, duplicate monitors, rotation, scaling. | Confirm ambiguous mappings. |
 | Optional clipping/scrolling strategy | Real native-window compatibility and no misleading interaction promises. | Tabs, wrapping, or explicit overflow instead of assumed clipping. |
 | Measured performance envelope | Actual reference hardware, workloads, and percentile measurements. | Engineering targets in Section 16 are unverified. |
-| Verified broadcast integration | Output target identity, status freshness, actual capture behavior, acknowledged actions. | Output state unverified; no privacy guarantee. |
 
 These items are recorded decisions for engineering validation, not reasons to postpone the specification's state model or start implementing contradictory defaults.
 
@@ -1121,7 +1096,7 @@ Implementation work is ready to proceed when the team or coding agent has:
 
 ### Definition of done for an implementation issue
 
-The issue names affected requirement IDs; states whether it changes persisted, runtime, application, or output state; includes normal and failure-path tests; specifies undo/recovery behavior; and documents unsupported capabilities. A UI that appears correct while corrupting saved preferences or issuing unnecessary native operations is not complete.
+The issue names affected requirement IDs; states whether it changes persisted, runtime, or application state; includes normal and failure-path tests; specifies undo/recovery behavior; and documents unsupported capabilities. A UI that appears correct while corrupting saved preferences or issuing unnecessary native operations is not complete.
 
 ### Product-level completion criterion
 
@@ -1198,12 +1173,6 @@ Documents live thumbnail relationships between source windows and destination re
 Documents rendering suppression and JavaScript throttling for occluded windows, including treatment of other virtual desktops. This is evidence of one major application's behavior, not a rule for every application.
 
 `https://chromium.googlesource.com/chromium/src/+/refs/heads/main/docs/windows_native_window_occlusion_tracking.md`
-
-### [S12] OBS — Window Capture Sources
-
-Documents capturing a selected window even when other windows are in front of it. Supports the requirement not to equate a local covering overlay with verified output privacy.
-
-`https://obsproject.com/kb/window-capture-sources`
 
 ### [S13] Microsoft — IVirtualDesktopManager
 

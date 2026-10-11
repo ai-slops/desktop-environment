@@ -8,8 +8,8 @@
 )]
 use crate::{
     Binding, Configuration, DisplaySlot, Error, ErrorCode, Group, Id, Node, ObservedWindow,
-    OutputProtection, OutputState, Placement, Rect, Result, ShowState, Snapshot, Strategy, Target,
-    context_key, effective_protection, evaluate, new_id,
+    Placement, Rect, Result, ShowState, Snapshot, Strategy, Target, context_key,
+    effective_protection, evaluate, new_id,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,7 +128,6 @@ pub struct Runtime {
     pub providers: crate::ProviderRegistry,
     pub attention_targets: BTreeMap<Id, Target>,
     pub geometry: BTreeMap<Id, Desired>,
-    pub public_content: BTreeSet<Id>,
     pub pending_reflow: BTreeMap<Id, String>,
 }
 
@@ -309,7 +308,7 @@ pub fn slot_bounds(slot: &DisplaySlot, snapshot: &Snapshot) -> Result<Rect> {
 
 /// Computes a final diff without native side effects or changes to authored state.
 pub fn resolve_slot(
-    config: &Configuration,
+    _config: &Configuration,
     slot: &DisplaySlot,
     snapshot: &Snapshot,
 ) -> Result<DisplaySlot> {
@@ -323,14 +322,7 @@ pub fn resolve_slot(
         let mut resolved = slot.clone();
         resolved.display.clone_from(display);
         resolved.fallback_displays.clear();
-        let bounds = slot_bounds(&resolved, snapshot)?;
-        if !resolved.designated_public
-            && config.slots.values().filter(|other| other.designated_public).any(|other| {
-                slot_bounds(other, snapshot).is_ok_and(|public| public.overlaps(bounds))
-            })
-        {
-            continue;
-        }
+        slot_bounds(&resolved, snapshot)?;
         return Ok(resolved);
     }
     Err(Error::new(
@@ -791,7 +783,7 @@ fn plan_pass(
                 .map(|leaf| leaf.id.clone()),
         );
         for id in &presentation.approved_resize {
-            result.diagnostics.push(format!("{id}: explicitly approved Visit size exception; hard protection, minimum and output constraints remain enforced"));
+            result.diagnostics.push(format!("{id}: explicitly approved Visit size exception; hard protection, minimum and capability constraints remain enforced"));
         }
         for (group, child) in &request.selected_tabs {
             presentation.selected_tabs.insert(group.clone(), child.clone());
@@ -1033,29 +1025,6 @@ fn plan_pass(
             Some(&desired.placement),
             Some(&desired.slot),
         );
-        let output = runtime.providers.output(window, snapshot.now_ms);
-        if reference.output_protection == OutputProtection::RequireVerifiedPrivate
-            && (output != OutputState::VerifiedPrivate
-                || config.slots[&desired.slot].designated_public)
-        {
-            return Err(Error::new(
-                ErrorCode::OutputStateUnknown,
-                "Private placement requires fresh provider verification and a private-designated slot",
-                window,
-            ));
-        }
-        if reference.output_protection == OutputProtection::FreezeWhileLinkedOrUnknown
-            && output != OutputState::VerifiedPrivate
-            && (desired.frame != observed.frame
-                || !observed.visible
-                || request.focus.as_ref() == Some(window))
-        {
-            return Err(Error::new(
-                ErrorCode::OutputStateUnknown,
-                "Output is linked or unknown; dependent mutation is blocked",
-                window,
-            ));
-        }
         if protection.keep_monitor && observed.display != resolved_slots[&desired.slot].display {
             return Err(conflict(window, "Keep-monitor protection prevents transfer"));
         }
@@ -1173,15 +1142,6 @@ fn plan_pass(
             && observed.visible
             && observed.show_state != ShowState::Minimized
         {
-            if reference.output_protection != OutputProtection::None
-                && runtime.providers.output(window, snapshot.now_ms) != OutputState::VerifiedPrivate
-            {
-                return Err(Error::new(
-                    ErrorCode::OutputStateUnknown,
-                    "Output protection prevents hiding while linked or unknown",
-                    window,
-                ));
-            }
             if reference.allow_hide && observed.can_hide && !observed.has_owned_dialog {
                 result.expected.insert(window.clone(), observed.clone());
                 result.impact.hidden += 1;
@@ -1313,17 +1273,6 @@ impl Plan {
             }
         }
         for mutation in &self.mutations {
-            if let Some(reference) = config.windows.get(&mutation.window)
-                && reference.output_protection != OutputProtection::None
-                && runtime.providers.output(&mutation.window, snapshot.now_ms)
-                    != OutputState::VerifiedPrivate
-            {
-                return Err(Error::new(
-                    ErrorCode::OutputStateUnknown,
-                    "Output evidence expired or disconnected after preview",
-                    &mutation.window,
-                ));
-            }
             if runtime
                 .claims
                 .get(&mutation.window)
