@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Status', 'SyncSource', 'Setup', 'Test', 'WorkspaceTest', 'Stop')]
+    [ValidateSet('Status', 'SyncSource', 'Setup', 'Test', 'WorkspaceTest', 'Stop', 'Shutdown', 'ShutdownAndCleanup')]
     [string] $Action = 'Status'
 )
 $ErrorActionPreference = 'Stop'

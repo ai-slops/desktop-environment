@@ -9,7 +9,7 @@ modest resource limits or a separate test machine. Do not enable virtualization
 features, reboot the host, attach its production audio devices, or change its OBS
 configuration as part of this test.
 
-For host setup on this Windows PC or a Linux host, see
+For host setup on a Windows or Linux host, see
 [the VM setup guide](desktop-test-vm-hosts.md). Development defaults are 32 GiB RAM
 and 12 vCPUs. Both hosts run these acceptance checks inside a Windows guest.
 

@@ -1,7 +1,7 @@
 # Windows guest tests on Windows and Linux hosts
 
 The development defaults are **32 GiB RAM, 12 vCPUs, a sparse 96 GiB disk**, and a
-40% per-vCPU execution limit while broadcasting. Allocation and execution limits
+40% per-vCPU execution limit to leave host resources available. Allocation and execution limits
 are separate: all 12 vCPUs are visible to Windows. Raise the limit to 100 explicitly
 when full CPU use is appropriate. VM isolation protects host devices; CPU, RAM,
 storage and network bandwidth remain shared resources. VM start checks available
@@ -10,13 +10,13 @@ RAM against the configured guest allocation plus a 4 GiB host reserve.
 The application remains Windows-only. Linux support here means running the same
 Windows guest acceptance tests from a Linux virtualization host.
 
-## Windows host: existing Hyper-V
+## Windows host: Hyper-V prerequisites
 
-This PC already has a running Hyper-V service, VM PowerShell commands and
-`vmconnect.exe`. Use those rather than installing another hypervisor during a
-stream. `mise` was installed in the current user's scope via `winget install
---id jdx.mise --exact --source winget --scope user`. Open a new terminal for its
-updated PATH, or use `%LOCALAPPDATA%/Microsoft/WinGet/Links/mise.exe` directly.
+Use a Windows host with Hyper-V enabled, its VM PowerShell commands and
+`vmconnect.exe` available. Check prerequisites on each host; the scripts do not
+assume the development PC's installation. If mise is missing, install it in the
+current user's scope with `winget install --id jdx.mise --exact --source winget
+--scope user`, then open a new terminal for the updated PATH.
 
 The script does not enable Windows features, reboot the host, add users to groups,
 create/switch host network bridges or install host audio drivers. It connects the
@@ -37,8 +37,10 @@ mise run vm-start
 mise run vm-console
 ```
 
-On this PC the ISO can be discovered automatically as
-`Downloads/Win11_25H2_English_x64.iso`. Setup creates a Generation 2 VM named
+Set `DESKTOP_TEST_VM_ISO` to the ISO on the current host. If unset, the Windows
+helper uses a single matching `Win11*_x64.iso` in the current user's Downloads.
+Multiple matches require an explicit selection; missing Downloads does not block
+planning, status or shutdown. Setup creates a Generation 2 VM named
 `DesktopEnvironment-AudioTest`, enables Secure Boot/vTPM, and leaves it **off**.
 VM state/disk files live in ignored `target/vm-hyperv`. An ownership marker ties
 subsequent actions to its exact VM ID. A different pre-existing VM is never reused.
@@ -136,7 +138,7 @@ record the guest's routed/captured signal because host audio passthrough is disa
 `tools/desktop-test-vm-session.ps1` keeps an elevated host worker and a guest
 PowerShell Direct session alive for up to eight hours. It verifies the exact VM
 ID from the ownership marker. It accepts only `Status`, `SyncSource`, `Setup`,
-`Test`, `WorkspaceTest` and `Stop`; requests cannot specify host commands, paths,
+`Test`, `WorkspaceTest`, `Stop`, `Shutdown` and `ShutdownAndCleanup`; requests cannot specify host commands, paths,
 another VM or guest code. The host remains available for broadcasting.
 
 Provide `-CredentialPath` pointing to a `PSCredential` exported using
@@ -144,6 +146,19 @@ Provide `-CredentialPath` pointing to a `PSCredential` exported using
 keep this file in ignored `target/vm-session`, never in source control. Start the
 worker once with UAC elevation. It does not install a service or change logon/group
 permissions. A named mutex refuses a second worker for the same VM.
+
+From the checkout in an Administrator PowerShell, prepare credentials for that
+host's own guest account and start the worker:
+
+```powershell
+New-Item -ItemType Directory -Path target/vm-session -Force | Out-Null
+Get-Credential | Export-Clixml -LiteralPath target/vm-session/credential.xml
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/desktop-test-vm-session.ps1 -CredentialPath (Resolve-Path target/vm-session/credential.xml).Path
+```
+
+The worker stays in that terminal until stopped. Submit requests from a separate
+normal terminal in the same checkout. Recreate the credential file on each host;
+DPAPI files from another host/account cannot be reused.
 
 Requests are UUID-named JSON files under `target/vm-session/requests`, containing
 only `{"action":"Status"}` or another permitted action. Publish complete files
@@ -154,11 +169,14 @@ heartbeat. Submit `SyncSource` before setup/tests: the fixed
 extracted into a new hash-named guest directory, preserving prior guest checkouts.
 `Stop` closes the worker/session while leaving the VM running. Guest test
 operations run serially and a stop request takes effect after the current operation.
-No credentials are included in request or response logs.
+`Shutdown` gracefully stops the owned VM and closes the worker.
+`ShutdownAndCleanup` first removes generated guest source snapshots, source ZIPs,
+recordings and interactive test logs. Both operations work through the already
+elevated worker, without a second UAC prompt. Cleanup failures are reported even
+if VM shutdown succeeds. No credentials are included in request or response logs.
 Native program stderr is converted to log text and failure is determined by its
 exit code. This avoids treating Cargo progress/mise update notices as remoting
-failures. The corrected forwarding was checked with actual Windows PowerShell
-subprocesses: stderr with exit 0 succeeds, while stderr with exit 7 fails.
+failures.
 
 PowerShell Direct uses session 0, which lacks an interactive monitor inventory.
 The guest test runner detects this and creates a temporary Task Scheduler action
@@ -170,12 +188,37 @@ windows belong to the guest. `vm-test` now includes the full workspace tests;
 
 From a normal host terminal, queue operations with `mise run vm-session-status`,
 `vm-sync-source`, `vm-guest-setup`, `vm-guest-test`, `vm-guest-test-all` or
-`vm-session-stop`. These Windows-only worker tasks return a request ID and result/
+`vm-session-stop`, `vm-session-shutdown` or `vm-session-cleanup`. These Windows-only worker tasks return a request ID and result/
 log paths immediately. `vm-test` remains the direct **inside-guest** runner; the
 worker tasks are the host-side alternative. Creating the ZIP still uses
 `git archive --format=zip --output=target/desktop-control-vm-source.zip HEAD`.
 Disable mise's host task auto-install if only managing VMs:
 `$env:MISE_TASK_RUN_AUTO_INSTALL = 'false'`.
+
+## Files shared between environments
+
+Track the scripts under `tools/`, mise tasks, and setup/test procedures. Every
+host generates its own VM identity and guest account credentials. Do not copy
+`target/` into a new checkout: disks, ownership markers, libvirt XML, source ZIPs,
+worker requests, logs and DPAPI credential files belong to their original host.
+Keep the ownership marker alongside an existing local disk; deleting only the
+marker prevents safe reuse of that VM. Installer caches and recorded test results
+are local artifacts, not source files.
+
+For standalone Hyper-V shutdown from an Administrator PowerShell, use
+`tools/stop-desktop-test-vm.ps1`. Add `-CleanupGuest -CredentialPath <local-clixml>`
+to clean the current guest account's generated artifacts first. If using a worker,
+prefer `mise run vm-session-cleanup` so the worker closes as well.
+Inside any supported Windows guest, including one hosted by Linux, the same
+`tools/cleanup-desktop-test-guest.ps1` performs cleanup; then request shutdown with
+`mise run vm-stop` on the host. Cleanup preserves the VM disk, installed tools,
+drivers, build caches, user settings and manually named source checkouts. An
+already stopped VM is never started merely to clean its files.
+
+Basic checks do not require a VM: run
+`powershell -NoProfile -ExecutionPolicy Bypass -File tools/test-desktop-test-vm-cleanup.ps1`
+on Windows, and `python -B -m unittest discover -s tools -p test_desktop_test_vm_linux.py`
+on either host. These use temporary fixtures and pure configuration checks.
 
 References: [Hyper-V Windows 11 generation/TPM setup](https://techcommunity.microsoft.com/blog/itopstalkblog/how-to-run-a-windows-11-vm-on-hyper-v/3713948),
 [Hyper-V CPU limits](https://learn.microsoft.com/en-us/powershell/module/hyper-v/set-vmprocessor),

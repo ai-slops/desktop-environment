@@ -13,7 +13,7 @@ $responses = Join-Path $workerRoot 'responses'
 New-Item -ItemType Directory -Path $requests, $responses -Force | Out-Null
 $owner = Get-Content -LiteralPath (Join-Path $workspace 'target/vm-hyperv/owner.json') -Raw | ConvertFrom-Json
 $vm = Get-VM -Id ([guid]$owner.id)
-if ($vm.Name -ne 'DesktopEnvironment-AudioTest') { throw 'VM ownership mismatch.' }
+if ($owner.name -ne 'DesktopEnvironment-AudioTest' -or $vm.Name -ne $owner.name) { throw 'VM ownership mismatch.' }
 $credential = Import-Clixml -LiteralPath $CredentialPath
 if ($credential -isnot [PSCredential]) { throw 'Expected a Windows DPAPI-protected credential file.' }
 $mutex = [Threading.Mutex]::new($false, ('Local\DesktopEnvironmentVmWorker-' + $vm.Id))
@@ -35,11 +35,17 @@ try {
                 $request = Get-Content -LiteralPath $requestFile.FullName -Raw | ConvertFrom-Json
                 # A closed action set: requests cannot supply host commands, paths,
                 # guest code, credentials or a different VM identity.
-                if ($request.action -notin @('Status', 'SyncSource', 'Setup', 'Test', 'WorkspaceTest', 'Stop')) { throw 'Unknown VM worker action.' }
+                if ($request.action -notin @('Status', 'SyncSource', 'Setup', 'Test', 'WorkspaceTest', 'Stop', 'Shutdown', 'ShutdownAndCleanup')) { throw 'Unknown VM worker action.' }
                 $result.action = $request.action
                 $currentVm = Get-VM -Id $vm.Id
                 if ($currentVm.Name -ne $owner.name) { throw 'Owned VM identity changed.' }
                 if ($request.action -eq 'Stop') { $stopping = $true }
+                elseif ($request.action -in @('Shutdown', 'ShutdownAndCleanup')) {
+                    try {
+                        & (Join-Path $PSScriptRoot 'stop-desktop-test-vm.ps1') -CredentialPath $CredentialPath -CleanupGuest:($request.action -eq 'ShutdownAndCleanup') *>&1 | Out-File -LiteralPath $logPath -Encoding utf8
+                        $result.state = (Get-VM -Id $vm.Id).State.ToString()
+                    } finally { $stopping = $true }
+                }
                 elseif ($request.action -eq 'Status') {
                     $result.state = $currentVm.State.ToString()
                     $result.guestSource = [string]$guestSource

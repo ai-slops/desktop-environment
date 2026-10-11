@@ -12,10 +12,13 @@ $workspace = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $vmRoot = Join-Path $workspace 'target/vm-hyperv'
 $markerPath = Join-Path $vmRoot 'owner.json'
 $diskPath = Join-Path $vmRoot 'windows.vhdx'
-if (-not $IsoPath) {
-    $iso = Get-ChildItem (Join-Path $env:USERPROFILE 'Downloads') -Filter 'Win11*_x64.iso' -File |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    if ($iso) { $IsoPath = $iso.FullName }
+if (-not $IsoPath -and $Action -in @('Plan', 'Setup')) {
+    $downloads = Join-Path $env:USERPROFILE 'Downloads'
+    if (Test-Path -LiteralPath $downloads -PathType Container) {
+        $isos = @(Get-ChildItem -LiteralPath $downloads -Filter 'Win11*_x64.iso' -File)
+        if ($isos.Count -eq 1) { $IsoPath = $isos[0].FullName }
+        elseif ($isos.Count -gt 1 -and $Action -eq 'Setup') { throw 'Multiple Windows ISOs found. Set DESKTOP_TEST_VM_ISO or pass -IsoPath explicitly.' }
+    }
 }
 if ($Action -eq 'Plan') {
     [ordered]@{

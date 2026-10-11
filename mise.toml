@@ -119,3 +119,11 @@ run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request
 [tasks.vm-session-stop]
 description = "Close the scoped Hyper-V worker after its current operation, leaving the guest running"
 run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action Stop"
+
+[tasks.vm-session-shutdown]
+description = "Gracefully shut down the owned Hyper-V guest and close the scoped worker"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action Shutdown"
+
+[tasks.vm-session-cleanup]
+description = "Remove guest test artifacts, gracefully shut down the VM and close the scoped worker"
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File tools/request-desktop-test-vm-session.ps1 -Action ShutdownAndCleanup"
