@@ -3,6 +3,13 @@
 //! use the same backend without passing through any vendor-specific code.
 use audio_cable_core::{Cable, Endpoint, EndpointFlow};
 
+pub(super) fn setup_links() -> Vec<audio_cable_core::SetupLink> {
+    vec![audio_cable_core::SetupLink {
+        label: "VB-CABLE 공식 설치 안내".into(),
+        url: "https://vb-audio.com/Cable/index.htm".into(),
+    }]
+}
+
 pub(super) fn discover(endpoints: &[Endpoint]) -> Vec<Cable> {
     endpoints
         .iter()

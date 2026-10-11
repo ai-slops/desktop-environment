@@ -180,7 +180,9 @@ impl CablePanel {
                     });
                     if self.cables.is_empty() && self.pending.is_none() {
                         ui.label("자동으로 찾은 케이블이 없습니다. 설치된 장치를 아래에서 직접 지정할 수도 있습니다.");
-                        ui.hyperlink_to("VB-CABLE 공식 설치 안내", "https://vb-audio.com/Cable/index.htm");
+                        if let Some(backend) = &self.backend {
+                            for link in backend.setup_links() { ui.hyperlink_to(link.label, link.url); }
+                        }
                     }
                     egui::CollapsingHeader::new("다른 드라이버 / 케이블 장치 직접 지정").show(ui, |ui| {
                         ui.label("가상 드라이버가 만든 재생·녹음 장치 쌍을 지정하세요.");

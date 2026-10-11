@@ -33,6 +33,11 @@ pub struct Cable {
     pub capture_id: String,
 }
 
+pub struct SetupLink {
+    pub label: String,
+    pub url: String,
+}
+
 impl Cable {
     pub fn validate(&self, endpoints: &[Endpoint]) -> Result<()> {
         for (id, flow) in
@@ -53,6 +58,9 @@ impl Cable {
 pub trait AudioBackend: Send + Sync {
     fn endpoints(&self) -> Result<Vec<Endpoint>>;
     fn installed_cables(&self, endpoints: &[Endpoint]) -> Vec<Cable>;
+    fn setup_links(&self) -> Vec<SetupLink> {
+        Vec::new()
+    }
     fn monitor(&self, cable: &Cable, output_id: &str, control: Arc<RouteControl>) -> Result<()>;
 }
 

@@ -79,6 +79,9 @@ impl AudioBackend for WindowsAudioBackend {
     fn installed_cables(&self, endpoints: &[Endpoint]) -> Vec<Cable> {
         installed_cables::discover(endpoints)
     }
+    fn setup_links(&self) -> Vec<audio_cable_core::SetupLink> {
+        installed_cables::setup_links()
+    }
     fn monitor(&self, cable: &Cable, output_id: &str, control: Arc<RouteControl>) -> Result<()> {
         cable.validate(&self.endpoints()?)?;
         run_controlled_audio_router(&cable.playback_id, output_id, &control)
