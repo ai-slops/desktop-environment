@@ -45,3 +45,35 @@ listening endpoint, checks −20/−40/−60/−96/−30 dB updates on one runni
 mute and recovery, and verifies that listening attenuation leaves recording
 levels intact. The VM runner also captures the native GUI and runs workspace
 tests. Host audio is never used for these checks.
+
+Very low output levels depend on the destination's conversion precision. The VM
+Voicemeeter endpoint was observed to truncate samples to `2^-18` steps: at −96 dB
+the recorded waveform contains zero and one negative step. Consequently total
+RMS includes a DC component and differs from the requested gain. The acceptance
+probe checks the known tone in 100 ms windows and total RMS separately, allowing
+this measured quantization limit only at −96 dB. These fixture checks do not
+certify all-channel fidelity, bit-perfect reproduction or dropout-free playback.
+
+### Verified Windows VM run (2026-10-11)
+
+Commit `44480bc`, worker receipt `2e73c0d9-8178-41dd-bd28-09c38fe074d8`:
+
+| Requested gain | Recorded known-tone gain |
+| --- | --- |
+| −20 dB | −20.0000 dB |
+| −40 dB | −39.9996 dB |
+| −60 dB | −59.9950 dB |
+| −96 dB | −95.8174 dB |
+| −30 dB | −30.0001 dB |
+
+Live gain/mute/unmute, unchanged cable recording, owned route shutdown, default
+output switching and GUI router lifecycle all passed. Native Audio Cable and
+Desktop Control viewports rendered and exited successfully. Full workspace:
+151 passed, 0 failed, 8 intentionally ignored across 21 suites; the three opt-in
+live acceptance tests passed separately. New core/app Clippy checks and the
+release build passed. The Hyper-V VM retained 32 GiB RAM and 12 virtual CPUs.
+
+Enhanced-session screenshots expose Remote Audio rather than the virtual cable
+inventory. Actual cable signal checks run in session 0 using guest-only fixtures;
+the rendered GUI and provider-independent control test cover the separate UI
+path. Screenshot: `target/vm-audio-cable-gui-evidence/08036a15-2c30-4329-9b7b-64131064c6d3/panel.png`.
