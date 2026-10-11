@@ -587,7 +587,8 @@ impl From<DisplaySlotDocument> for DisplaySlot {
     fn from(document: DisplaySlotDocument) -> Self {
         // Older releases automatically created full-monitor control slots with this name.
         // Keep their identities so saved layouts and shortcuts still address the same region.
-        #[allow(clippy::float_cmp)] // Match the exact serialized defaults of the retired slot generator.
+        #[allow(clippy::float_cmp)]
+        // Match the exact serialized defaults of the retired slot generator.
         let name = if document.name == "비공개 제어"
             && document.region == [0.0, 0.0, 1.0, 1.0]
             && document.fallback_displays.is_empty()

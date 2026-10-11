@@ -23,11 +23,11 @@ use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
     CoUninitialize, STGM_READ,
 };
-use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::System::Threading::{
     AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
     AvSetMmThreadPriority,
 };
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::core::{PWSTR, w};
 
 mod default_endpoint;
@@ -339,8 +339,7 @@ struct AudioRenderStream {
 impl AudioRenderStream {
     fn prime(&self) -> Result<()> {
         // Actual queued frames, not merely a larger empty capacity, absorb scheduler jitter.
-        let frames = (self.format.sample_rate() / 1000 * ROUTE_PREROLL_MS)
-            .min(self.buffer_frames);
+        let frames = (self.format.sample_rate() / 1000 * ROUTE_PREROLL_MS).min(self.buffer_frames);
         if frames != 0 {
             unsafe {
                 self.render.GetBuffer(frames)?;

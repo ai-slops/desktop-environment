@@ -357,7 +357,9 @@ impl CpuLoad {
                 let mut value = 1_u64;
                 while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                     for _ in 0..4096 {
-                        value = std::hint::black_box(value.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
+                        value = std::hint::black_box(
+                            value.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1),
+                        );
                     }
                 }
             }));
@@ -381,7 +383,8 @@ fn cpu_times() -> Result<(u64, u64)> {
     let mut kernel = FILETIME::default();
     let mut user = FILETIME::default();
     unsafe { GetSystemTimes(Some(&raw mut idle), Some(&raw mut kernel), Some(&raw mut user)) }?;
-    let ticks = |time: FILETIME| u64::from(time.dwLowDateTime) | (u64::from(time.dwHighDateTime) << 32);
+    let ticks =
+        |time: FILETIME| u64::from(time.dwLowDateTime) | (u64::from(time.dwHighDateTime) << 32);
     Ok((ticks(idle), ticks(kernel) + ticks(user)))
 }
 
@@ -413,7 +416,9 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
     let output = target.clone();
     let route = ControlledRoute {
         control: control.clone(),
-        thread: Some(thread::spawn(move || WindowsAudioBackend.monitor(&selected, &output, monitor))),
+        thread: Some(thread::spawn(move || {
+            WindowsAudioBackend.monitor(&selected, &output, monitor)
+        })),
     };
     thread::sleep(Duration::from_secs(2));
     let (baseline, rate) = capture(&target, 3)?;
@@ -443,8 +448,11 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
     let output_gap = longest_silence_ms(samples, rate);
     let input_gap = longest_silence_ms(raw, input_rate);
     let amplitude = windowed_amplitude(samples, rate, 440.0);
-    println!("CABLE_CPU_LOAD cpu_percent={busy:.2} input_gap_ms={input_gap:.3} output_gap_ms={output_gap:.3} unloaded_amplitude={baseline_amplitude:.6} loaded_amplitude={amplitude:.6}");
-    let root = std::path::PathBuf::from(std::env::var("DESKTOP_AUDIO_PROBE_OUTPUT")?).join("cpu-load");
+    println!(
+        "CABLE_CPU_LOAD cpu_percent={busy:.2} input_gap_ms={input_gap:.3} output_gap_ms={output_gap:.3} unloaded_amplitude={baseline_amplitude:.6} loaded_amplitude={amplitude:.6}"
+    );
+    let root =
+        std::path::PathBuf::from(std::env::var("DESKTOP_AUDIO_PROBE_OUTPUT")?).join("cpu-load");
     std::fs::create_dir_all(&root)?;
     save_wave(&root.join("input.wav"), raw, input_rate)?;
     save_wave(&root.join("output.wav"), samples, rate)?;
@@ -452,7 +460,9 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
         bail!("CPU saturation not achieved: {busy:.2}%");
     }
     if input_gap > 5.0 || windowed_amplitude(raw, input_rate, 440.0) < 0.1 {
-        bail!("Upstream cable/fixture signal also interrupted under load; cannot attribute to router");
+        bail!(
+            "Upstream cable/fixture signal also interrupted under load; cannot attribute to router"
+        );
     }
     if output_gap > longest_silence_ms(baseline, rate).max(5.0)
         || !amplitude.is_finite()

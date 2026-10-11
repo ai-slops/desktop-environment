@@ -1807,10 +1807,9 @@ fn legacy_control_slot_names_migrate_without_changing_layout_targets()
         let reloaded: Configuration = serde_json::from_str(&serde_json::to_string(&migrated)?)?;
         assert_eq!(reloaded.slots["work"].name, "작업 영역");
     }
-    for (name, region) in [
-        ("사용자 영역", [0.0, 0.0, 1.0, 1.0]),
-        ("비공개 제어", [0.0, 0.0, 0.5, 1.0]),
-    ] {
+    for (name, region) in
+        [("사용자 영역", [0.0, 0.0, 1.0, 1.0]), ("비공개 제어", [0.0, 0.0, 0.5, 1.0])]
+    {
         let mut document = serde_json::to_value(&config)?;
         document["slots"]["work"]["name"] = serde_json::json!(name);
         document["slots"]["work"]["region"] = serde_json::json!(region);
