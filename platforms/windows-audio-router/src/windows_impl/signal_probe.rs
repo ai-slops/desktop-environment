@@ -343,7 +343,6 @@ fn live_cable_gain_acceptance() -> Result<()> {
     Ok(())
 }
 
-// Short windows avoid phase cancellation across virtual-clock discontinuities.
 struct CpuLoad {
     stop: Arc<AtomicBool>,
     threads: Vec<thread::JoinHandle<()>>,
@@ -351,11 +350,12 @@ struct CpuLoad {
 impl CpuLoad {
     fn start() -> Result<Self> {
         let mut load = Self { stop: Arc::new(AtomicBool::new(false)), threads: Vec::new() };
+        let deadline = Instant::now() + Duration::from_secs(30);
         for _ in 0..thread::available_parallelism()?.get() {
             let stop = load.stop.clone();
             load.threads.push(thread::spawn(move || {
                 let mut value = 1_u64;
-                while !stop.load(Ordering::Relaxed) {
+                while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
                     for _ in 0..4096 {
                         value = std::hint::black_box(value.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1));
                     }
@@ -425,11 +425,12 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
     let load = CpuLoad::start()?;
     thread::sleep(Duration::from_secs(2));
     let before = cpu_times()?;
-    // Record the VB-CABLE input alongside the routed output to distinguish upstream glitches.
-    let input_id = cable.capture_id.clone();
+    // Observe the same playback-loopback source the router consumes. The cable's recording
+    // endpoint has a separate driver buffer and is not the input to our monitor route.
+    let input_id = cable.playback_id.clone();
     let input = thread::spawn(move || -> Result<_> {
         let _com = ComGuard::new()?;
-        capture_recording(&input_id, 8)
+        capture(&input_id, 8)
     });
     let output_result = capture(&target, 8);
     let input_result = input.join().map_err(|_| anyhow::anyhow!("Input capture panicked"))?;
