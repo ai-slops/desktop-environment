@@ -234,6 +234,7 @@ fn live_cable_gain_acceptance() -> Result<()> {
         (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
     };
     let baseline = rms(&raw[rate as usize / 4..]);
+    let baseline_tone = amplitude(&raw[rate as usize / 4..], rate, 440.0);
     if baseline < 0.05 || raw.iter().any(|s| !s.is_finite()) {
         bail!("Virtual cable playback -> recording did not carry the fixture tone");
     }
@@ -272,9 +273,14 @@ fn live_cable_gain_acceptance() -> Result<()> {
             bail!("Nonfinite monitor samples");
         }
         let measured = rms(&samples[rate as usize / 4..]);
-        let measured_db = 20.0 * (measured / baseline).log10();
-        let report =
-            format!("{{\"gain_db\":{db},\"measured_db\":{measured_db},\"rms\":{measured}}}");
+        let rms_db = 20.0 * (measured / baseline).log10();
+        // Attribute the known signal separately from endpoint noise. At -96 dB
+        // total RMS can include the virtual driver's conversion noise floor.
+        let measured_db = 20.0
+            * (amplitude(&samples[rate as usize / 4..], rate, 440.0) / baseline_tone).log10();
+        let report = format!(
+            "{{\"gain_db\":{db},\"measured_db\":{measured_db},\"rms_db\":{rms_db},\"rms\":{measured}}}"
+        );
         println!("CABLE_GAIN_METRIC {report}");
         std::fs::write(root.join(format!("gain-{}.json", -db)), report)?;
         save_wave(&root.join(format!("gain-{}.wav", -db)), &samples, rate)?;
