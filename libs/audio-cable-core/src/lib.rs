@@ -72,10 +72,39 @@ pub struct Settings {
     pub output_id: String,
     pub gain_db: f32,
     pub muted: bool,
+    pub presets: Vec<Preset>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Preset {
+    pub name: String,
+    pub cable: Option<Cable>,
+    pub output_id: String,
+    pub gain_db: f32,
+    pub muted: bool,
+}
+impl Preset {
+    #[must_use]
+    pub fn settings(&self) -> Settings {
+        Settings {
+            cable: self.cable.clone(),
+            output_id: self.output_id.clone(),
+            gain_db: self.gain_db,
+            muted: self.muted,
+            ..Settings::default()
+        }
+    }
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { version: 1, cable: None, output_id: String::new(), gain_db: -30.0, muted: false }
+        Self {
+            version: 1,
+            cable: None,
+            output_id: String::new(),
+            gain_db: -30.0,
+            muted: false,
+            presets: Vec::new(),
+        }
     }
 }
 impl Settings {
@@ -83,7 +112,27 @@ impl Settings {
         if self.version != 1 {
             bail!("지원하지 않는 설정 버전입니다: {}", self.version);
         }
+        for preset in &self.presets {
+            if preset.name.trim().is_empty() {
+                bail!("프리셋 이름을 입력하세요.");
+            }
+            validate_gain(preset.gain_db)?;
+        }
         validate_gain(self.gain_db)
+    }
+    #[must_use]
+    pub fn volume_percent(&self) -> f32 {
+        if self.muted { 0.0 } else { linear_gain(self.gain_db) * 100.0 }
+    }
+    pub fn set_volume_percent(&mut self, percent: f32) -> Result<()> {
+        if !percent.is_finite() || !(0.0..=100.0).contains(&percent) {
+            bail!("볼륨은 0~100%로 설정하세요.");
+        }
+        self.muted = percent == 0.0;
+        if percent > 0.0 {
+            self.gain_db = (20.0 * (percent / 100.0).log10()).max(MIN_GAIN_DB);
+        }
+        Ok(())
     }
     pub fn validate_route(&self, endpoints: &[Endpoint]) -> Result<()> {
         self.validate()?;
@@ -293,6 +342,21 @@ mod tests {
             assert!(RouteControl::new(db, false).is_err());
         }
         assert!(Settings { version: 2, ..Settings::default() }.validate().is_err());
+    }
+    #[test]
+    fn percent_volume_round_trips_and_legacy_settings_load_without_presets() {
+        let mut settings = Settings::default();
+        for percent in [100.0, 10.0, 1.0, 0.01, 0.0] {
+            settings.set_volume_percent(percent).unwrap();
+            assert!((settings.volume_percent() - percent).abs() < 0.0001);
+        }
+        for invalid in [-1.0, 101.0, f32::NAN] {
+            assert!(settings.set_volume_percent(invalid).is_err());
+        }
+        let old: Settings =
+            serde_json::from_str(r#"{"version":1,"gain_db":-30,"muted":false}"#).unwrap();
+        assert!(old.presets.is_empty());
+        assert!((old.volume_percent() - 3.162_277_7).abs() < 0.0001);
     }
     #[test]
     fn settings_keep_provider_neutral_device_pairs_and_never_autostart() {

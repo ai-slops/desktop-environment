@@ -1,5 +1,5 @@
 use audio_cable_core::{
-    AudioBackend, Cable, Endpoint, EndpointFlow, RouteControl, RouteState, Settings, linear_gain,
+    AudioBackend, Cable, Endpoint, EndpointFlow, Preset, RouteControl, RouteState, Settings,
 };
 use eframe::egui::{self, Color32};
 use std::path::PathBuf;
@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 struct Worker {
     control: Arc<RouteControl>,
     thread: Option<JoinHandle<Result<(), String>>>,
+    cable: Cable,
+    output_id: String,
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -36,6 +38,7 @@ pub struct CablePanel {
     notice: String,
     manual_playback: String,
     manual_capture: String,
+    preset_name: String,
     #[cfg(feature = "ui-smoke")]
     screenshot: Option<(PathBuf, Instant, bool)>,
 }
@@ -58,6 +61,7 @@ impl CablePanel {
             notice: "시작 버튼을 누르기 전에는 소리를 재생하지 않습니다.".into(),
             manual_playback: String::new(),
             manual_capture: String::new(),
+            preset_name: String::new(),
             #[cfg(feature = "ui-smoke")]
             screenshot: std::env::var_os("AUDIO_CABLE_SCREENSHOT")
                 .map(|path| (PathBuf::from(path), Instant::now(), false)),
@@ -145,32 +149,112 @@ impl CablePanel {
         let cable =
             self.settings.cable.clone().ok_or_else(|| anyhow::anyhow!("케이블을 선택하세요."))?;
         let output = self.settings.output_id.clone();
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|w| w.cable == cable && w.output_id == output && !w.control.is_stopped())
+        {
+            self.apply_volume();
+            return Ok(());
+        }
+        // Validate the destination before stopping the current route. Join its
+        // owned worker before starting another, so outputs never overlap.
+        drop(self.worker.take());
         let control = Arc::new(RouteControl::new(self.settings.gain_db, self.settings.muted)?);
         let route = control.clone();
+        let worker_cable = cable.clone();
+        let worker_output = output.clone();
         let thread = std::thread::spawn(move || {
             backend.monitor(&cable, &output, route).map_err(|e| format!("{e:#}"))
         });
-        self.worker = Some(Worker { control, thread: Some(thread) });
+        self.worker = Some(Worker {
+            control,
+            thread: Some(thread),
+            cable: worker_cable,
+            output_id: worker_output,
+        });
         self.error = None;
         self.notice = "지정한 볼륨으로 모니터링을 시작합니다.".into();
         Ok(())
     }
     fn apply_volume(&mut self) {
         if let Some(worker) = &self.worker {
+            if self.settings.cable.as_ref() != Some(&worker.cable)
+                || self.settings.output_id != worker.output_id
+            {
+                return;
+            }
             if let Err(error) = worker.control.set_gain(self.settings.gain_db) {
                 self.error = Some(error.to_string());
             }
             worker.control.set_mute(self.settings.muted);
         }
     }
+    fn use_preset(&mut self, index: usize) -> anyhow::Result<()> {
+        let preset = self
+            .settings
+            .presets
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("프리셋이 없습니다."))?
+            .clone();
+        preset.settings().validate_route(&self.endpoints)?;
+        self.settings.cable = preset.cable;
+        self.settings.output_id = preset.output_id;
+        self.settings.gain_db = preset.gain_db;
+        self.settings.muted = preset.muted;
+        self.preset_name = preset.name;
+        self.start()
+    }
+    fn save_preset(&mut self) -> anyhow::Result<()> {
+        let name = self.preset_name.trim().to_owned();
+        if name.is_empty() {
+            anyhow::bail!("프리셋 이름을 입력하세요.");
+        }
+        self.settings.validate_route(&self.endpoints)?;
+        let preset = Preset {
+            name: name.clone(),
+            cable: self.settings.cable.clone(),
+            output_id: self.settings.output_id.clone(),
+            gain_db: self.settings.gain_db,
+            muted: self.settings.muted,
+        };
+        let mut saved = self.settings.clone();
+        if let Some(existing) = saved.presets.iter_mut().find(|p| p.name == name) {
+            *existing = preset;
+        } else {
+            saved.presets.push(preset);
+        }
+        saved.save(&self.path)?;
+        self.settings = saved;
+        self.notice = "프리셋을 저장했습니다. 위 버튼을 누르면 바로 적용됩니다.".into();
+        Ok(())
+    }
     fn ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Audio Cable");
                 ui.label("가상 케이블의 소리를 원하는 볼륨으로 들으세요.");
+                ui.heading("프리셋 — 클릭하면 바로 듣기");
+                let mut activate = None;
+                let mut delete = None;
+                for (index, preset) in self.settings.presets.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let volume = preset.settings().volume_percent();
+                        let output = self.endpoints.iter().find(|e| e.id == preset.output_id).map_or("연결되지 않은 장치", |e| e.name.as_str());
+                        if ui.button(format!("{} · {volume:.4}%", preset.name)).on_hover_text(output).clicked() { activate = Some(index); }
+                        if ui.small_button("삭제").clicked() { delete = Some(index); }
+                    });
+                }
+                if self.settings.presets.is_empty() { ui.small("아래에서 장치와 볼륨을 정하고 이름을 붙여 저장하세요."); }
+                if let Some(index) = activate && let Err(error) = self.use_preset(index) { self.error = Some(error.to_string()); }
+                if let Some(index) = delete {
+                    let mut saved = self.settings.clone();
+                    saved.presets.remove(index);
+                    match saved.save(&self.path) { Ok(()) => self.settings = saved, Err(error) => self.error = Some(error.to_string()) }
+                }
                 ui.separator();
                 ui.heading("가상 오디오 케이블");
-                ui.add_enabled_ui(self.worker.is_none(), |ui| {
+                ui.add_enabled_ui(self.backend.is_some(), |ui| {
                     let selected = self.settings.cable.as_ref().map_or("케이블을 선택하세요", |c| c.name.as_str());
                     egui::ComboBox::from_id_salt("cable").width(ui.available_width()).selected_text(selected).show_ui(ui, |ui| {
                         for cable in &self.cables {
@@ -201,24 +285,24 @@ impl CablePanel {
                     ui.small(format!("OBS / 통화 앱에서 받을 장치: {capture}"));
                 }
                 ui.separator();
-                ui.heading("볼륨 더 줄이기");
-                let mut reduction = -self.settings.gain_db;
-                let changed = ui.add(egui::Slider::new(&mut reduction, 0.0..=96.0).text("추가 감쇠 (dB)").step_by(1.0)).changed();
-                self.settings.gain_db = -reduction;
-                let muted = ui.checkbox(&mut self.settings.muted, "무음").changed();
-                if changed || muted { self.apply_volume(); }
-                ui.label(format!("장치 볼륨에 추가로 적용: {:.0} dB · 진폭 {:.4}%", self.settings.gain_db, linear_gain(self.settings.gain_db) * 100.0));
-                ui.small("재생 중에도 바로 적용됩니다. Windows와 장치의 볼륨 값은 바꾸지 않습니다.");
+                ui.heading("들을 볼륨");
+                let mut percent = self.settings.volume_percent();
+                if ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).suffix("%").max_decimals(4)).changed() {
+                    match self.settings.set_volume_percent(percent) { Ok(()) => self.apply_volume(), Err(e) => self.error = Some(e.to_string()) }
+                }
+                ui.small("100% = 원래 볼륨 · 10% = 진폭 1/10 · 0% = 무음. 숫자를 직접 입력할 수 있습니다.");
+                ui.small("현재 듣는 장치의 볼륨은 바로 반영됩니다. Windows 장치 볼륨은 바꾸지 않습니다.");
                 ui.horizontal(|ui| {
-                    if self.worker.is_none() {
-                        if ui.add_enabled(self.backend.is_some() && self.pending.is_none(), egui::Button::new("이 볼륨으로 듣기 시작")).clicked()
+                    ui.label("프리셋 이름");
+                    ui.add(egui::TextEdit::singleline(&mut self.preset_name).desired_width(180.0));
+                    if ui.button("프리셋 저장").clicked() && let Err(e) = self.save_preset() { self.error = Some(e.to_string()); }
+                });
+                ui.horizontal(|ui| {
+                        if ui.add_enabled(self.backend.is_some() && self.pending.is_none(), egui::Button::new("지금 적용하고 듣기")).clicked()
                             && let Err(error) = self.start() { self.error = Some(error.to_string());
                         }
-                    } else if ui.button("듣기 중지").clicked()
+                    if self.worker.is_some() && ui.button("듣기 중지").clicked()
                         && let Some(worker) = &self.worker { worker.control.stop();
-                    }
-                    if ui.button("설정 저장").clicked() {
-                        match self.settings.save(&self.path) { Ok(()) => self.notice = "설정을 저장했습니다. 다음 실행 때도 자동 시작하지 않습니다.".into(), Err(e) => self.error = Some(e.to_string()) }
                     }
                 });
                 let status = self.worker.as_ref().map_or("중지됨", |w| match w.control.state() { RouteState::Starting => "시작 중", RouteState::Running => "모니터링 중", RouteState::Recovering => "장치 재연결 대기", RouteState::Stopped => "중지 중" });
@@ -328,6 +412,12 @@ mod tests {
                     flow: EndpointFlow::Playback,
                     is_default: true,
                 },
+                Endpoint {
+                    id: "headphones".into(),
+                    name: "Headphones".into(),
+                    flow: EndpointFlow::Playback,
+                    is_default: false,
+                },
             ])
         }
         fn installed_cables(&self, _: &[Endpoint]) -> Vec<Cable> {
@@ -374,5 +464,45 @@ mod tests {
         let _ = context.run(egui::RawInput::default(), |ctx| panel.ui(ctx));
         drop(panel);
         assert!(control.is_stopped());
+    }
+    #[test]
+    fn saved_presets_start_and_switch_output_in_one_action_and_survive_reload() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings.json");
+        let mut panel = CablePanel::new(path.clone(), Some(Arc::new(FakeBackend)));
+        for _ in 0..100 {
+            panel.poll();
+            if panel.pending.is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panel.preset_name = "스피커".into();
+        panel.settings.set_volume_percent(10.0).unwrap();
+        panel.save_preset().unwrap();
+        panel.preset_name = "헤드폰".into();
+        panel.settings.output_id = "headphones".into();
+        panel.settings.set_volume_percent(1.0).unwrap();
+        panel.save_preset().unwrap();
+        assert!(panel.worker.is_none()); // Saving never starts audio.
+        panel.use_preset(0).unwrap();
+        let first = panel.worker.as_ref().unwrap().control.clone();
+        assert_eq!(panel.worker.as_ref().unwrap().output_id, "speaker");
+        assert!((first.target_gain() - 0.1).abs() < 1e-6);
+        panel.use_preset(1).unwrap();
+        assert!(first.is_stopped());
+        assert_eq!(panel.worker.as_ref().unwrap().output_id, "headphones");
+        let second = panel.worker.as_ref().unwrap().control.clone();
+        assert!((second.target_gain() - 0.01).abs() < 1e-6);
+        panel.use_preset(1).unwrap();
+        assert!(Arc::ptr_eq(&second, &panel.worker.as_ref().unwrap().control));
+        panel.endpoints.retain(|e| e.id != "speaker");
+        assert!(panel.use_preset(0).is_err());
+        assert!(!second.is_stopped()); // An unavailable preset leaves playback alone.
+        drop(panel);
+        let loaded = CablePanel::new(path, Some(Arc::new(FakeBackend)));
+        assert_eq!(loaded.settings.presets.len(), 2);
+        assert!(loaded.worker.is_none());
+        assert!((loaded.settings.presets[1].settings().volume_percent() - 1.0).abs() < 1e-6);
     }
 }
