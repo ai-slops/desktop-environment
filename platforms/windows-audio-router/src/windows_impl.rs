@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use audio_cable_core::{
     AudioBackend, Cable, Endpoint, EndpointFlow, GainRamp, RouteControl, RouteState,
 };
+use std::marker::PhantomData;
+use std::rc::Rc;
 use std::slice;
 use std::sync::{
     Arc,
@@ -11,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{HANDLE, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
     AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
@@ -20,8 +22,8 @@ use windows::Win32::Media::Audio::{
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{
-    CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
-    CoUninitialize, STGM_READ,
+    CLSCTX_ALL, COINIT, COINIT_APARTMENTTHREADED, COINIT_MULTITHREADED, CoCreateInstance,
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, STGM_READ,
 };
 use windows::Win32::System::Threading::{
     AVRT_PRIORITY_HIGH, AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW,
@@ -50,7 +52,7 @@ pub struct AudioOutputDevice {
 }
 
 pub fn list_output_devices() -> Result<Vec<AudioOutputDevice>> {
-    let _com = ComGuard::new()?;
+    let _com = ComGuard::for_enumeration()?;
     let enumerator = device_enumerator()?;
     let default_id = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
         .ok()
@@ -62,7 +64,7 @@ pub fn list_output_devices() -> Result<Vec<AudioOutputDevice>> {
 pub struct WindowsAudioBackend;
 impl AudioBackend for WindowsAudioBackend {
     fn endpoints(&self) -> Result<Vec<Endpoint>> {
-        let _com = ComGuard::new()?;
+        let _com = ComGuard::for_enumeration()?;
         let enumerator = device_enumerator()?;
         let mut endpoints = Vec::new();
         for (native_flow, flow) in
@@ -633,33 +635,133 @@ fn wide_null(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-struct ComGuard;
+// COM initialization and its matching teardown must stay on the same thread.
+struct ComGuard {
+    _thread: PhantomData<Rc<()>>,
+}
 
 impl ComGuard {
     fn new() -> Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
-        Ok(Self)
+        Ok(Self::initialize(COINIT_MULTITHREADED)?)
+    }
+
+    fn for_enumeration() -> Result<Self> {
+        // Winit initializes OLE/STA for GUI drag-and-drop. Device enumeration
+        // supports STA too; routing workers still require MTA through new().
+        match Self::initialize(COINIT_MULTITHREADED) {
+            Err(error) if error.code() == RPC_E_CHANGED_MODE => {
+                Ok(Self::initialize(COINIT_APARTMENTTHREADED)?)
+            }
+            result => Ok(result?),
+        }
+    }
+
+    fn initialize(mode: COINIT) -> windows::core::Result<Self> {
+        // SAFETY: both S_OK and S_FALSE acquire one initialization reference.
+        // A failed call creates no guard and is never followed by CoUninitialize.
+        unsafe { CoInitializeEx(None, mode) }.ok()?;
+        Ok(Self { _thread: PhantomData })
     }
 }
 
 impl Drop for ComGuard {
     fn drop(&mut self) {
+        // SAFETY: the guard cannot move to another thread and owns one reference.
         unsafe { CoUninitialize() };
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AudioOutputDevice, DefaultEndpointNotification, resolve_output_device};
+    use super::{
+        AudioOutputDevice, ComGuard, DefaultEndpointNotification, WindowsAudioBackend,
+        list_output_devices, resolve_output_device,
+    };
+    use anyhow::Result;
+    use audio_cable_core::AudioBackend;
     use std::sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     };
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
     use windows::Win32::Media::Audio::{
         DEVICE_STATE_ACTIVE, IMMNotificationClient, eCapture, eCommunications, eConsole,
         eMultimedia, eRender,
     };
+    use windows::Win32::System::Com::{
+        APTTYPE, APTTYPE_MAINSTA, APTTYPE_MTA, APTTYPE_STA, APTTYPEQUALIFIER,
+        COINIT_APARTMENTTHREADED, CoGetApartmentType,
+    };
     use windows::core::PCWSTR;
+
+    fn apartment_type() -> windows::core::Result<APTTYPE> {
+        let mut apartment = APTTYPE::default();
+        let mut qualifier = APTTYPEQUALIFIER::default();
+        // SAFETY: both output pointers refer to valid, writable values.
+        unsafe { CoGetApartmentType(&raw mut apartment, &raw mut qualifier) }?;
+        Ok(apartment)
+    }
+
+    fn on_com_thread(test: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
+        std::thread::spawn(test)
+            .join()
+            .map_err(|_| anyhow::anyhow!("COM regression test thread panicked"))?
+    }
+
+    #[test]
+    fn enumeration_preserves_gui_sta_and_balances_initialization() -> Result<()> {
+        on_com_thread(|| {
+            let gui = ComGuard::initialize(COINIT_APARTMENTTHREADED)?;
+            let gui_apartment = apartment_type()?;
+            assert!(matches!(gui_apartment, APTTYPE_STA | APTTYPE_MAINSTA));
+            // Reproduce the original failure before exercising the GUI query paths.
+            let error = ComGuard::new().err().ok_or_else(|| {
+                anyhow::anyhow!("MTA initialization unexpectedly succeeded on an STA thread")
+            })?;
+            assert_eq!(
+                error.downcast_ref::<windows::core::Error>().map(windows::core::Error::code),
+                Some(RPC_E_CHANGED_MODE)
+            );
+            for _ in 0..2 {
+                let _outputs = list_output_devices()?;
+                let _endpoints = WindowsAudioBackend.endpoints()?;
+                assert_eq!(apartment_type()?, gui_apartment);
+            }
+            drop(gui);
+            // Switching modes proves no initialization references were leaked.
+            let _worker = ComGuard::new()?;
+            assert_eq!(apartment_type()?, APTTYPE_MTA);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn enumeration_preserves_worker_mta_and_balances_nested_initialization() -> Result<()> {
+        on_com_thread(|| {
+            let worker = ComGuard::new()?;
+            for _ in 0..2 {
+                let _outputs = list_output_devices()?;
+                let _endpoints = WindowsAudioBackend.endpoints()?;
+                assert_eq!(apartment_type()?, APTTYPE_MTA);
+            }
+            drop(worker);
+            let _gui = ComGuard::initialize(COINIT_APARTMENTTHREADED)?;
+            assert!(matches!(apartment_type()?, APTTYPE_STA | APTTYPE_MAINSTA));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn enumeration_initializes_and_releases_com_on_a_fresh_thread() -> Result<()> {
+        on_com_thread(|| {
+            let enumeration = ComGuard::for_enumeration()?;
+            assert_eq!(apartment_type()?, APTTYPE_MTA);
+            drop(enumeration);
+            let _gui = ComGuard::initialize(COINIT_APARTMENTTHREADED)?;
+            assert!(matches!(apartment_type()?, APTTYPE_STA | APTTYPE_MAINSTA));
+            Ok(())
+        })
+    }
 
     fn devices() -> Vec<AudioOutputDevice> {
         vec![

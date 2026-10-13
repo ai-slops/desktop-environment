@@ -36,6 +36,28 @@ notification role filter, missing defaults, successive events during reconnect,
 default selector re-resolution, fixed endpoint selection, and feedback collisions.
 They do not certify audible routing or native callback delivery.
 
+## COM apartment regression
+
+The GUI initializes OLE on an STA thread. **저장하고 시작** refreshes audio
+endpoints on that same thread; forcing MTA there previously failed with
+`Cannot change thread mode after it is set. (0x80010106)`.
+Device enumeration now retries initialization in STA when MTA reports
+`RPC_E_CHANGED_MODE`. Routing workers continue to require MTA. Every successful
+initialization, including `S_FALSE`, is balanced on the same thread; failed
+initialization is never uninitialized.
+
+Run the focused regression tests inside the Windows guest:
+
+```powershell
+cargo test -p windows-audio-router enumeration_ -j 1
+```
+
+These cover enumeration from STA and MTA, repeated calls, and initialization on a
+fresh thread. They also verify that enumeration preserves the caller's apartment
+and releases exactly its own COM references. In the guest GUI, enable audio,
+select two different outputs, and click **저장하고 시작** to confirm startup
+passes the synchronous endpoint refresh without `0x80010106`.
+
 ## Live acceptance inside the VM
 
 Start the guest-local `desktop-control.exe` with a new guest-local `--config` path.
