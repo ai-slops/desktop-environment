@@ -18,6 +18,12 @@ Concrete utilities now included:
 
 ## Saved-settings GUI
 
+A browser-testable prototype that combines all three control panels is available
+in [Desktop Workspace](apps/desktop-workspace/README.md). It supports dockable tabs,
+splits, popout windows, and explicit selection states using virtual devices only.
+See [the integration design](docs/desktop-workspace.md) for the native services
+that still need to be connected.
+
 Run `just window-manager` or `cargo run -p window-manager` for window management.
 Create a monitor region under **화면 / 영역**, add existing windows under **창 목록**,
 and commit **전환 미리보기 → 계획 적용**. Startup and editing never auto-apply layouts.

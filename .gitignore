@@ -5,3 +5,7 @@
 Thumbs.db
 __pycache__/
 *.py[cod]
+node_modules/
+apps/desktop-workspace/dist/
+apps/desktop-workspace/test-results/
+apps/desktop-workspace/playwright-report/
