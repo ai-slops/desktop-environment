@@ -26,6 +26,10 @@ struct Envelope {
 enum SessionCommand {
     Snapshot {},
     Configuration {},
+    Configure {
+        expected_revision: u64,
+        configuration: Configuration,
+    },
     Simulate {
         input: window_manager_core::Simulation,
     },
@@ -273,6 +277,27 @@ impl Session {
         command.authorize(self.control, self.providers)?;
         match command {
             SessionCommand::Configuration {} => Ok(json!(self.config)),
+            SessionCommand::Configure { expected_revision, mut configuration } => {
+                if expected_revision != self.config.revision
+                    || configuration.revision != expected_revision
+                {
+                    return Err(Error::new(
+                        ErrorCode::StaleRevision,
+                        "Configuration revision changed",
+                        "configuration",
+                    ));
+                }
+                configuration.revision = expected_revision.checked_add(1).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidConfiguration,
+                        "Revision overflow",
+                        "configuration",
+                    )
+                })?;
+                configuration.validate()?;
+                self.save_configuration(configuration)?;
+                Ok(json!(self.config))
+            }
             SessionCommand::Placements { window } => {
                 if !self.config.windows.contains_key(&window) {
                     return Err(Error::new(ErrorCode::TargetMissing, "Reference missing", window));
@@ -336,7 +361,16 @@ impl Session {
                     if let Event::Inventory(candidates) = event {
                         for candidate in candidates.into_iter().take(256) {
                             let id = new_id("candidate");
-                            inventory.push(json!({"id":id,"title":candidate.title,"class":candidate.class,"process":candidate.process,"frame":candidate.frame}));
+                            let reference = self
+                                .snapshot
+                                .windows
+                                .iter()
+                                .find(|(_, window)| {
+                                    window.binding.handle == candidate.handle
+                                        && window.binding.process == candidate.process
+                                })
+                                .map(|(id, _)| id);
+                            inventory.push(json!({"id":id,"title":candidate.title,"class":candidate.class,"process":candidate.process,"frame":candidate.frame,"reference":reference}));
                             self.candidates.insert(id, candidate);
                         }
                     }

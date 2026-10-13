@@ -740,6 +740,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-workspace-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "desktop-workspace-service",
+ "serde_json",
+]
+
+[[package]]
+name = "desktop-workspace-service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio-cable-core",
+ "desktop-presets",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing-subscriber",
+ "window-manager-core",
+ "windows 0.61.3",
+ "windows-audio-router",
+ "windows-desktop-duplication",
+]
+
+[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

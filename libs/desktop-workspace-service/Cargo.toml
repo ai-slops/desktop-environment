@@ -1,0 +1,27 @@
+[package]
+name = "desktop-workspace-service"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+audio-cable-core = { path = "../audio-cable-core" }
+desktop-presets = { path = "../desktop-presets" }
+window-manager-core = { path = "../window-manager-core" }
+windows-audio-router = { path = "../../platforms/windows-audio-router" }
+windows-desktop-duplication = { path = "../../platforms/windows-desktop-duplication" }
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_System_JobObjects", "Win32_Security"] }
+
+[dev-dependencies]
+tempfile.workspace = true
