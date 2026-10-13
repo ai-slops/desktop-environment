@@ -15,10 +15,11 @@ use tracing::{debug, info, warn};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{HANDLE, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE,
-    IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceCollection,
-    IMMDeviceEnumerator, IMMNotificationClient, MMDeviceEnumerator, eCapture, eConsole, eRender,
+    AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_E_DEVICE_IN_USE, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, DEVICE_STATE_ACTIVE, IAudioCaptureClient,
+    IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
+    IMMNotificationClient, MMDeviceEnumerator, eCapture, eConsole, eRender,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{
@@ -122,6 +123,32 @@ impl Drop for AudioScheduling {
 
 pub fn run_output_audio_router(source_selector: &str, target_selector: &str) -> Result<()> {
     run_router(source_selector, target_selector, None)
+}
+
+/// Check endpoint selection and stream initialization without starting playback.
+pub fn check_output_audio_route(source_selector: &str, target_selector: &str) -> Result<()> {
+    let _com = ComGuard::new()?;
+    let source = select_output_device(source_selector)?;
+    let target = select_output_device(target_selector)?;
+    if source.id == target.id {
+        bail!("Source and target must be different output devices (audio feedback prevention)");
+    }
+    info!(
+        "Checking audio route from {} to {} without playback",
+        source.friendly_name, target.friendly_name
+    );
+    let source_device = output_device_by_id(&source.id)?;
+    let target_device = output_device_by_id(&target.id)?;
+    let capture = open_capture(&source_device, false)
+        .with_context(|| format!("failed to open loopback capture on {}", source.friendly_name))?;
+    info!("Source mix format: {}", capture.format.describe());
+    let target_client: IAudioClient = unsafe { target_device.Activate(CLSCTX_ALL, None) }?;
+    let target_format = WaveFormatOwned::from_mix_format(&target_client)?;
+    info!("Target mix format: {}", target_format.describe());
+    let _render = open_render_client(&target_device, &capture.format)
+        .with_context(|| format!("failed to open render client on {}", target.friendly_name))?;
+    info!("Audio route initialization passed; no playback was started");
+    Ok(())
 }
 
 pub fn run_controlled_audio_router(
@@ -380,9 +407,7 @@ fn open_capture(device: &IMMDevice, float_samples: bool) -> Result<AudioCaptureS
             None,
         )
     }
-    .with_context(|| {
-        format!("capture Initialize failed with source loopback format {}", format.describe())
-    })?;
+    .map_err(|error| stream_initialization_error(error, "capture", &format))?;
 
     let capture = unsafe { client.GetService::<IAudioCaptureClient>() }?;
     Ok(AudioCaptureStream { client, capture, format })
@@ -401,11 +426,27 @@ fn open_render_client(device: &IMMDevice, format: &WaveFormatOwned) -> Result<Au
             None,
         )
     }
-    .with_context(|| format!("render Initialize failed with format {}", format.describe()))?;
+    .map_err(|error| stream_initialization_error(error, "render", format))?;
 
     let buffer_frames = unsafe { client.GetBufferSize() }?;
     let render = unsafe { client.GetService::<IAudioRenderClient>() }?;
     Ok(AudioRenderStream { client, render, buffer_frames, format: format.clone() })
+}
+
+fn stream_initialization_error(
+    error: windows::core::Error,
+    stream: &str,
+    format: &WaveFormatOwned,
+) -> anyhow::Error {
+    let message = if error.code() == AUDCLNT_E_DEVICE_IN_USE {
+        format!(
+            "{stream} Initialize: 오디오 장치가 독점 사용 중입니다 (AUDCLNT_E_DEVICE_IN_USE, 0x8889000A). 장치를 사용하는 앱을 공유 모드로 전환하거나 해당 앱의 장치 사용을 중지한 뒤 다시 시작하세요. format {}",
+            format.describe()
+        )
+    } else {
+        format!("{stream} Initialize failed with format {}", format.describe())
+    };
+    anyhow::Error::new(error).context(message)
 }
 
 struct DefaultEndpointWatch {

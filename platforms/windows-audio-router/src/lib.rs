@@ -4,7 +4,9 @@
 mod windows_impl;
 
 #[cfg(target_os = "windows")]
-pub use windows_impl::{AudioOutputDevice, list_output_devices, run_output_audio_router};
+pub use windows_impl::{
+    AudioOutputDevice, check_output_audio_route, list_output_devices, run_output_audio_router,
+};
 
 #[cfg(target_os = "windows")]
 pub use windows_impl::{WindowsAudioBackend, run_controlled_audio_router};
@@ -27,7 +29,13 @@ mod unsupported {
     pub fn run_output_audio_router(_: &str, _: &str) -> Result<()> {
         bail!("Audio routing is only supported on Windows")
     }
+
+    pub fn check_output_audio_route(_: &str, _: &str) -> Result<()> {
+        bail!("Audio routing is only supported on Windows")
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub use unsupported::{AudioOutputDevice, list_output_devices, run_output_audio_router};
+pub use unsupported::{
+    AudioOutputDevice, check_output_audio_route, list_output_devices, run_output_audio_router,
+};

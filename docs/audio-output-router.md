@@ -34,6 +34,19 @@ List audio output devices:
 cargo run -p audio-output-router -- list-audio-devices
 ```
 
+Check a route's endpoint selection and stream initialization without starting
+capture or playback:
+
+```powershell
+cargo run -p audio-output-router -- check-route default "GC553PRO"
+```
+
+`0x8889000A` (`AUDCLNT_E_DEVICE_IN_USE`) means a selected device is already in
+exclusive use. The router uses shared mode and cannot take that device away from
+another client. Switch the application using that device to shared mode, or stop
+its use of the device, then retry. The diagnostic leaves Windows defaults and
+saved presets unchanged.
+
 Clone the default output device into another output device:
 
 ```powershell

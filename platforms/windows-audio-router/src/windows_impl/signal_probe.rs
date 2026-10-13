@@ -149,6 +149,29 @@ fn offline_signal_metrics_handle_empty_inputs_and_invalid_rates() {
     }
 }
 
+#[test]
+fn offline_stream_error_identifies_exclusive_use_and_preserves_native_error() {
+    let format = WaveFormatOwned { bytes: vec![0; 18], block_align: 0 };
+    let error = stream_initialization_error(
+        windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_IN_USE),
+        "capture",
+        &format,
+    );
+    assert!(error.to_string().contains("독점 사용 중"));
+    assert!(error.to_string().contains("0x8889000A"));
+    assert_eq!(
+        error.downcast_ref::<windows::core::Error>().map(windows::core::Error::code),
+        Some(AUDCLNT_E_DEVICE_IN_USE)
+    );
+    let error = stream_initialization_error(
+        windows::core::Error::from_hresult(windows::Win32::Foundation::E_INVALIDARG),
+        "render",
+        &format,
+    );
+    assert!(!error.to_string().contains("독점 사용 중"));
+    assert!(error.to_string().contains("render Initialize failed"));
+}
+
 struct Tone {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<Result<()>>>,

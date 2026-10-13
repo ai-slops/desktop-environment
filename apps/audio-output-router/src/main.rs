@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 use std::io::{self, Write};
 use tracing::info;
-use windows_audio_router::{list_output_devices, run_output_audio_router};
+use windows_audio_router::{
+    check_output_audio_route, list_output_devices, run_output_audio_router,
+};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -15,11 +17,14 @@ fn main() -> Result<()> {
         Command::Interactive => interactive(),
         Command::Help => {
             println!(
-                "Audio Repeater\nUsage: audio-output-router [list-audio-devices | route <SOURCE|default> <TARGET|default>]\nWithout arguments, select devices interactively. Selectors accept a full device ID or a unique name fragment.\nThe source keeps playing. Press Ctrl+C to stop."
+                "Audio Repeater\nUsage: audio-output-router [list-audio-devices | route <SOURCE|default> <TARGET|default> | check-route <SOURCE|default> <TARGET|default>]\nWithout arguments, select devices interactively. Selectors accept a full device ID or a unique name fragment.\ncheck-route initializes streams without starting playback.\nThe source keeps playing. Press Ctrl+C to stop."
             );
             Ok(())
         }
         Command::ListAudioDevices => list_audio_devices(),
+        Command::CheckRoute { source_device, target_device } => {
+            check_output_audio_route(&source_device, &target_device)
+        }
         Command::Route { source_device, target_device } => {
             info!("Press Ctrl+C to stop the router");
             run_output_audio_router(&source_device, &target_device)
@@ -32,6 +37,7 @@ enum Command {
     Help,
     ListAudioDevices,
     Route { source_device: String, target_device: String },
+    CheckRoute { source_device: String, target_device: String },
 }
 
 impl Command {
@@ -44,14 +50,18 @@ impl Command {
         let command = match command.as_str() {
             "--help" | "-h" | "help" => Self::Help,
             "list-audio-devices" => Self::ListAudioDevices,
-            "route" => {
-                let source_device = args
-                    .next()
-                    .context("route requires a source output device match or 'default'")?;
-                let target_device = args
-                    .next()
-                    .context("route requires a target output device match or 'default'")?;
-                Self::Route { source_device, target_device }
+            "route" | "check-route" => {
+                let source_device = args.next().with_context(|| {
+                    format!("{command} requires a source output device match or 'default'")
+                })?;
+                let target_device = args.next().with_context(|| {
+                    format!("{command} requires a target output device match or 'default'")
+                })?;
+                if command == "route" {
+                    Self::Route { source_device, target_device }
+                } else {
+                    Self::CheckRoute { source_device, target_device }
+                }
             }
             other => bail!("Unknown command: {other}"),
         };
