@@ -1,4 +1,5 @@
-//! Explicitly opted-in, VM-only live signal acceptance. Never part of normal tests.
+//! Live signal acceptance requires explicit opt-in and a Windows VM.
+//! Pure format and signal-analysis regressions run without opening devices.
 use super::*;
 use std::f64::consts::TAU;
 use std::os::windows::process::CommandExt;
@@ -15,10 +16,22 @@ fn command(path: impl AsRef<std::ffi::OsStr>) -> Command {
 
 fn layout(format: &WaveFormatOwned) -> Result<(usize, u32, usize, bool)> {
     let bytes = &format.bytes;
+    if bytes.len() < 18 {
+        bail!("Truncated probe format");
+    }
     let tag = u16::from_le_bytes([bytes[0], bytes[1]]);
     let channels = usize::from(u16::from_le_bytes([bytes[2], bytes[3]]));
     let rate = u32::from_le_bytes(bytes[4..8].try_into()?);
     let bits = usize::from(u16::from_le_bytes([bytes[14], bytes[15]]));
+    if !matches!(tag, 1 | 3 | 0xfffe) || (tag == 0xfffe && bytes.len() < 40) {
+        bail!("Unsupported or truncated probe format: {}", format.describe());
+    }
+    if tag == 0xfffe
+        && (bytes[28..40] != [0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]
+            || !matches!(&bytes[24..28], [1 | 3, 0, 0, 0]))
+    {
+        bail!("Unsupported probe subformat: {}", format.describe());
+    }
     let float = tag == 3 || (tag == 0xfffe && bytes.get(24..28) == Some(&[3, 0, 0, 0]));
     if channels == 0
         || rate == 0
@@ -29,6 +42,111 @@ fn layout(format: &WaveFormatOwned) -> Result<(usize, u32, usize, bool)> {
         bail!("Unsupported probe format: {}", format.describe());
     }
     Ok((channels, rate, bits / 8, float))
+}
+
+// WAV float samples intentionally round to IEEE float32 at the format boundary.
+#[allow(clippy::cast_possible_truncation)]
+fn float_sample(sample: f64) -> f32 {
+    sample as f32
+}
+
+// PCM quantization intentionally discards the fractional part after clipping.
+#[allow(clippy::cast_possible_truncation)]
+fn pcm_sample(sample: f64, bytes: usize) -> i32 {
+    let maximum = f64::from((1_u32 << (bytes * 8 - 1)) - 1);
+    (sample.clamp(-1.0, 1.0) * maximum) as i32
+}
+
+fn decode_pcm(frame: &[u8], bytes: usize) -> f32 {
+    let mut value = if frame[bytes - 1] & 0x80 == 0 { [0; 4] } else { [0xff; 4] };
+    value[..bytes].copy_from_slice(&frame[..bytes]);
+    let divisor = f64::from(1_u32 << (bytes * 8 - 1));
+    float_sample(f64::from(i32::from_le_bytes(value)) / divisor)
+}
+
+fn rms(samples: &[f32]) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let (energy, count) = samples.iter().fold((0.0, 0.0), |(energy, count), sample| {
+        (f64::from(*sample).mul_add(f64::from(*sample), energy), count + 1.0)
+    });
+    (energy / count).sqrt()
+}
+
+fn next_tone_sample(phase: &mut f64, phase_step: f64) -> f64 {
+    let sample = phase.sin() * 0.15;
+    *phase = (*phase + phase_step).rem_euclid(TAU);
+    sample
+}
+
+#[test]
+fn offline_tone_keeps_frequency_and_bounded_phase() {
+    let rate = 48_000;
+    let mut phase = 0.0;
+    let phase_step = TAU * 440.0 / f64::from(rate);
+    let samples: Vec<_> =
+        (0..rate * 3).map(|_| float_sample(next_tone_sample(&mut phase, phase_step))).collect();
+    assert!((0.0..TAU).contains(&phase));
+    assert!((amplitude(&samples, rate, 440.0) - 0.15).abs() < 0.000_001);
+    assert!(amplitude(&samples, rate, 880.0) < 0.000_001);
+}
+
+#[test]
+fn offline_probe_rejects_truncated_and_unsupported_formats() {
+    for length in 0..18 {
+        assert!(layout(&WaveFormatOwned { bytes: vec![0; length], block_align: 4 }).is_err());
+    }
+    let mut bytes = vec![0; 18];
+    bytes[..2].copy_from_slice(&1_u16.to_le_bytes());
+    bytes[2..4].copy_from_slice(&2_u16.to_le_bytes());
+    bytes[4..8].copy_from_slice(&48_000_u32.to_le_bytes());
+    bytes[14..16].copy_from_slice(&16_u16.to_le_bytes());
+    let mut format = WaveFormatOwned { bytes, block_align: 4 };
+    assert_eq!(layout(&format).ok(), Some((2, 48_000, 2, false)));
+    format.bytes[..2].copy_from_slice(&2_u16.to_le_bytes());
+    assert!(layout(&format).is_err());
+    format.bytes[..2].copy_from_slice(&0xfffe_u16.to_le_bytes());
+    assert!(layout(&format).is_err());
+    format.bytes.resize(40, 0);
+    assert!(layout(&format).is_err());
+    format.bytes[24..40]
+        .copy_from_slice(&[1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+    assert_eq!(layout(&format).ok(), Some((2, 48_000, 2, false)));
+    format.bytes[24] = 3;
+    assert!(layout(&format).is_err());
+}
+
+#[test]
+fn offline_pcm_round_trip_preserves_sign_and_clips_out_of_range_samples() {
+    for bytes in [2, 3, 4] {
+        let tolerance = match bytes {
+            2 => 0.000_1,
+            3 => 0.000_001,
+            _ => 0.000_000_1,
+        };
+        for sample in [-1.0, -0.5, 0.0, 0.5, 1.0] {
+            let encoded = pcm_sample(sample, bytes).to_le_bytes();
+            let decoded = f64::from(decode_pcm(&encoded[..bytes], bytes));
+            assert!((decoded - sample).abs() < tolerance);
+        }
+        assert_eq!(pcm_sample(-2.0, bytes), pcm_sample(-1.0, bytes));
+        assert_eq!(pcm_sample(2.0, bytes), pcm_sample(1.0, bytes));
+        let mut encoded = vec![0; bytes];
+        encoded[bytes - 1] = 0x80;
+        assert!((f64::from(decode_pcm(&encoded, bytes)) + 1.0).abs() < f64::EPSILON);
+    }
+}
+
+#[test]
+fn offline_signal_metrics_handle_empty_inputs_and_invalid_rates() {
+    assert!(rms(&[]).abs() < f64::EPSILON);
+    assert!((rms(&[-0.5, 0.5]) - 0.5).abs() < f64::EPSILON);
+    assert!(amplitude(&[], 48_000, 440.0).abs() < f64::EPSILON);
+    assert!(amplitude(&[0.5], 0, 440.0).abs() < f64::EPSILON);
+    for rate in 0..10 {
+        assert!(windowed_amplitude(&[0.5], rate, 440.0).abs() < f64::EPSILON);
+    }
 }
 
 struct Tone {
@@ -50,7 +168,8 @@ impl Tone {
             let render = open_render_client(&device, &format)?;
             unsafe { render.client.Start() }?;
             ready.send(())?;
-            let mut frame_index = 0_u64;
+            let mut phase = 0.0_f64;
+            let phase_step = TAU * frequency / f64::from(rate);
             while !stopped.load(Ordering::Relaxed) {
                 let available = render
                     .buffer_frames
@@ -64,17 +183,15 @@ impl Tone {
                     slice::from_raw_parts_mut(pointer, available as usize * format.block_align)
                 };
                 for frame in data.chunks_exact_mut(format.block_align) {
-                    let sample =
-                        (TAU * frequency * frame_index as f64 / f64::from(rate)).sin() * 0.15;
+                    let sample = next_tone_sample(&mut phase, phase_step);
                     for channel in frame.chunks_exact_mut(bytes).take(channels) {
                         if float {
-                            channel.copy_from_slice(&(sample as f32).to_le_bytes());
+                            channel.copy_from_slice(&float_sample(sample).to_le_bytes());
                         } else {
-                            let value = (sample * ((1_u64 << (bytes * 8 - 1)) - 1) as f64) as i32;
+                            let value = pcm_sample(sample, bytes);
                             channel.copy_from_slice(&value.to_le_bytes()[..bytes]);
                         }
                     }
-                    frame_index += 1;
                 }
                 unsafe { render.render.ReleaseBuffer(available, 0) }?;
             }
@@ -88,10 +205,10 @@ impl Tone {
 impl Drop for Tone {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            if let Ok(Err(error)) = thread.join() {
-                eprintln!("Tone stream failed: {error:#}");
-            }
+        if let Some(thread) = self.thread.take()
+            && let Ok(Err(error)) = thread.join()
+        {
+            eprintln!("Tone stream failed: {error:#}");
         }
     }
 }
@@ -106,11 +223,11 @@ fn capture_with_tick(
     tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
 ) -> Result<(Vec<f32>, u32)> {
     let stream = open_loopback_capture(&output_device_by_id(id)?)?;
-    capture_stream_with_tick(stream, seconds, tick)
+    capture_stream_with_tick(&stream, seconds, tick)
 }
 
 fn capture_stream_with_tick(
-    stream: AudioCaptureStream,
+    stream: &AudioCaptureStream,
     seconds: u64,
     mut tick: impl FnMut(&[f32], u32, Duration) -> Result<()>,
 ) -> Result<(Vec<f32>, u32)> {
@@ -142,9 +259,7 @@ fn capture_stream_with_tick(
                 let sample = if float {
                     f32::from_le_bytes(frame[..4].try_into()?)
                 } else {
-                    let mut value = if frame[bytes - 1] & 0x80 == 0 { [0; 4] } else { [0xff; 4] };
-                    value[..bytes].copy_from_slice(&frame[..bytes]);
-                    i32::from_le_bytes(value) as f32 / (1_u64 << (bytes * 8 - 1)) as f32
+                    decode_pcm(frame, bytes)
                 };
                 samples.push(sample);
             }
@@ -175,7 +290,7 @@ fn capture_recording(id: &str, seconds: u64) -> Result<(Vec<f32>, u32)> {
         )
     }?;
     let capture = unsafe { client.GetService::<IAudioCaptureClient>() }?;
-    capture_stream_with_tick(AudioCaptureStream { client, capture, format }, seconds, |_, _, _| {
+    capture_stream_with_tick(&AudioCaptureStream { client, capture, format }, seconds, |_, _, _| {
         Ok(())
     })
 }
@@ -191,6 +306,26 @@ impl Drop for ControlledRoute {
             let _ = thread.join();
         }
     }
+}
+
+fn wait_for_running(route: &mut ControlledRoute) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while route.control.state() != RouteState::Running {
+        if route.thread.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+            route
+                .thread
+                .take()
+                .context("Route missing")?
+                .join()
+                .map_err(|_| anyhow::anyhow!("Route panicked"))??;
+            bail!("Route ended before starting");
+        }
+        if Instant::now() >= deadline {
+            bail!("Controlled route did not start");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn cable_probe_guard() -> Result<()> {
@@ -243,9 +378,6 @@ fn live_cable_gain_acceptance() -> Result<()> {
     let _source = Tone::start(cable.playback_id.clone(), 440.0)?;
     let _clock = Tone::start(target.clone(), 0.0)?;
     let (raw, rate) = capture_recording(&cable.capture_id, 2)?;
-    let rms = |samples: &[f32]| -> f64 {
-        (samples.iter().map(|s| f64::from(*s).powi(2)).sum::<f64>() / samples.len() as f64).sqrt()
-    };
     let baseline = rms(&raw[rate as usize / 4..]);
     let baseline_tone = windowed_amplitude(&raw[rate as usize / 4..], rate, 440.0);
     if baseline < 0.05 || raw.iter().any(|s| !s.is_finite()) {
@@ -260,23 +392,10 @@ fn live_cable_gain_acceptance() -> Result<()> {
         control: control.clone(),
         thread: Some(std::thread::spawn(move || backend.monitor(&selected, &output, monitor))),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while control.state() != RouteState::Running {
-        if route.thread.as_ref().is_some_and(|t| t.is_finished()) {
-            route
-                .thread
-                .take()
-                .context("Route missing")?
-                .join()
-                .map_err(|_| anyhow::anyhow!("Route panicked"))??;
-            bail!("Route ended before starting");
-        }
-        if Instant::now() >= deadline {
-            bail!("Controlled route did not start");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    for db in [-20.0, -40.0, -60.0, -96.0, -30.0] {
+    wait_for_running(&mut route)?;
+    for (db, rms_tolerance) in
+        [(-20.0, 1.0), (-40.0, 1.0), (-60.0, 1.0), (-96.0, 5.0), (-30.0, 1.0)]
+    {
         control.set_gain(db)?;
         // The fixture driver can retain old samples beyond the DSP's 20 ms ramp.
         // Use the same two-second endpoint settling bound as the switch probe.
@@ -301,12 +420,10 @@ fn live_cable_gain_acceptance() -> Result<()> {
         if !measured_db.is_finite() || (measured_db - f64::from(db)).abs() > 1.0 {
             bail!("Gain mismatch: requested {db}, measured {measured_db}");
         }
-        if !rms_db.is_finite()
-            || (rms_db - f64::from(db)).abs() > if db == -96.0 { 5.0 } else { 1.0 }
-        {
+        if !rms_db.is_finite() || (rms_db - f64::from(db)).abs() > rms_tolerance {
             bail!("Unexpected total signal energy: requested {db}, RMS {rms_db}");
         }
-        if route.thread.as_ref().is_some_and(|t| t.is_finished()) {
+        if route.thread.as_ref().is_some_and(thread::JoinHandle::is_finished) {
             bail!("Gain adjustment restarted/ended the monitor");
         }
     }
@@ -319,7 +436,7 @@ fn live_cable_gain_acceptance() -> Result<()> {
     control.set_mute(false);
     thread::sleep(Duration::from_secs(2));
     let (resumed, rate) = capture(&target, 2)?;
-    if (20.0 * (rms(&resumed[rate as usize / 4..]) / baseline).log10() + 30.0).abs() > 1.0 {
+    if 20.0_f64.mul_add((rms(&resumed[rate as usize / 4..]) / baseline).log10(), 30.0).abs() > 1.0 {
         bail!("Unmute did not preserve attenuation");
     }
     let (unaltered, rate) = capture_recording(&cable.capture_id, 2)?;
@@ -388,6 +505,28 @@ fn cpu_times() -> Result<(u64, u64)> {
     Ok((ticks(idle), ticks(kernel) + ticks(user)))
 }
 
+// CPU counters have 100 ns resolution. Rounding their low bits to f64 is
+// intentional for a percentage measurement; the original counters stay u64.
+#[allow(clippy::cast_precision_loss)]
+fn cpu_busy_percent(before: (u64, u64), after: (u64, u64)) -> Result<f64> {
+    let idle = after.0.checked_sub(before.0).context("CPU idle counter moved backwards")?;
+    let total = after.1.checked_sub(before.1).context("CPU total counter moved backwards")?;
+    if total == 0 || idle > total {
+        bail!("Invalid CPU measurement interval");
+    }
+    Ok(100.0 * (1.0 - idle as f64 / total as f64))
+}
+
+#[test]
+fn offline_cpu_measurement_rejects_invalid_intervals() -> Result<()> {
+    assert!((cpu_busy_percent((100, 200), (125, 300))? - 75.0).abs() < f64::EPSILON);
+    assert!(cpu_busy_percent((100, 200), (100, 200)).is_err());
+    assert!(cpu_busy_percent((100, 200), (99, 300)).is_err());
+    assert!(cpu_busy_percent((100, 200), (125, 199)).is_err());
+    assert!(cpu_busy_percent((100, 200), (201, 300)).is_err());
+    Ok(())
+}
+
 fn longest_silence_ms(samples: &[f32], rate: u32) -> f64 {
     let mut longest = 0;
     let mut current = 0;
@@ -432,7 +571,7 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
     let before = cpu_times()?;
     // Observe the same playback-loopback source the router consumes. The cable's recording
     // endpoint has a separate driver buffer and is not the input to our monitor route.
-    let input_id = cable.playback_id.clone();
+    let input_id = cable.playback_id;
     let input = thread::spawn(move || -> Result<_> {
         let _com = ComGuard::new()?;
         capture(&input_id, 8)
@@ -442,7 +581,7 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
     let (samples, rate) = output_result?;
     let (raw, input_rate) = input_result?;
     let after = cpu_times()?;
-    let busy = 100.0 * (1.0 - (after.0 - before.0) as f64 / (after.1 - before.1) as f64);
+    let busy = cpu_busy_percent(before, after)?;
     let samples = &samples[rate as usize / 4..];
     let raw = &raw[input_rate as usize / 4..];
     let output_gap = longest_silence_ms(samples, rate);
@@ -468,7 +607,7 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
         || !amplitude.is_finite()
         || (amplitude / baseline_amplitude - 1.0).abs() > 0.1
         || control.state() != RouteState::Running
-        || route.thread.as_ref().is_some_and(|worker| worker.is_finished())
+        || route.thread.as_ref().is_some_and(thread::JoinHandle::is_finished)
     {
         bail!("Cable monitor interrupted under CPU load");
     }
@@ -482,7 +621,7 @@ fn live_cable_cpu_load_acceptance() -> Result<()> {
 fn silence_probe_detects_missing_audio_without_counting_tone_zero_crossings() {
     let rate = 48_000;
     let mut samples: Vec<_> = (0..rate)
-        .map(|index| (0.15 * (TAU * 440.0 * f64::from(index) / f64::from(rate)).sin()) as f32)
+        .map(|index| float_sample(0.15 * (TAU * 440.0 * f64::from(index) / f64::from(rate)).sin()))
         .collect();
     assert!(longest_silence_ms(&samples, rate) < 1.0);
     samples[1000..1480].fill(0.0);
@@ -492,6 +631,9 @@ fn silence_probe_detects_missing_audio_without_counting_tone_zero_crossings() {
 // Short windows avoid phase cancellation across virtual-clock discontinuities.
 // Report the median known-tone amplitude; total RMS is validated separately.
 fn windowed_amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {
+    if rate < 10 {
+        return 0.0;
+    }
     let mut values: Vec<_> = samples
         .chunks_exact((rate / 10) as usize)
         .map(|window| amplitude(window, rate, frequency))
@@ -501,14 +643,19 @@ fn windowed_amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {
 }
 
 fn amplitude(samples: &[f32], rate: u32, frequency: f64) -> f64 {
+    if samples.is_empty() || rate == 0 {
+        return 0.0;
+    }
     let mut real = 0.0;
     let mut imaginary = 0.0;
-    for (index, sample) in samples.iter().enumerate() {
-        let phase = TAU * frequency * index as f64 / f64::from(rate);
-        real += f64::from(*sample) * phase.cos();
-        imaginary += f64::from(*sample) * phase.sin();
+    let mut count = 0.0;
+    for sample in samples {
+        let phase = TAU * frequency * count / f64::from(rate);
+        real = f64::from(*sample).mul_add(phase.cos(), real);
+        imaginary = f64::from(*sample).mul_add(phase.sin(), imaginary);
+        count += 1.0;
     }
-    2.0 * real.hypot(imaginary) / samples.len() as f64
+    2.0 * real.hypot(imaginary) / count
 }
 
 fn save_wave(path: &Path, samples: &[f32], rate: u32) -> Result<()> {
@@ -579,11 +726,9 @@ fn check(root: &Path, label: &str, id: &str, expected: f64, unwanted: f64) -> Re
     // Preserve the entire recording, including driver pre-roll, as evidence.
     // Every new loopback stream warms up for 250 ms before steady-state analysis.
     let samples = &samples[rate as usize / 4..];
-    let wanted = amplitude(&samples, rate, expected);
-    let leaked = amplitude(&samples, rate, unwanted);
-    let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
-        / samples.len() as f64)
-        .sqrt();
+    let wanted = amplitude(samples, rate, expected);
+    let leaked = amplitude(samples, rate, unwanted);
+    let rms = rms(samples);
     let report = format!(
         "{{\"case\":\"{label}\",\"rate\":{rate},\"samples\":{},\"expected_hz\":{expected},\"unwanted_hz\":{unwanted},\"expected_amplitude\":{wanted},\"unwanted_amplitude\":{leaked},\"rms\":{rms}}}",
         samples.len()
@@ -613,15 +758,11 @@ fn check_silent(root: &Path, label: &str, id: &str) -> Result<()> {
     save_wave(&root.join(format!("{label}.wav")), &samples, rate)?;
     for quarter in 0..4 {
         let segment = &samples[samples.len() * quarter / 4..samples.len() * (quarter + 1) / 4];
-        let rms = (segment.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
-            / segment.len() as f64)
-            .sqrt();
+        let rms = rms(segment);
         println!("{label} raw quarter {quarter}: rms={rms}");
     }
     let samples = &samples[rate as usize / 4..];
-    let rms = (samples.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
-        / samples.len() as f64)
-        .sqrt();
+    let rms = rms(samples);
     let report = format!("{{\"case\":\"{label}\",\"rms\":{rms}}}");
     std::fs::write(root.join(format!("{label}.json")), &report)?;
     println!("{report}");
@@ -656,9 +797,7 @@ fn check_continuous_switch(root: &Path, c: &str, b: &str, restore: &DefaultResto
     let before_unwanted = amplitude(before, rate, 880.0);
     let wanted = amplitude(after, rate, 880.0);
     let unwanted = amplitude(after, rate, 440.0);
-    let rms = (after.iter().map(|sample| f64::from(*sample).powi(2)).sum::<f64>()
-        / after.len() as f64)
-        .sqrt();
+    let rms = rms(after);
     let report = format!(
         "{{\"case\":\"continuous-a-to-b\",\"rate\":{rate},\"switch_frame\":{switch_frame},\"settling_frames\":{rate},\"before_expected_amplitude\":{before_wanted},\"before_unwanted_amplitude\":{before_unwanted},\"expected_hz\":880,\"unwanted_hz\":440,\"expected_amplitude\":{wanted},\"unwanted_amplitude\":{unwanted},\"rms\":{rms}}}"
     );
@@ -679,9 +818,10 @@ fn spectral_probe_distinguishes_known_tones_and_detects_leakage() {
     let rate = 48_000;
     let samples = (0..rate)
         .map(|index| {
-            (0.15 * (TAU * 440.0 * f64::from(index) / f64::from(rate)).sin()
-                + 0.003 * (TAU * 880.0 * f64::from(index) / f64::from(rate)).sin())
-                as f32
+            float_sample(0.003_f64.mul_add(
+                (TAU * 880.0 * f64::from(index) / f64::from(rate)).sin(),
+                0.15 * (TAU * 440.0 * f64::from(index) / f64::from(rate)).sin(),
+            ))
         })
         .collect::<Vec<_>>();
     let wanted = amplitude(&samples, rate, 440.0);
@@ -756,7 +896,7 @@ fn live_default_switch_signal_acceptance() -> Result<()> {
     }
     drop(routing);
     check_silent(&root, "router-stopped", &c)?;
-    let _fixed = Routing {
+    let fixed = Routing {
         child: command(&router)
             .args(["route", &a, &c])
             .stdout(std::process::Stdio::null())
@@ -765,7 +905,7 @@ fn live_default_switch_signal_acceptance() -> Result<()> {
     };
     restore.set(&b)?;
     check(&root, "fixed-a-default-b", &c, 440.0, 880.0)?;
-    drop(_fixed);
+    drop(fixed);
     let _tone_c = Tone::start(c.clone(), 1320.0)?;
     restore.set(&a)?;
     let _target = Routing {

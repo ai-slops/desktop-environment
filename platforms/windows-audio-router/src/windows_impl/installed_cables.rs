@@ -55,7 +55,7 @@ mod tests {
             flow: EndpointFlow::Capture,
             is_default: false,
         };
-        assert!(discover(&[playback.clone()]).is_empty());
+        assert!(discover(std::slice::from_ref(&playback)).is_empty());
         assert_eq!(discover(&[playback.clone(), capture.clone()]).len(), 1);
         assert!(discover(&[playback, capture.clone(), capture]).is_empty());
     }
