@@ -287,6 +287,127 @@ h1 {
   background: #1b2432;
   color: #e1e6ef;
 }
+.native-badge {
+  color: #a5dfc2;
+  border-color: #47745e;
+  background: #20352b;
+}
+.native-content {
+  width: 100%;
+}
+.native-content .device-columns {
+  margin-top: 20px;
+}
+.native-content
+  input:not([type="radio"]):not([type="checkbox"]):not([type="range"]),
+.native-content textarea {
+  background: #152031;
+  color: #e1e6ef;
+  border: 1px solid #405573;
+  border-radius: 4px;
+  padding: 8px;
+  min-width: 0;
+  width: 100%;
+}
+.native-content select {
+  margin: 6px 0;
+}
+.native-content label:not(.choice):not(.window-row):not(.check-label) {
+  font-size: 12px;
+}
+.native-content details {
+  margin: 18px 0;
+  border-top: 1px solid #3a4b64;
+  padding-top: 14px;
+}
+.native-content summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+.native-content .form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+.native-content .form-row > label,
+.native-content .form-row > input,
+.native-content .form-row > select {
+  flex: 1;
+  min-width: 130px;
+}
+.preset-controls,
+.mirror-controls {
+  border-top: 1px solid #3b4b63;
+  padding-top: 20px;
+  margin-top: 22px;
+}
+.mirror-row {
+  margin: 14px 0;
+  padding: 15px;
+  border: 1px solid #405471;
+  border-radius: 5px;
+}
+.job-log {
+  margin: 16px 0;
+  border-top: 1px solid #3a4b64;
+  padding-top: 12px;
+}
+.job-log summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: #b4c9e8;
+}
+.job-log pre,
+.error-card pre {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 230px;
+  overflow: auto;
+  line-height: 1.6;
+}
+.service-error {
+  background: #482b33;
+  color: #ffbac5;
+  padding: 10px 22px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+.service-error small {
+  display: block;
+  color: #d79ca9;
+  margin-top: 5px;
+}
+.native-job-records h2 {
+  font-size: 13px;
+  margin-top: 20px;
+}
+.node-editor {
+  padding: 10px 12px;
+  border-left: 2px solid #56749f;
+  margin: 10px 0;
+  background: #182335;
+}
+.placement-node {
+  padding: 9px 14px;
+  margin: 5px 0;
+  background: #263854;
+  font-size: 12px;
+}
+.status.recovering {
+  background: #433a27;
+  color: #eac687;
+}
+.mode-banner button {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 4px 7px;
+}
 .panel-tools {
   display: flex;
   align-items: center;

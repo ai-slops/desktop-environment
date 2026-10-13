@@ -18,11 +18,12 @@ Concrete utilities now included:
 
 ## Saved-settings GUI
 
-A browser-testable prototype that combines all three control panels is available
-in [Desktop Workspace](apps/desktop-workspace/README.md). It supports dockable tabs,
-splits, popout windows, and explicit selection states using virtual devices only.
-See [the integration design](docs/desktop-workspace.md) for the native services
-that still need to be connected.
+Double-click `start-desktop-workspace.cmd` for [Desktop Workspace](apps/desktop-workspace/README.md):
+the three control panels in one local web app, with dockable tabs, splits, popout
+windows and real Rust-backed audio, cable, mirroring and manual window controls.
+It reads existing settings and starts outputs only on explicit action. See
+[integration and test coverage](docs/desktop-workspace.md) for architecture and
+the advanced features that remain in the native GUI/CLI.
 
 Run `just window-manager` or `cargo run -p window-manager` for window management.
 Create a monitor region under **화면 / 영역**, add existing windows under **창 목록**,

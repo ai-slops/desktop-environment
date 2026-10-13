@@ -8,9 +8,11 @@
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4177 --strictPort",
+    "start": "node server.mjs",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test src/workspace.test.ts",
-    "format:check": "prettier --check src tests *.ts *.json *.html",
+    "test": "node --test src/workspace.test.ts server.test.mjs",
+    "test:native": "node --test native.test.mjs",
+    "format:check": "prettier --check src tests *.ts *.json *.html *.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {

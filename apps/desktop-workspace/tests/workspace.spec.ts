@@ -5,7 +5,7 @@ const windows = (page: Page) =>
   page.getByRole("region", { name: "Window Manager 패널" });
 
 test.beforeEach(async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/?mode=fixture");
   await expect(audio(page)).toBeVisible();
   await expect(page.getByText("테스트 모드", { exact: true })).toBeVisible();
 });

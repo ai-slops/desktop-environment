@@ -1,5 +1,7 @@
 // UI-facing contract. A future Rust bridge implements this interface; panels
 // must never call native APIs or depend on a particular desktop shell.
+import { createLiveBackend } from "./live.ts";
+import type { NativeCommand, NativeSnapshot } from "./native-protocol.ts";
 export type Device = {
   id: string;
   name: string;
@@ -20,7 +22,12 @@ export type Trace = {
   status: "ok" | "pending" | "error" | "cancelled";
   message: string;
 };
-export type Phase = "stopped" | "starting" | "running" | "failed";
+export type Phase =
+  | "stopped"
+  | "starting"
+  | "running"
+  | "failed"
+  | "recovering";
 export type WindowItem = {
   id: string;
   title: string;
@@ -34,7 +41,11 @@ export type Preview = {
   changes: { id: string; title: string; region: string }[];
 };
 export type WorkspaceState = {
-  mode: "fixture";
+  mode: "fixture" | "native";
+  connection?: "connecting" | "connected" | "disconnected";
+  pendingCommands?: number;
+  serviceIssue?: Issue;
+  native?: NativeSnapshot;
   revision: number;
   devices: Device[];
   audio: {
@@ -53,6 +64,7 @@ export type WorkspaceState = {
   traces: Trace[];
 };
 export type Command =
+  | { kind: "native.command"; command: NativeCommand }
   | { kind: "audio.select"; role: "source" | "target"; id: string }
   | { kind: "audio.scenario"; scenario: WorkspaceState["audio"]["scenario"] }
   | { kind: "audio.start" }
@@ -66,7 +78,12 @@ export type Command =
   | { kind: "windows.view"; view: WorkspaceState["view"] }
   | { kind: "windows.preview" }
   | { kind: "windows.apply" };
-export type CommandResult = { requestId: string; ok: boolean; issue?: Issue };
+export type CommandResult = {
+  requestId: string;
+  ok: boolean;
+  issue?: Issue;
+  result?: unknown;
+};
 export interface WorkspaceBackend {
   getSnapshot(): WorkspaceState;
   subscribe(listener: () => void): () => void;
@@ -180,6 +197,18 @@ export function createFixtureBackend(delayMs = 140): WorkspaceBackend {
     async dispatch(command) {
       const id = `fixture-${++requestSequence}`;
       switch (command.kind) {
+        case "native.command":
+          return result(
+            id,
+            false,
+            fail(
+              id,
+              command.kind,
+              "FIXTURE_MODE",
+              "테스트 모드에서는 실제 제어 명령을 실행하지 않습니다.",
+              "실사용 앱을 여세요.",
+            ),
+          );
         case "audio.select": {
           if (!state.devices.some((device) => device.id === command.id)) {
             return result(
@@ -422,4 +451,11 @@ export function createFixtureBackend(delayMs = 140): WorkspaceBackend {
     },
   };
 }
-export const backend = createFixtureBackend();
+const fixtureMode =
+  typeof window === "undefined" ||
+  new URLSearchParams(window.location.search).get("mode") === "fixture" ||
+  (import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get("mode") !== "native");
+export const backend = fixtureMode
+  ? createFixtureBackend()
+  : createLiveBackend();

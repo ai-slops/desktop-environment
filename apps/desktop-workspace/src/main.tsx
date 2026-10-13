@@ -11,6 +11,13 @@ import {
 import "dockview-react/dist/styles/dockview.css";
 import "./style.css";
 import {
+  NativeAudio,
+  NativeCablePanel,
+  NativeWindows,
+  NativeJobLog,
+} from "./native-panels.tsx";
+import type { NativeCommand } from "./native-protocol.ts";
+import {
   backend,
   resolvedDeviceId,
   sameOutput,
@@ -37,6 +44,7 @@ const phaseLabel: Record<Phase, string> = {
   starting: "초기화 중",
   running: "테스트 실행 중",
   failed: "실패",
+  recovering: "장치 복구 중",
 };
 
 function Status({ phase }: { phase: Phase }) {
@@ -143,6 +151,8 @@ function DeviceChoices({
 }
 function AudioPanel(props: IDockviewPanelProps) {
   const state = useWorkspace();
+  if (state.mode === "native")
+    return <NativePanel type="audio" dockProps={props} />;
   const audio = state.audio;
   const name = (id: string) =>
     state.devices.find((device) => device.id === id)?.name ?? id;
@@ -238,6 +248,8 @@ function AudioPanel(props: IDockviewPanelProps) {
 }
 function CablePanel(props: IDockviewPanelProps) {
   const state = useWorkspace();
+  if (state.mode === "native")
+    return <NativePanel type="cable" dockProps={props} />;
   const cable = state.cable;
   const invalid = resolvedDeviceId(cable.output) === "cable";
   return (
@@ -318,6 +330,8 @@ function CablePanel(props: IDockviewPanelProps) {
 }
 function WindowsPanel(props: IDockviewPanelProps) {
   const state = useWorkspace();
+  if (state.mode === "native")
+    return <NativePanel type="windows" dockProps={props} />;
   const selectedCount = state.windows.filter(
     (window) => window.selected,
   ).length;
@@ -457,7 +471,8 @@ function DiagnosticsPanel(props: IDockviewPanelProps) {
         <div className="empty-state">
           <strong>실행 기록이 없습니다.</strong>
           <p>
-            테스트 작업을 시작하면 요청 ID, 단계, 오류 원인이 여기에 표시됩니다.
+            {state.mode === "fixture" ? "테스트 작업" : "작업"}을 시작하면 요청
+            ID, 단계, 오류 원인이 여기에 표시됩니다.
           </p>
         </div>
       ) : (
@@ -480,6 +495,60 @@ function DiagnosticsPanel(props: IDockviewPanelProps) {
               <code>{trace.id}</code>
             </div>
           ))}
+        </div>
+      )}
+      {state.native && (
+        <div className="native-job-records">
+          <small>설정 폴더: {state.native.configRoot}</small>
+          <h2>오디오</h2>
+          <NativeJobLog job={state.native.jobs.audio} />
+          <h2>케이블</h2>
+          <NativeJobLog job={state.native.jobs.cable} />
+          {state.native.jobs.mirrors.map((job, index) => (
+            <div key={index}>
+              <h2>미러링 {index + 1}</h2>
+              <NativeJobLog job={job} />
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+function NativePanel({
+  type,
+  dockProps,
+}: {
+  type: "audio" | "cable" | "windows";
+  dockProps: IDockviewPanelProps;
+}) {
+  const state = useWorkspace();
+  const invoke = (command: NativeCommand) =>
+    backend.dispatch({ kind: "native.command", command });
+  const label = `${titles[type]} 패널`;
+  return (
+    <section className="panel-body" aria-label={label}>
+      <PanelTools {...dockProps} />
+      {state.native ? (
+        <fieldset
+          className="native-content"
+          disabled={state.connection !== "connected" || !!state.pendingCommands}
+        >
+          {type === "audio" ? (
+            <NativeAudio data={state.native} invoke={invoke} />
+          ) : type === "cable" ? (
+            <NativeCablePanel data={state.native} invoke={invoke} />
+          ) : (
+            <NativeWindows data={state.native} invoke={invoke} />
+          )}
+        </fieldset>
+      ) : (
+        <div className="empty-state">
+          <h1>{titles[type]}</h1>
+          <p>실사용 장치 서비스에 연결하고 있습니다.</p>
+          <p>
+            연결이 끊긴 경우 Desktop Workspace 실행 스크립트로 앱을 시작하세요.
+          </p>
         </div>
       )}
     </section>
@@ -605,8 +674,38 @@ function Workspace() {
             <span>데스크톱 도구 · 통합 작업 공간</span>
           </div>
         </div>
-        <span className="fixture-badge">TEST WORKSPACE</span>
+        <span
+          className={`fixture-badge ${state.mode === "native" ? "native-badge" : ""}`}
+        >
+          {state.mode === "fixture" ? "TEST WORKSPACE" : "DESKTOP WORKSPACE"}
+        </span>
         <div className="workspace-actions">
+          {state.mode === "native" && (
+            <>
+              <button
+                disabled={state.connection !== "connected"}
+                onClick={() =>
+                  void backend.dispatch({
+                    kind: "native.command",
+                    command: { kind: "stop_all" },
+                  })
+                }
+              >
+                모든 작업 중지
+              </button>
+              <button
+                disabled={state.connection !== "connected"}
+                onClick={() =>
+                  void backend.dispatch({
+                    kind: "native.command",
+                    command: { kind: "shutdown" },
+                  })
+                }
+              >
+                앱 종료
+              </button>
+            </>
+          )}
           <button onClick={() => split("right")}>좌우 분할</button>
           <button onClick={() => split("bottom")}>상하 분할</button>
           <button
@@ -620,12 +719,47 @@ function Workspace() {
       </header>
       <div className="mode-banner">
         <span className="mode-dot" />
-        <strong>테스트 모드</strong>
+        <strong>
+          {state.mode === "fixture" ? "테스트 모드" : "실사용 모드"}
+        </strong>
         <span>
-          가상 장치와 가상 창을 사용합니다. 실제 오디오·Windows 설정은 변경하지
-          않습니다.
+          {state.mode === "fixture"
+            ? "가상 장치와 가상 창을 사용합니다. 실제 오디오·Windows 설정은 변경하지 않습니다."
+            : state.connection === "connected"
+              ? "실제 장치에 연결됐습니다. 시작·적용 버튼을 눌러야 작업이 실행됩니다. 탭을 닫아도 작업은 유지됩니다."
+              : "실사용 서비스에 연결 중이거나 연결이 끊겼습니다. 실제 작업의 시작 버튼은 비활성화됩니다."}
         </span>
+        {state.mode === "native" && state.connection === "connected" && (
+          <button
+            onClick={() =>
+              void backend.dispatch({
+                kind: "native.command",
+                command: { kind: "settings.reload" },
+              })
+            }
+          >
+            설정 다시 읽기
+          </button>
+        )}
       </div>
+      {!!state.pendingCommands && (
+        <p className="mode-banner" role="status">
+          명령 처리 중…
+        </p>
+      )}
+      {state.serviceIssue && (
+        <div className="service-error" role="alert">
+          <strong>{state.serviceIssue.message}</strong>
+          <small>
+            {state.serviceIssue.code} · 요청 {state.serviceIssue.requestId}
+          </small>
+        </div>
+      )}
+      {!!state.native?.errors.length && (
+        <div className="service-error" role="alert">
+          {state.native.errors.join(" · ")}
+        </div>
+      )}
       <div className="workspace-body">
         <nav className="activity-bar" aria-label="제어 패널">
           {(Object.keys(titles) as PanelId[]).map((id, index) => (
@@ -651,10 +785,22 @@ function Workspace() {
         </main>
       </div>
       <footer className="status-bar">
-        <span>● Fixture backend</span>
         <span>
-          오디오 {phaseLabel[state.audio.phase]} · 케이블{" "}
-          {phaseLabel[state.cable.phase]}
+          {state.mode === "fixture"
+            ? "● Fixture backend"
+            : state.connection === "connected"
+              ? "● 장치 서비스 연결됨"
+              : "● 서비스 연결 안 됨"}
+        </span>
+        <span>
+          오디오{" "}
+          {state.mode === "native" && state.audio.phase === "running"
+            ? "실행 중"
+            : phaseLabel[state.audio.phase]}{" "}
+          · 케이블{" "}
+          {state.mode === "native" && state.cable.phase === "running"
+            ? "실행 중"
+            : phaseLabel[state.cable.phase]}
         </span>
         <span className="layout-notice" role="status">
           {notice}
