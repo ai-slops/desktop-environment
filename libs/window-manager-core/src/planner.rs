@@ -194,6 +194,8 @@ pub struct Plan {
     pub scope: BTreeSet<Id>,
     pub generations: BTreeMap<Id, u64>,
     pub expected: BTreeMap<Id, ObservedWindow>,
+    /// Undo targets are separate from the current observations that authorize execution.
+    pub restoration: BTreeMap<Id, ObservedWindow>,
     pub presentations: BTreeMap<Id, Presentation>,
     pub desired: BTreeMap<Id, Desired>,
     pub mutations: Vec<Mutation>,
@@ -523,6 +525,7 @@ fn plan_pass(
         scope: request.scope.clone(),
         generations,
         expected: BTreeMap::new(),
+        restoration: BTreeMap::new(),
         presentations: BTreeMap::new(),
         desired: BTreeMap::new(),
         mutations: Vec::new(),
@@ -1232,6 +1235,23 @@ fn plan_pass(
 }
 
 impl Plan {
+    #[must_use]
+    pub fn geometry_matches(&self, mutation: &Mutation, current: &ObservedWindow) -> bool {
+        mutation.geometry.is_none_or(|frame| {
+            current.frame == frame
+                && self.desired.get(&mutation.window).map_or_else(
+                    || {
+                        self.restoration
+                            .get(&mutation.window)
+                            .or_else(|| self.expected.get(&mutation.window))
+                            .is_some_and(|target| {
+                                current.client == target.client && current.dpi == target.dpi
+                            })
+                    },
+                    |desired| desired.geometry_matches(current),
+                )
+        })
+    }
     pub fn revalidate(
         &self,
         config: &Configuration,
@@ -1310,7 +1330,6 @@ impl Plan {
                 || effective_protection(config, runtime, window, None, None).maintain_visible
         });
         for mutation in &component.mutations {
-            let prior = &self.expected[&mutation.window];
             let current = snapshot.windows.get(&mutation.window).ok_or_else(|| {
                 Error::new(
                     ErrorCode::StaleBinding,
@@ -1325,13 +1344,7 @@ impl Plan {
                     &mutation.window,
                 ));
             }
-            let geometry_matches = mutation.geometry.is_none_or(|frame| {
-                current.frame == frame
-                    && self.desired.get(&mutation.window).map_or_else(
-                        || current.client == prior.client && current.dpi == prior.dpi,
-                        |desired| desired.geometry_matches(current),
-                    )
-            });
+            let geometry_matches = self.geometry_matches(mutation, current);
             if !geometry_matches
                 || mutation.visible.is_some_and(|visible| current.visible != visible)
                 || mutation.show_state.is_some_and(|state| current.show_state != state)
@@ -1450,6 +1463,9 @@ impl Plan {
             )
         });
         result.mutation_slots.retain(|_, id| scope.contains(id));
+        result
+            .restoration
+            .retain(|window, _| result.mutations.iter().any(|mutation| &mutation.window == window));
         result.domains = result
             .domains
             .iter()

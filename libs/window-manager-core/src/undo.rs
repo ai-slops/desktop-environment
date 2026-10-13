@@ -90,6 +90,7 @@ impl UndoRecord {
         result.config_revision = config.revision;
         result.generations = self.generations.clone();
         result.expected = self.after.clone();
+        result.restoration.clear();
         result.presentations = self.prior_presentations.clone();
         result.desired.clear();
         result.mutations.clear();
@@ -203,6 +204,9 @@ impl UndoRecord {
                 }
             }
             if geometry.is_some() || visible.is_some() || show_state.is_some() {
+                if geometry.is_some() {
+                    result.restoration.insert(window.clone(), prior.clone());
+                }
                 result.mutations.push(Mutation {
                     window: window.clone(),
                     binding: current.binding.clone(),

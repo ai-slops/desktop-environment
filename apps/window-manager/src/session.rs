@@ -30,6 +30,9 @@ enum SessionCommand {
         expected_revision: u64,
         configuration: Configuration,
     },
+    DiscardPreview {
+        plan: Id,
+    },
     Simulate {
         input: window_manager_core::Simulation,
     },
@@ -277,6 +280,9 @@ impl Session {
         command.authorize(self.control, self.providers)?;
         match command {
             SessionCommand::Configuration {} => Ok(json!(self.config)),
+            SessionCommand::DiscardPreview { plan } => {
+                Ok(json!({"discarded":self.plans.remove(&plan).is_some()}))
+            }
             SessionCommand::Configure { expected_revision, mut configuration } => {
                 if expected_revision != self.config.revision
                     || configuration.revision != expected_revision
@@ -541,7 +547,8 @@ impl Session {
             .ok_or_else(unavailable)?;
         let token = new_id("preview");
         // Serialize authored domain data only. Plan.expected and mutations contain native bindings.
-        let response = json!({"plan":token,"request":plan.id,"revision":plan.config_revision,"topology_revision":plan.topology_revision,"scope":plan.scope,"mode":plan.mode,"planning_us":plan.planning_us,"domains":plan.domains,"blocked":plan.blocked,"desired":plan.desired,"diagnostics":plan.diagnostics,"impact":plan.impact,"idempotent":plan.idempotent});
+        let restored: BTreeMap<_,_> = plan.restoration.iter().map(|(window,observed)| (window,json!({"window":window,"frame":observed.frame,"slot":plan.mutation_slots.get(window)}))).collect();
+        let response = json!({"plan":token,"request":plan.id,"revision":plan.config_revision,"topology_revision":plan.topology_revision,"scope":plan.scope,"mode":plan.mode,"planning_us":plan.planning_us,"domains":plan.domains,"blocked":plan.blocked,"desired":plan.desired,"restored":restored,"diagnostics":plan.diagnostics,"impact":plan.impact,"idempotent":plan.idempotent});
         self.plans.insert(token, plan);
         Ok(response)
     }

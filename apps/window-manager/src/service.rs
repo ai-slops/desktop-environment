@@ -639,17 +639,7 @@ impl State {
                 outcome.settled =
                     self.snapshot.windows.get(&mutation.window).is_some_and(|observed| {
                         observed.binding == mutation.binding
-                            && mutation.geometry.is_none_or(|frame| {
-                                observed.frame == frame
-                                    && plan.desired.get(&mutation.window).map_or_else(
-                                        || {
-                                            observed.dpi == plan.expected[&mutation.window].dpi
-                                                && observed.client
-                                                    == plan.expected[&mutation.window].client
-                                        },
-                                        |desired| desired.geometry_matches(observed),
-                                    )
-                            })
+                            && plan.geometry_matches(mutation, observed)
                             && mutation.visible.is_none_or(|visible| observed.visible == visible)
                             && mutation.show_state.is_none_or(|state| observed.show_state == state)
                             && (!plan

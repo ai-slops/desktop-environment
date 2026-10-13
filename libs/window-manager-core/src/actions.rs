@@ -152,6 +152,7 @@ pub fn plan_window_action(
             runtime.generations.get(&action.slot).copied().unwrap_or_default(),
         )]),
         expected: BTreeMap::from([(action.window.clone(), observed.clone())]),
+        restoration: BTreeMap::new(),
         presentations: runtime
             .presentations
             .iter()

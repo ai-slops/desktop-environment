@@ -268,8 +268,10 @@ impl Drop for WindowSession {
 mod tests {
     use super::*;
     fn powershell() -> Result<std::path::PathBuf> {
-        Ok(std::path::PathBuf::from(std::env::var_os("SystemRoot").context("Windows system directory")?)
-            .join("System32/WindowsPowerShell/v1.0/powershell.exe"))
+        Ok(std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").context("Windows system directory")?,
+        )
+        .join("System32/WindowsPowerShell/v1.0/powershell.exe"))
     }
     #[test]
     fn failed_child_preserves_final_cause_and_stop_is_bounded() -> Result<()> {

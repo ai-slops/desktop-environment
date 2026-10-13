@@ -111,6 +111,7 @@ pub struct Controller {
     session: Option<WindowSession>,
     wm: Value,
     sequence: u64,
+    last_wm_poll: std::time::Instant,
     pub shutdown: bool,
 }
 
@@ -157,6 +158,7 @@ impl Controller {
             session: None,
             wm: json!({"connected":false,"configuration":null,"inventory":[],"snapshot":null,"monitors":null,"error":null,"lastResult":null}),
             sequence: 0,
+            last_wm_poll: std::time::Instant::now(),
             shutdown: false,
         }
     }
@@ -294,7 +296,19 @@ impl Controller {
         self.poll()?;
         let mut result = Value::Null;
         match command {
-            Command::Snapshot {} => {}
+            Command::Snapshot {} => {
+                if self.session.is_some()
+                    && self.last_wm_poll.elapsed() >= std::time::Duration::from_secs(2)
+                {
+                    self.last_wm_poll = std::time::Instant::now();
+                    if let Ok(snapshot) = self.wm_request(&json!({"kind":"snapshot"})) {
+                        self.wm["snapshot"] = snapshot;
+                    } else {
+                        self.session = None;
+                        self.wm["connected"] = json!(false);
+                    }
+                }
+            }
             Command::Refresh {} => {
                 self.refresh()?;
                 if self.session.is_some() {
@@ -584,6 +598,13 @@ impl Controller {
                 let kind = command["kind"].as_str().context("창 명령 종류가 없습니다.")?.to_owned();
                 if kind.starts_with("provider") {
                     bail!("알림 제공자 연결은 이 UI 세션에 허용되지 않습니다.");
+                }
+                if matches!(
+                    kind.as_str(),
+                    "preview" | "undo" | "navigate" | "recall" | "window_action" | "collapse"
+                ) && let Some(plan) = self.wm["lastResult"]["plan"].as_str().map(str::to_owned)
+                {
+                    self.wm_request(&json!({"kind":"discard_preview","plan":plan}))?;
                 }
                 result = self.wm_request(&command)?;
                 self.wm["lastResult"] = result.clone();

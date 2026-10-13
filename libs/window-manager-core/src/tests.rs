@@ -713,6 +713,14 @@ fn native_undo_is_scoped_and_revalidates_new_owners_and_manual_changes() -> Resu
     let reverse = undo.reverse(&config, &runtime, &after)?;
     assert_eq!(reverse.mutations[0].geometry, Some(snapshot.windows["preview"].frame));
     assert!(reverse.mutations.iter().all(|mutation| !mutation.focus));
+    assert_ne!(reverse.expected["preview"].client, snapshot.windows["preview"].client);
+    let restored = settled_snapshot(&reverse, &after);
+    assert!(reverse.settled_scope(&reverse.scope, &config, &runtime, &restored).is_ok());
+    let mut wrong_client = restored;
+    if let Some(window) = wrong_client.windows.get_mut("preview") {
+        window.client = after.windows["preview"].client;
+    }
+    assert!(reverse.settled_scope(&reverse.scope, &config, &runtime, &wrong_client).is_err());
     let mut moved = after.clone();
     if let Some(window) = moved.windows.get_mut("preview") {
         window.frame.x += 1;
