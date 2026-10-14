@@ -157,7 +157,9 @@ fn offline_stream_error_identifies_exclusive_use_and_preserves_native_error() {
         "capture",
         &format,
     );
-    assert!(error.to_string().contains("독점 사용 중"));
+    assert!(error.to_string().contains("독점 사용"));
+    assert!(error.to_string().contains("Loopback"));
+    assert!(!error.to_string().contains("장치가 독점 사용 중"));
     assert!(error.to_string().contains("0x8889000A"));
     assert_eq!(
         error.downcast_ref::<windows::core::Error>().map(windows::core::Error::code),
@@ -170,6 +172,74 @@ fn offline_stream_error_identifies_exclusive_use_and_preserves_native_error() {
     );
     assert!(!error.to_string().contains("독점 사용 중"));
     assert!(error.to_string().contains("render Initialize failed"));
+}
+
+#[test]
+#[ignore = "Explicit host diagnosis: initializes selected streams without starting playback"]
+fn native_cable_initialization_diagnosis() -> Result<()> {
+    let _com = ComGuard::new()?;
+    let selector = std::env::var("DESKTOP_AUDIO_SOURCE").context("Set DESKTOP_AUDIO_SOURCE")?;
+    let source = select_output_device(&selector)?;
+    let device = output_device_by_id(&source.id)?;
+    for (name, flags) in [
+        ("loopback-conversion", CAPTURE_STREAM_FLAGS),
+        ("loopback-mix-only", AUDCLNT_STREAMFLAGS_LOOPBACK),
+    ] {
+        match open_capture_with_flags(&device, false, flags) {
+            Ok(stream) => println!("{name}: initialized {}", stream.format.describe()),
+            Err(error) => println!("{name}: {error:#}"),
+        }
+    }
+    let endpoints = WindowsAudioBackend.endpoints()?;
+    let cable = installed_cables::discover(&endpoints)
+        .into_iter()
+        .find(|cable| cable.playback_id == source.id)
+        .context("No unambiguous installed cable pair")?;
+    let capture_device = output_device_by_id(&cable.capture_id)?;
+    let capture = open_capture_with_flags(&capture_device, true, RENDER_STREAM_FLAGS)?;
+    println!("paired recording endpoint: initialized {}", capture.format.describe());
+    if let Ok(target) = std::env::var("DESKTOP_AUDIO_TARGET") {
+        let target = select_output_device(&target)?;
+        let _render = open_render_client(&output_device_by_id(&target.id)?, &capture.format)?;
+        println!("target {}: initialized without playback", target.friendly_name);
+    }
+    Ok(())
+}
+
+#[test]
+fn offline_cable_fallback_requires_native_conflict_and_unique_matching_pair() {
+    let endpoints = [
+        Endpoint {
+            id: "render".into(),
+            name: "CABLE Input (VB-Audio Virtual Cable)".into(),
+            flow: EndpointFlow::Playback,
+            is_default: false,
+        },
+        Endpoint {
+            id: "capture".into(),
+            name: "CABLE Output (VB-Audio Virtual Cable)".into(),
+            flow: EndpointFlow::Capture,
+            is_default: false,
+        },
+    ];
+    let conflict = anyhow::Error::new(windows::core::Error::from_hresult(AUDCLNT_E_DEVICE_IN_USE))
+        .context("capture initialization");
+    assert_eq!(
+        recording_fallback(&conflict, "render", &endpoints).map(|cable| cable.capture_id),
+        Some("capture".into())
+    );
+    assert!(recording_fallback(&conflict, "another-render", &endpoints).is_none());
+    assert!(recording_fallback(&conflict, "render", &endpoints[..1]).is_none());
+    let mut ambiguous = endpoints.to_vec();
+    ambiguous.push(endpoints[1].clone());
+    assert!(recording_fallback(&conflict, "render", &ambiguous).is_none());
+    let invalid = anyhow::Error::new(windows::core::Error::from_hresult(
+        windows::Win32::Foundation::E_INVALIDARG,
+    ));
+    assert!(recording_fallback(&invalid, "render", &endpoints).is_none());
+    assert!(
+        recording_fallback(&anyhow::anyhow!("text 0x8889000A"), "render", &endpoints).is_none()
+    );
 }
 
 struct Tone {

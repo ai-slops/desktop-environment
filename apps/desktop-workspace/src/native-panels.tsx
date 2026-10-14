@@ -77,8 +77,8 @@ export function NativeJobLog({ job }: { job: NativeJob }) {
           <pre>{job.error}</pre>
           {job.error.includes("0x8889000A") && (
             <p>
-              다른 앱이 장치를 독점 사용 중입니다. 해당 앱에서 독점 사용을
-              해제하거나 공유 모드로 바꾼 뒤 다시 시작하세요.
+              장치 사용 충돌 또는 루프백 제한입니다. 독점 모드 설정과 가상
+              케이블의 Loopback 지원을 확인하세요.
             </p>
           )}
         </div>

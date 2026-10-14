@@ -139,8 +139,7 @@ pub fn check_output_audio_route(source_selector: &str, target_selector: &str) ->
     );
     let source_device = output_device_by_id(&source.id)?;
     let target_device = output_device_by_id(&target.id)?;
-    let capture = open_capture(&source_device, false)
-        .with_context(|| format!("failed to open loopback capture on {}", source.friendly_name))?;
+    let capture = open_source_capture(&source, &source_device, false)?;
     info!("Source mix format: {}", capture.format.describe());
     let target_client: IAudioClient = unsafe { target_device.Activate(CLSCTX_ALL, None) }?;
     let target_format = WaveFormatOwned::from_mix_format(&target_client)?;
@@ -245,9 +244,8 @@ fn run_audio_session(
     let source_device = output_device_by_id(&source.id)?;
     let target_device = output_device_by_id(&target.id)?;
 
-    let capture_stream = open_capture(&source_device, control.is_some())
-        .with_context(|| format!("failed to open loopback capture on {}", source.friendly_name))?;
-    debug!("Source loopback mix format={}", capture_stream.format.describe());
+    let capture_stream = open_source_capture(&source, &source_device, control.is_some())?;
+    debug!("Source capture mix format={}", capture_stream.format.describe());
 
     let render_stream = open_render_client(&target_device, &capture_stream.format)
         .with_context(|| format!("failed to open render client on {}", target.friendly_name))?;
@@ -391,6 +389,59 @@ fn open_loopback_capture(device: &IMMDevice) -> Result<AudioCaptureStream> {
 }
 
 fn open_capture(device: &IMMDevice, float_samples: bool) -> Result<AudioCaptureStream> {
+    open_capture_with_flags(device, float_samples, CAPTURE_STREAM_FLAGS)
+}
+
+fn recording_fallback(
+    error: &anyhow::Error,
+    source_id: &str,
+    endpoints: &[Endpoint],
+) -> Option<Cable> {
+    if error
+        .downcast_ref::<windows::core::Error>()
+        .is_none_or(|error| error.code() != AUDCLNT_E_DEVICE_IN_USE)
+    {
+        return None;
+    }
+    installed_cables::discover(endpoints).into_iter().find(|cable| cable.playback_id == source_id)
+}
+
+fn open_source_capture(
+    source: &AudioOutputDevice,
+    device: &IMMDevice,
+    float_samples: bool,
+) -> Result<AudioCaptureStream> {
+    let loopback_error = match open_capture(device, float_samples) {
+        Ok(capture) => return Ok(capture),
+        Err(error) => error,
+    };
+    // A virtual cable has a separate recording endpoint carrying its input signal.
+    // Only an unambiguous recognized pair may replace a rejected render loopback.
+    let endpoints = WindowsAudioBackend.endpoints().unwrap_or_default();
+    if let Some(cable) = recording_fallback(&loopback_error, &source.id, &endpoints) {
+        let name = endpoints
+            .iter()
+            .find(|endpoint| endpoint.id == cable.capture_id)
+            .map_or(cable.capture_id.as_str(), |endpoint| endpoint.name.as_str());
+        let capture=(|| {
+            let recording=output_device_by_id(&cable.capture_id)?;
+            open_capture_with_flags(&recording,float_samples,RENDER_STREAM_FLAGS)
+        })().with_context(||format!("failed to open paired recording endpoint {name}; original loopback error: {loopback_error:#}"))?;
+        info!(
+            "Loopback rejected on {} (0x8889000A); capturing its paired recording endpoint {} in shared mode",
+            source.friendly_name, name
+        );
+        return Ok(capture);
+    }
+    Err(loopback_error)
+        .with_context(|| format!("failed to open loopback capture on {}", source.friendly_name))
+}
+
+fn open_capture_with_flags(
+    device: &IMMDevice,
+    float_samples: bool,
+    flags: u32,
+) -> Result<AudioCaptureStream> {
     let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }?;
     let mut format = WaveFormatOwned::from_mix_format(&client)?;
     if float_samples {
@@ -400,7 +451,7 @@ fn open_capture(device: &IMMDevice, float_samples: bool) -> Result<AudioCaptureS
     unsafe {
         client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            CAPTURE_STREAM_FLAGS,
+            flags,
             ROUTE_BUFFER_DURATION,
             0,
             format.as_ptr(),
@@ -440,7 +491,7 @@ fn stream_initialization_error(
 ) -> anyhow::Error {
     let message = if error.code() == AUDCLNT_E_DEVICE_IN_USE {
         format!(
-            "{stream} Initialize: 오디오 장치가 독점 사용 중입니다 (AUDCLNT_E_DEVICE_IN_USE, 0x8889000A). 장치를 사용하는 앱을 공유 모드로 전환하거나 해당 앱의 장치 사용을 중지한 뒤 다시 시작하세요. format {}",
+            "{stream} Initialize: 장치 또는 루프백 스트림을 열 수 없습니다 (AUDCLNT_E_DEVICE_IN_USE, 0x8889000A). 다른 앱의 독점 사용과 가상 케이블의 Loopback 지원·설정을 확인하세요. format {}",
             format.describe()
         )
     } else {

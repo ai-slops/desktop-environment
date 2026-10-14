@@ -43,6 +43,22 @@ Manual playback/recording pairing supports other installed cable drivers.
 
 ## Backend boundary
 
+If a recognized VB-CABLE playback endpoint rejects shared loopback with
+`AUDCLNT_E_DEVICE_IN_USE` (`0x8889000A`), the router tries that cable's uniquely
+matched recording endpoint in shared mode without the loopback flag. For example,
+`CABLE Output` carries the signal entering `CABLE Input` as described in the
+[VB-CABLE manual](https://vb-audio.com/Cable/VBCABLE_ReferenceManual.pdf).
+The log identifies this path. Physical outputs, ambiguous/missing cable pairs and
+other error codes never select a different capture device. If the paired recording
+endpoint also fails, its cause and the original loopback error are both preserved.
+This does not change driver settings, Windows defaults or other applications.
+
+`audio-output-router check-route <source> <target>` validates the same fallback
+without starting streams. The opt-in `native_cable_initialization_diagnosis` test
+compares raw loopback and paired recording initialization on the selected host
+devices using `DESKTOP_AUDIO_SOURCE` and optional `DESKTOP_AUDIO_TARGET`. Unlike
+signal/CPU-load acceptance tests, this diagnostic does not generate or play audio.
+
 `audio-cable-core` owns device descriptors, settings, route controls and gain
 processing, without Windows or VB-CABLE dependencies. `AudioBackend` supplies
 endpoint discovery, cable pairing, setup links and monitoring. The Windows
