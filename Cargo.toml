@@ -5,6 +5,7 @@ members = [
     "libs/audio-cable-core",
     "apps/desktop-control",
     "apps/desktop-workspace-host",
+    "apps/desktop-workspace",
     "libs/desktop-workspace-service",
     "apps/audio-output-router",
     "apps/display-relay",

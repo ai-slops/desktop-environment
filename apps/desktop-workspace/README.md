@@ -1,27 +1,42 @@
 # Desktop Workspace
 
-Local web control panels for Desktop Control, Audio Cable, and Window Manager.
+Installed desktop control panels for Desktop Control, Audio Cable, and Window Manager.
 Production controls existing Windows adapters through a Rust host. Mirroring
 video remains in separate native display-relay windows.
 
 ## Start on Windows
 
-Double-click `start-desktop-workspace.cmd` in the repository root. The first run
-builds missing binaries/assets and needs Rust, Node.js 22.12+ and pnpm. Later runs
-reuse prepared files. Open <http://127.0.0.1:4178> and allow popups for detached panels.
+Run `just desktop-workspace-install`, then `just desktop-workspace`, or double-click
+`start-desktop-workspace.cmd`. The native EXE has Windows' normal title bar and
+borders, with no browser tabs, address bar or application menu. Drag a panel tab
+outside all workspace windows and release to create another native window.
+Installation needs Rust, Node.js 22.12+ and pnpm; the installed app bundles its
+runtime and needs none of those build tools to run.
 
 ```powershell
-# Close the existing workspace with 앱 종료 before preparing updated source.
-.\tools\start-desktop-workspace.ps1 -Prepare
-.\tools\start-desktop-workspace.ps1 -NoBrowser
-.\tools\stop-desktop-workspace.ps1
+just desktop-workspace-install  # safe while UI windows are open
+just desktop-workspace
+just desktop-workspace-daemon   # start only the background service
+just desktop-workspace-stop     # explicitly stop service and its jobs
 ```
 
-`-BinariesDirectory` accepts a folder containing desktop-workspace-host.exe,
-window-manager.exe and display-relay.exe. `-Port` and `-ConfigRoot` allow an isolated
-instance. Runtime copies and server logs are in `target/desktop-workspace/runs`;
-builds use a separate directory to avoid overwriting executables in use. Identical
-binary versions share a cached runtime rather than copying them on every launch.
+Default installation is `%LOCALAPPDATA%/Programs/DesktopWorkspace`, or
+`$XDG_DATA_HOME/desktop-workspace` when explicitly configured. The stable
+`DesktopWorkspace.exe` launcher reads `current.json` and starts an immutable
+version under `versions/`. Building writes only `target/desktop-workspace-build`;
+installing a new version changes the next launch without replacing active images.
+Existing daemons/jobs remain on their running version until explicitly stopped.
+No installation step stops them. Windows is currently the supported native target.
+
+`-Port`, `-ConfigRoot` and `-InstallRoot` allow separate instances. Settings keep
+their existing paths; daemon logs are under the settings directory's `daemon/`.
+The packaged UI launches a detached daemon, then quits independently when its
+windows close. Reopening the UI reconnects to that daemon. It is a per-user session
+daemon, not a privileged Windows system service; automatic boot/logon startup is
+not enabled. Use the panel/settings menu to stop the service explicitly.
+
+The browser development path remains available with `-Development` (or explicit
+`-BinariesDirectory`); it is not the default installed launch.
 
 Existing settings are read without conversion:
 
@@ -37,12 +52,14 @@ Stop owned outputs and use **설정 다시 읽기** before saving after an exter
 ## Panels and windows
 
 Drag tabs onto tab strips to combine, or onto panel edges to split. Drag separators
-to resize. **새 창으로 이동** detaches a panel; **주 창으로 합치기** returns it. The
+to resize. In the native EXE, dragging a tab outside the windows detaches it without
+a separate button. In the browser, **새 창으로 이동** detaches a panel. The
 activity bar reopens closed panels. Selections, unsaved window edits, previews and
 jobs survive panel moves within one workspace instance.
 
 Closing panels or browser tabs preserves native jobs. Use **전체 작업 중지** or
-**앱 종료** to stop them. A crashed Rust host terminates its audio/mirror children
+**서비스 중지** to stop them. Closing the EXE's UI windows also preserves jobs.
+A crashed Rust host terminates its audio/mirror children
 through Windows Job Objects; window recovery uses the existing independent watchdog.
 The stop script can terminate a recorded broken server after checking PID/start time.
 
@@ -52,6 +69,11 @@ editor drafts reset on full reload. Independently launched pages do not exchange
 panel DOM or drafts. Native settings remain in files.
 
 ## Available controls
+
+Monitoring volume accepts direct fractional percentages such as 0.5%, 0.05% and
+0.01%. Press Enter or leave the input to apply; the slider's keyboard step is 0.01%.
+The existing DSP gain floor is -96 dB (approximately 0.001585%), and the UI shows
+the actual returned setting. Presets retain fractional gain rather than rounding.
 
 | Panel | Controls |
 | --- | --- |
@@ -81,6 +103,13 @@ pnpm test:native
 Vite at <http://127.0.0.1:4177> defaults to fixtures. Explicit `?mode=fixture` uses
 virtual devices; `?mode=native` requires a same-origin native server. Production
 4178 defaults to real service mode and never silently falls back to fixtures.
+
+Development/execution tests for this workflow run inside the dedicated test VM.
+`tools/test-desktop-workspace-vm.ps1` refuses physical hosts. It installs the prepared
+package outside build output, tests fractional values and real native tab tear-off,
+closes/reopens the UI around an active audio job, and runs native/DSP regressions.
+The scoped VM worker uses the checksum-verified source/package archive. Runtime
+cache reuse transfers source changes without recopying Electron on every run.
 
 Chrome tests use an isolated profile and mock native API effects. Native integration
 requires host/window-manager under `target/desktop-control/debug`: it queries real

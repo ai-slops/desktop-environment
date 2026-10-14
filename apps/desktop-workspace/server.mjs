@@ -116,6 +116,8 @@ async function body(request) {
 }
 export function createWorkspaceServer({
   bridge,
+  heartbeatMs = 1000,
+  uiInstallRoot,
   distRoot = fileURLToPath(new URL("./dist/", import.meta.url)),
 }) {
   const token = randomBytes(32).toString("hex");
@@ -191,7 +193,12 @@ export function createWorkspaceServer({
           });
           return;
         }
-        const result = await bridge.request(envelope.command, envelope.id);
+        const result =
+          bridge.error &&
+          envelope.command.kind === "shutdown" &&
+          Object.keys(envelope.command).length === 1
+            ? { id: envelope.id, ok: true, data: { result: { stopped: true } } }
+            : await bridge.request(envelope.command, envelope.id);
         jsonResponse(response, 200, result);
         if (envelope.command.kind === "shutdown" && result.ok)
           setTimeout(() => {
@@ -205,11 +212,26 @@ export function createWorkspaceServer({
         return;
       }
       const pathname = decodeURIComponent(url.pathname);
+      // UI updates advance independently of the daemon and its native jobs.
+      let staticRoot = distRoot;
+      if (uiInstallRoot) {
+        const current = JSON.parse(
+          await readFile(resolve(uiInstallRoot, "current.json"), "utf8"),
+        );
+        if (!/^v[a-f0-9]{24}$/.test(current.version))
+          throw new Error("Invalid installed UI version");
+        staticRoot = resolve(
+          uiInstallRoot,
+          "versions",
+          current.version,
+          "resources/app/dist",
+        );
+      }
       const filename = resolve(
-        distRoot,
+        staticRoot,
         pathname === "/" ? "index.html" : `.${pathname}`,
       );
-      if (!filename.startsWith(resolve(distRoot) + sep)) {
+      if (!filename.startsWith(resolve(staticRoot) + sep)) {
         response.writeHead(403);
         response.end();
         return;
@@ -242,8 +264,24 @@ export function createWorkspaceServer({
     }
   });
   let closing;
+  let heartbeatPending = false;
+  const heartbeat =
+    heartbeatMs > 0
+      ? setInterval(() => {
+          if (heartbeatPending || closing) return;
+          heartbeatPending = true;
+          void bridge
+            .request({ kind: "snapshot" })
+            .catch(() => {})
+            .finally(() => {
+              heartbeatPending = false;
+            });
+        }, heartbeatMs)
+      : undefined;
+  heartbeat?.unref();
   function close() {
     closing ??= (async () => {
+      clearInterval(heartbeat);
       await bridge.close();
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));
@@ -269,6 +307,7 @@ if (
 ) {
   let port = 4178;
   let configRoot;
+  let uiInstallRoot;
   let executable = fileURLToPath(
     new URL(
       `../../target/desktop-control/debug/desktop-workspace-host${process.platform === "win32" ? ".exe" : ""}`,
@@ -286,10 +325,11 @@ if (
         throw new Error("Invalid port");
     } else if (option === "--host-exe") executable = resolve(value);
     else if (option === "--config-root") configRoot = resolve(value);
+    else if (option === "--ui-install-root") uiInstallRoot = resolve(value);
     else throw new Error(`Unknown option ${option}`);
   }
   const bridge = new NativeBridge(executable, configRoot);
-  const workspace = createWorkspaceServer({ bridge });
+  const workspace = createWorkspaceServer({ bridge, uiInstallRoot });
   try {
     console.log(`Desktop Workspace ready: ${await workspace.listen(port)}`);
   } catch (error) {

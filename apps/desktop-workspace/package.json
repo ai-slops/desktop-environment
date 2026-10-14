@@ -9,10 +9,12 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4177 --strictPort",
     "start": "node server.mjs",
+    "desktop": "electron shell/main.cjs",
+    "package:desktop": "node package-desktop.mjs",
     "build": "tsc --noEmit && vite build",
     "test": "node --test src/workspace.test.ts server.test.mjs",
     "test:native": "node --test native.test.mjs",
-    "format:check": "prettier --check src tests *.ts *.json *.html *.mjs",
+    "format:check": "prettier --check src tests shell *.ts *.json *.html *.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
@@ -25,6 +27,7 @@
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "electron": "44.7.2",
     "prettier": "3.7.4",
     "typescript": "^5.9.3",
     "vite": "8.3.4"

@@ -4,6 +4,20 @@ Desktop Control, Audio Cable and Window Manager now have native service-backed
 web control panels. Tabs split, resize and detach into browser windows. Mirroring
 video stays in native display-relay windows. See [setup and available controls](../apps/desktop-workspace/README.md).
 
+The installed default is a dedicated Electron EXE with normal Windows decorations
+and compact control content. Its detached daemon owns the Rust host independently
+of UI windows. Native tab drag-end outside the application's content rectangles
+creates a popout through the same Dockview portal, preserving controller/editor
+state. Navigation and popouts are restricted to the local service origin; the
+renderer has no Node integration and exposes only narrow close/drag IPC operations.
+
+Installation separates a stable launcher, immutable hashed versions and persistent
+settings. Install/update does not replace running binaries or stop ongoing jobs.
+The daemon's next start uses the newly installed version; an existing daemon is
+reused so jobs can survive UI updates. The daemon reads the installed UI manifest
+for page requests, so reopened windows load updated controls without restarting jobs.
+No global service or login startup is added.
+
 ## Architecture
 
 ```mermaid
@@ -75,6 +89,9 @@ commands. Native applications remain available; full feature parity is not claim
   previews. User windows and audio are excluded.
 - Launcher: isolated start, reuse, shutdown and copied runtime binaries.
 
-These checks require no VM. Browser fixtures and idle inventory do not certify
+This development workflow performs execution tests in the owned test VM, including
+real mouse tear-off, daemon job survival, fractional UI persistence and signal
+attenuation at 0.5%/0.05%. Host operations are limited to editing and building.
+Browser fixtures and idle inventory do not certify
 audible routing or hardware capture/rendering. External application compatibility
 still needs per-app verification before opting into DPI transfer, hiding or show-state.

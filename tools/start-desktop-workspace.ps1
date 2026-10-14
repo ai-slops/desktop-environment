@@ -3,10 +3,26 @@ param(
     [switch]$Prepare,
     [switch]$NoBrowser,
     [string]$ConfigRoot,
-    [string]$BinariesDirectory
+    [string]$BinariesDirectory,
+    [string]$InstallRoot,
+    [ValidateSet('audio','cable','windows','diagnostics')] [string]$Panel,
+    [switch]$Development
 )
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+if ($Port -lt 1 -or $Port -gt 65535) { throw 'Port must be between 1 and 65535.' }
+if(!$Development -and !$BinariesDirectory){
+    if(!$InstallRoot){$InstallRoot=if($env:XDG_DATA_HOME){Join-Path $env:XDG_DATA_HOME 'desktop-workspace'}else{Join-Path $env:LOCALAPPDATA 'Programs\DesktopWorkspace'}}
+    $installed=Join-Path $InstallRoot 'DesktopWorkspace.exe'
+    if($Prepare -or !(Test-Path -LiteralPath $installed)){ & (Join-Path $PSScriptRoot 'install-desktop-workspace.ps1') -InstallRoot $InstallRoot }
+    $nativeArguments=@('--port',"$Port")
+    if($NoBrowser){$nativeArguments+='--daemon'}
+    if($ConfigRoot){$nativeArguments+=@('--config-root',('"'+[IO.Path]::GetFullPath($ConfigRoot).TrimEnd('\')+'"'))}
+    if($Panel){$nativeArguments+=@('--panel',$Panel)}
+    Start-Process -FilePath $installed -ArgumentList $nativeArguments -WindowStyle Hidden
+    Write-Output "Installed Desktop Workspace launched: $installed"
+    return
+}
 $web = Join-Path $repo 'apps\desktop-workspace'
 $work = Join-Path $repo 'target\desktop-workspace'
 $build = Join-Path $repo 'target\desktop-workspace-build'
@@ -24,7 +40,7 @@ function Native-State {
 $occupied = $false
 try { $null = Invoke-WebRequest "$url/api/bootstrap" -UseBasicParsing -TimeoutSec 2; $occupied = $true } catch { }
 if ($occupied) {
-    if ($Prepare) { throw 'Close the existing workspace with 앱 종료 before preparing a new build.' }
+    if ($Prepare) { throw 'Stop the development service with 서비스 중지 before preparing a new development build.' }
     $state = Native-State
     Write-Host "Desktop Workspace already running: $url"
     if (!$NoBrowser) { Start-Process $url }

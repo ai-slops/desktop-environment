@@ -19,8 +19,12 @@ Concrete utilities now included:
 ## Saved-settings GUI
 
 Double-click `start-desktop-workspace.cmd` for [Desktop Workspace](apps/desktop-workspace/README.md):
-the three control panels in one local web app, with dockable tabs, splits, popout
-windows and real Rust-backed audio, cable, mirroring and manual window controls.
+the three control panels in an installed native window, with dockable tabs, splits,
+drag-out windows and real Rust-backed audio, cable, mirroring and manual window controls.
+Run `just desktop-workspace-install` to install/update outside build outputs;
+closing the UI leaves background jobs running. `just desktop-workspace-stop`
+explicitly stops the daemon and its jobs. Fractional listening volume accepts 0.5%,
+0.05% and smaller values. See the linked guide for installation paths and VM testing.
 It reads existing settings and starts outputs only on explicit action. See
 [integration and test coverage](docs/desktop-workspace.md) for architecture and
 the advanced features that remain in the native GUI/CLI.
@@ -33,7 +37,7 @@ complete P1 acceptance/compatibility gate is still open. See the
 [window-manager guide and coverage](docs/window-manager.md) and the
 [provided specification](docs/window-management-system-specification.md).
 
-Run `just desktop-control` (or `mise run desktop-control`) to build both tools and open
+Run `just desktop-control-native` to build the legacy native tools and open
 the control panel. Choose audio outputs and a display, enable the tools you need,
 and save a named preset. You can load it later and start both tools with one click.
 The last saved settings are restored when the GUI opens; routing and mirroring

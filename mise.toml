@@ -16,7 +16,7 @@ run = "just desktop-control"
 
 [tasks.audio-cable]
 description = "Open the minimal virtual cable and quiet-monitoring GUI"
-run = "cargo run -p audio-cable"
+run = "just audio-cable"
 
 [tasks.audio-cable-build]
 description = "Build the standalone cable GUI without starting audio"

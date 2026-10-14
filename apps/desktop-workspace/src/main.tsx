@@ -10,6 +10,8 @@ import {
 } from "dockview-react";
 import "dockview-react/dist/styles/dockview.css";
 import "./style.css";
+import { VolumeControl } from "./volume.tsx";
+import { installTearOff } from "./shell.ts";
 import {
   NativeAudio,
   NativeCablePanel,
@@ -278,18 +280,9 @@ function CablePanel(props: IDockviewPanelProps) {
         onSelect={(id) => send({ kind: "cable.output", id })}
       />
       <div className="volume-control">
-        <label htmlFor="volume">
-          모니터링 볼륨 <output>{cable.volume}%</output>
-        </label>
-        <input
-          id="volume"
-          type="range"
-          min="0"
-          max="100"
+        <VolumeControl
           value={cable.volume}
-          onChange={(event) =>
-            send({ kind: "cable.volume", value: Number(event.target.value) })
-          }
+          commit={(value) => send({ kind: "cable.volume", value })}
         />
         <label className="check-label">
           <input
@@ -625,7 +618,13 @@ function Workspace() {
       setNotice("저장된 배치를 읽지 못해 기본 배치로 열었습니다.");
     }
     if (!restored) initialLayout(api);
+    const requestedPanel = new URLSearchParams(window.location.search).get(
+      "panel",
+    );
+    if (requestedPanel && Object.hasOwn(titles, requestedPanel))
+      api.getPanel(requestedPanel)?.api.setActive();
     subscriptions.current = [
+      installTearOff(api),
       api.onDidActivePanelChange((event) => setActive(event.panel?.id ?? "")),
       api.onDidLayoutChange(() => {
         // Persist the last complete grid; reopening a page must not spawn windows
@@ -665,7 +664,70 @@ function Workspace() {
     panel.api.moveTo({ group: reference, position });
   };
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${window.desktopShell ? "compact-shell" : ""}`}>
+      {window.desktopShell && (
+        <div className="compact-toolbar">
+          <details>
+            <summary>패널 · 설정</summary>
+            <div className="compact-menu">
+              {(Object.keys(titles) as PanelId[]).map((id) => (
+                <button key={id} onClick={() => openPanel(id)}>
+                  {titles[id]} 열기
+                </button>
+              ))}
+              <button onClick={() => split("right")}>좌우 분할</button>
+              <button onClick={() => split("bottom")}>상하 분할</button>
+              <button
+                onClick={() => {
+                  if (apiRef.current) initialLayout(apiRef.current);
+                }}
+              >
+                기본 배치
+              </button>
+              <button
+                onClick={() =>
+                  void backend.dispatch({
+                    kind: "native.command",
+                    command: { kind: "settings.reload" },
+                  })
+                }
+              >
+                설정 다시 읽기
+              </button>
+              <button
+                onClick={() =>
+                  void backend.dispatch({
+                    kind: "native.command",
+                    command: { kind: "stop_all" },
+                  })
+                }
+              >
+                모든 작업 중지
+              </button>
+              <button
+                onClick={() =>
+                  void backend.dispatch({
+                    kind: "native.command",
+                    command: { kind: "shutdown" },
+                  })
+                }
+              >
+                서비스 중지
+              </button>
+              <button onClick={() => window.desktopShell?.close()}>
+                UI 닫기 · 작업 유지
+              </button>
+            </div>
+          </details>
+          <span>
+            {state.pendingCommands
+              ? "처리 중…"
+              : state.connection === "connected"
+                ? "서비스 연결됨 · 창을 닫아도 작업 유지"
+                : "서비스 연결 중"}
+          </span>
+        </div>
+      )}
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark">▥</span>
@@ -702,7 +764,7 @@ function Workspace() {
                   })
                 }
               >
-                앱 종료
+                서비스 중지
               </button>
             </>
           )}
