@@ -457,6 +457,222 @@ export function NativeLaunch({
     </>
   );
 }
+export function NativeBundlePresets({
+  data,
+  invoke,
+  compact = false,
+}: NativePanelProps & { compact?: boolean }) {
+  const [name, setName] = useState("");
+  const [selected, setSelected] = useState("");
+  const [included, setIncluded] = useState<string[]>([
+    "audio",
+    "cable",
+    "display",
+  ]);
+  const [view, setView] = useState("");
+  const [slot, setSlot] = useState("");
+  const labels: Record<string, string> = {
+    audio: "Audio Repeater",
+    display: "Display Relay",
+    cable: "Audio Cable",
+    windows: "Window Manager",
+  };
+  const presets = data.bundlePresets ?? [];
+  if (!data.bundlePresets)
+    return (
+      <p role="alert">
+        통합 프리셋을 사용하려면 설정에서 서비스를 중지한 뒤 앱을 다시
+        열어주세요.
+      </p>
+    );
+  const selectedPreset = presets.find((preset) => preset.name === selected);
+  const save = (overwrite: boolean) =>
+    void invoke({
+      kind: "bundle.preset.save",
+      name: overwrite ? selected : name,
+      components: included,
+      window_view: view || null,
+      window_slot: slot || null,
+      overwrite,
+    });
+  const apply = (start: boolean) =>
+    void invoke({ kind: "bundle.preset.apply", name: selected, start });
+  return (
+    <>
+      {!compact && (
+        <>
+          <p>
+            포함할 기능을 선택하고 현재 설정을 한 번에 저장합니다. 포함하지 않은
+            기능의 설정과 작업은 유지됩니다.
+          </p>
+          <fieldset>
+            <legend>포함할 기능</legend>
+            {Object.entries(labels).map(([id, label]) => (
+              <label className="check-label" key={id}>
+                <input
+                  type="checkbox"
+                  checked={included.includes(id)}
+                  onChange={(event) =>
+                    setIncluded(
+                      event.target.checked
+                        ? [...included, id]
+                        : included.filter((item) => item !== id),
+                    )
+                  }
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
+          {included.includes("windows") &&
+            (!data.wm.connected ? (
+              <button onClick={() => void invoke({ kind: "windows.connect" })}>
+                창 관리자 연결
+              </button>
+            ) : (
+              <div className="form-row">
+                <select
+                  aria-label="통합 프리셋 창 배치"
+                  value={view}
+                  onChange={(event) => setView(event.target.value)}
+                >
+                  <option value="">창 배치 선택</option>
+                  {Object.values(data.wm.configuration?.views ?? {}).map(
+                    (item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ),
+                  )}
+                </select>
+                <select
+                  aria-label="통합 프리셋 화면 영역"
+                  value={slot}
+                  onChange={(event) => setSlot(event.target.value)}
+                >
+                  <option value="">화면 영역 선택</option>
+                  {Object.values(data.wm.configuration?.slots ?? {}).map(
+                    (item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name}
+                      </option>
+                    ),
+                  )}
+                </select>
+              </div>
+            ))}
+          <div className="form-row">
+            <input
+              aria-label="통합 프리셋 이름"
+              value={name}
+              maxLength={80}
+              placeholder="예: 작업 / 게임 / 조용히 듣기"
+              onChange={(event) => setName(event.target.value)}
+            />
+            <button
+              disabled={
+                !name.trim() ||
+                !included.length ||
+                !!data.bundleStorageError ||
+                (included.includes("windows") && (!view || !slot))
+              }
+              onClick={() => save(false)}
+            >
+              현재 설정 묶어서 저장
+            </button>
+          </div>
+        </>
+      )}
+      <select
+        aria-label="통합 프리셋 선택"
+        value={selected}
+        onChange={(event) => {
+          setSelected(event.target.value);
+          const preset = presets.find(
+            (item) => item.name === event.target.value,
+          );
+          if (preset) {
+            setIncluded(preset.components);
+            setView(preset.window?.view ?? "");
+            setSlot(preset.window?.slot ?? "");
+          }
+          if (event.target.value)
+            void invoke({
+              kind: "bundle.preset.apply",
+              name: event.target.value,
+              start: true,
+            });
+        }}
+      >
+        <option value="">통합 프리셋 선택</option>
+        {presets.map((preset) => (
+          <option key={preset.name}>{preset.name}</option>
+        ))}
+      </select>
+      {selectedPreset && (
+        <div className="bundle-status">
+          {selectedPreset.components.map((id) => {
+            const job =
+              id === "audio"
+                ? data.jobs.audio
+                : id === "cable"
+                  ? data.jobs.cable
+                  : id === "display"
+                    ? (data.jobs.mirrors.find(active) ?? data.jobs.mirrors[0])
+                    : undefined;
+            return (
+              <div key={id}>
+                <strong>{labels[id] ?? id}</strong>
+                {job ? (
+                  <NativeStatus job={job} />
+                ) : (
+                  <span>{data.wm.connected ? "연결됨" : "연결 안 됨"}</span>
+                )}
+                {job?.error && <NativeJobLog job={job} />}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div className="action-row">
+        <button disabled={!selectedPreset} onClick={() => apply(true)}>
+          함께 시작
+        </button>
+        {!compact && (
+          <>
+            <button disabled={!selectedPreset} onClick={() => apply(false)}>
+              설정만 적용 · 포함된 출력 중지
+            </button>
+            <button
+              disabled={
+                !selectedPreset ||
+                !included.length ||
+                !!data.bundleStorageError ||
+                (included.includes("windows") && (!view || !slot))
+              }
+              onClick={() => save(true)}
+            >
+              덮어쓰기
+            </button>
+            <button
+              disabled={!selectedPreset || !!data.bundleStorageError}
+              onClick={() =>
+                void invoke({ kind: "bundle.preset.delete", name: selected })
+              }
+            >
+              삭제
+            </button>
+          </>
+        )}
+      </div>
+      {data.bundleStorageError && (
+        <p role="alert">
+          통합 프리셋 파일 저장이 차단됐습니다. {data.bundleStorageError}
+        </p>
+      )}
+    </>
+  );
+}
 function WindowLaunch({ data, invoke }: NativePanelProps) {
   const [slot, setSlot] = useState("");
   const [view, setView] = useState("");
@@ -883,6 +1099,16 @@ export function NativeWindows({ data, invoke }: NativePanelProps) {
   const [viewId, setView] = usePanelState("wm.view", "");
   const [root, setRoot] = usePanelState("wm.root", "");
   const [slot, setSlot] = usePanelState("wm.slot", "");
+  useEffect(() => {
+    if (wm.bundleTarget) {
+      setView(wm.bundleTarget.view);
+      setSlot(wm.bundleTarget.slot);
+      if (wm.bundleTarget.request) {
+        setLastRequest(wm.bundleTarget.request);
+        setPreview(undefined);
+      }
+    }
+  }, [wm.bundleTarget?.view, wm.bundleTarget?.slot, wm.bundleTarget?.request]);
   const [selected, setSelected] = usePanelState<string[]>("wm.selected", []);
   const [mode, setMode] = usePanelState("wm.mode", "open");
   const [preview, setPreview] = usePanelState<NativePlan | undefined>(

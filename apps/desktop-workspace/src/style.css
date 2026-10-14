@@ -48,6 +48,18 @@
   display: grid;
   gap: 10px;
 }
+.bundle-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: 12px 0;
+}
+.bundle-status > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .tab-name-input {
   width: 100px;
   min-width: 60px;

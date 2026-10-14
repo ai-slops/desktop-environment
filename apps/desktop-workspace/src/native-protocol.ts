@@ -130,6 +130,12 @@ export type NativeSnapshot = {
     presets: { name: string; settings: NativeSettings }[];
   };
   cableSettings: CableSettings;
+  bundlePresets?: {
+    name: string;
+    components: string[];
+    window?: { view: string; slot: string } | null;
+  }[];
+  bundleStorageError?: string | null;
   endpoints: NativeEndpoint[];
   cables: NativeCable[];
   displays: { id: string; name: string; width: number; height: number }[];
@@ -142,6 +148,7 @@ export type NativeSnapshot = {
     message: string;
   }[];
   wm: {
+    bundleTarget?: { view: string; slot: string; request?: string };
     connected: boolean;
     error: string | null;
     configuration: NativeConfiguration | null;

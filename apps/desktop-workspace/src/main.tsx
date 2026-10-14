@@ -19,6 +19,7 @@ import {
   NativeWindows,
   NativeJobLog,
   NativeLaunch,
+  NativeBundlePresets,
   PaneStateScope,
 } from "./native-panels.tsx";
 import type { NativeCommand } from "./native-protocol.ts";
@@ -37,6 +38,7 @@ const titles = {
   cable: "Audio Cable",
   windows: "Window Manager",
   diagnostics: "진단 · 실행 기록",
+  bundle: "통합 프리셋",
 };
 type PanelId = keyof typeof titles;
 const layoutKey = "desktop-workspace.tabs.v3";
@@ -570,6 +572,7 @@ const components = {
   cable: CablePanel,
   windows: WindowsPanel,
   diagnostics: DiagnosticsPanel,
+  bundle: DiagnosticsPanel,
 };
 
 type Widget = { id: string; type: PanelId; view: "full" | "launch" };
@@ -710,7 +713,21 @@ function EditableTab(
                   </button>
                 </div>
               </header>
-              {widget.type === "diagnostics" ? (
+              {widget.type === "bundle" && state.native ? (
+                <fieldset
+                  className="native-content"
+                  aria-label="통합 프리셋"
+                  disabled={
+                    state.connection !== "connected" || !!state.pendingCommands
+                  }
+                >
+                  <NativeBundlePresets
+                    data={state.native}
+                    invoke={invoke}
+                    compact={widget.view === "launch"}
+                  />
+                </fieldset>
+              ) : widget.type === "diagnostics" || widget.type === "bundle" ? (
                 <DiagnosticsPanel {...props} />
               ) : state.mode === "native" && state.native ? (
                 widget.view === "launch" ? (
@@ -748,7 +765,13 @@ function EditableTab(
 const tabComponents = { tab: EditableTab };
 function initialLayout(api: DockviewApi) {
   api.clear();
-  for (const seed of ["audio", "display", "cable", "windows"] as PanelId[]) {
+  for (const seed of [
+    "audio",
+    "display",
+    "cable",
+    "windows",
+    "bundle",
+  ] as PanelId[]) {
     api.addPanel({
       id: seed,
       component: "tab",

@@ -13,6 +13,7 @@ workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 audio-cable-core = { path = "../audio-cable-core" }
 desktop-presets = { path = "../desktop-presets" }
 window-manager-core = { path = "../window-manager-core" }

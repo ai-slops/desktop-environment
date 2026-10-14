@@ -1,6 +1,7 @@
 //! Desktop job and configuration ownership independent of any web or native UI.
 #![allow(clippy::multiple_crate_versions)]
 
+mod bundle;
 mod process;
 mod worker;
 use anyhow::{Context, Result, bail};
@@ -45,6 +46,25 @@ pub enum Command {
     ComponentPresetRun { component: String, name: String },
     #[serde(rename = "preset.delete")]
     PresetDelete { name: String },
+    #[serde(rename = "bundle.preset.save")]
+    BundleSave {
+        name: String,
+        components: Vec<String>,
+        #[serde(default)]
+        window_view: Option<String>,
+        #[serde(default)]
+        window_slot: Option<String>,
+        #[serde(default)]
+        overwrite: bool,
+    },
+    #[serde(rename = "bundle.preset.apply")]
+    BundleApply {
+        name: String,
+        #[serde(default)]
+        start: bool,
+    },
+    #[serde(rename = "bundle.preset.delete")]
+    BundleDelete { name: String },
     #[serde(rename = "cable.select")]
     CableSelect { id: String },
     #[serde(rename = "cable.manual")]
@@ -104,6 +124,9 @@ pub struct Controller {
     draft: Settings,
     cable: CableSettings,
     cable_disk: Value,
+    bundle_store: bundle::Store,
+    bundle_disk: Value,
+    bundle_storage_error: Option<String>,
     traces: Vec<Value>,
     endpoints: Vec<Endpoint>,
     cables: Vec<Cable>,
@@ -144,12 +167,20 @@ impl Controller {
                 Ok(settings) => (settings, None),
                 Err(error) => (CableSettings::default(), Some(format!("{error:#}"))),
             };
+        let (bundle_store, bundle_storage_error) =
+            match bundle::Store::load(&root.join("workspace-presets.json")) {
+                Ok(store) => (store, None),
+                Err(error) => (bundle::Store::default(), Some(format!("{error:#}"))),
+            };
         Self {
             draft: store.last_used.clone(),
             root,
             binaries,
             store,
             cable_disk: serde_json::to_value(&cable).unwrap_or(Value::Null),
+            bundle_disk: serde_json::to_value(&bundle_store).unwrap_or(Value::Null),
+            bundle_store,
+            bundle_storage_error,
             traces: vec![],
             cable,
             endpoints: vec![],
@@ -302,6 +333,18 @@ impl Controller {
         self.poll()?;
         let mut result = Value::Null;
         match command {
+            Command::BundleSave { name, components, window_view, window_slot, overwrite } => self
+                .save_bundle(
+                &name,
+                &components,
+                window_view.as_deref(),
+                window_slot.as_deref(),
+                overwrite,
+            )?,
+            Command::BundleApply { name, start } => {
+                result = self.apply_bundle(&name, start)?;
+            }
+            Command::BundleDelete { name } => self.delete_bundle(&name)?,
             Command::Snapshot {} => {
                 if self.session.is_some()
                     && self.last_wm_poll.elapsed() >= std::time::Duration::from_secs(2)
@@ -359,6 +402,10 @@ impl Controller {
                 }
                 let store = PresetStore::load(&self.root.join("presets.json"))?;
                 let cable = CableSettings::load(&self.root.join("audio-cable/settings.json"))?;
+                let bundle_store = bundle::Store::load(&self.root.join("workspace-presets.json"))?;
+                self.bundle_disk = serde_json::to_value(&bundle_store)?;
+                self.bundle_store = bundle_store;
+                self.bundle_storage_error = None;
                 self.cable_disk = serde_json::to_value(&cable)?;
                 self.cable = cable;
                 self.draft = store.last_used.clone();
@@ -900,7 +947,7 @@ impl Controller {
         Ok(())
     }
     pub fn snapshot(&self) -> Value {
-        json!({"revision":self.sequence,"traces":self.traces,"settings":{"last_used":self.draft,"presets":self.store.presets},"cableSettings":self.cable,"endpoints":self.endpoints.iter().map(|endpoint|json!({"id":endpoint.id,"name":endpoint.name,"flow":if endpoint.flow==EndpointFlow::Playback {"playback"} else {"capture"},"isDefault":endpoint.is_default})).collect::<Vec<_>>(),"cables":self.cables,"displays":self.displays,"errors":self.errors,"storageError":self.storage_error,"cableStorageError":self.cable_storage_error,"jobs":{"audio":self.audio.as_ref().map_or_else(stopped,OwnedProcess::snapshot),"cable":self.monitor.as_ref().map_or_else(stopped,OwnedProcess::snapshot),"mirrors":self.draft.displays().enumerate().map(|(index,_)|self.mirrors.get(&index).map_or_else(stopped,OwnedProcess::snapshot)).collect::<Vec<_>>()},"wm":self.wm,"configRoot":self.root})
+        json!({"revision":self.sequence,"traces":self.traces,"settings":{"last_used":self.draft,"presets":self.store.presets},"cableSettings":self.cable,"bundlePresets":self.bundle_store.presets.iter().map(|(name,preset)|json!({"name":name,"components":preset.components(),"window":preset.window_target()})).collect::<Vec<_>>(),"bundleStorageError":self.bundle_storage_error,"endpoints":self.endpoints.iter().map(|endpoint|json!({"id":endpoint.id,"name":endpoint.name,"flow":if endpoint.flow==EndpointFlow::Playback {"playback"} else {"capture"},"isDefault":endpoint.is_default})).collect::<Vec<_>>(),"cables":self.cables,"displays":self.displays,"errors":self.errors,"storageError":self.storage_error,"cableStorageError":self.cable_storage_error,"jobs":{"audio":self.audio.as_ref().map_or_else(stopped,OwnedProcess::snapshot),"cable":self.monitor.as_ref().map_or_else(stopped,OwnedProcess::snapshot),"mirrors":self.draft.displays().enumerate().map(|(index,_)|self.mirrors.get(&index).map_or_else(stopped,OwnedProcess::snapshot)).collect::<Vec<_>>()},"wm":self.wm,"configRoot":self.root})
     }
 }
 
@@ -1054,6 +1101,24 @@ mod tests {
         })?;
         assert_eq!(controller.draft.audio.source, "changed-source");
         assert_eq!(controller.draft.display.fps, 60);
+        Ok(())
+    }
+    #[test]
+    fn bundles_round_trip_and_protect_external_or_malformed_files() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut controller = controller(directory.path());
+        controller.draft.audio.source = "source".into();
+        controller.draft.audio.target = "target".into();
+        controller.cable.set_volume_percent(0.5)?;
+        controller.save_bundle("combined", &["audio".into(), "cable".into()], None, None, false)?;
+        let loaded = bundle::Store::load(&directory.path().join("workspace-presets.json"))?;
+        assert_eq!(loaded.presets["combined"].components(), vec!["audio", "cable"]);
+        assert!(controller.save_bundle("combined", &["audio".into()], None, None, false).is_err());
+        std::fs::write(directory.path().join("workspace-presets.json"), b"{broken")?;
+        assert!(controller.delete_bundle("combined").is_err());
+        let mut reopened = Controller::new(directory.path().into(), directory.path().into());
+        assert!(reopened.save_bundle("new", &["audio".into()], None, None, false).is_err());
+        assert_eq!(std::fs::read(directory.path().join("workspace-presets.json"))?, b"{broken");
         Ok(())
     }
 }
