@@ -486,9 +486,15 @@ fn live_cable_gain_acceptance() -> Result<()> {
         thread: Some(std::thread::spawn(move || backend.monitor(&selected, &output, monitor))),
     };
     wait_for_running(&mut route)?;
-    for (db, rms_tolerance) in
-        [(-20.0, 1.0), (-40.0, 1.0), (-60.0, 1.0), (-96.0, 5.0), (-30.0, 1.0)]
-    {
+    for (db, rms_tolerance) in [
+        (-20.0, 1.0),
+        (-40.0, 1.0),
+        (-46.020_6, 1.0),
+        (-60.0, 1.0),
+        (-66.020_6, 1.0),
+        (-96.0, 5.0),
+        (-30.0, 1.0),
+    ] {
         control.set_gain(db)?;
         // The fixture driver can retain old samples beyond the DSP's 20 ms ramp.
         // Use the same two-second endpoint settling bound as the switch probe.

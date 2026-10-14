@@ -355,12 +355,12 @@ test("native edits preserve window resources, reorder ratios and commit cable vo
     .click();
   const cable = page.getByRole("region", { name: "Audio Cable 패널" });
   await cable.getByRole("slider", { name: /모니터링 볼륨/ }).press("ArrowLeft");
-  await expect(cable.locator("output")).toHaveText("99%");
+  await expect(cable.locator("output")).toHaveText("99.99%");
   await expect(
     cable.getByRole("button", { name: "설정 저장", exact: true }),
   ).toBeEnabled();
   expect(commands.filter((command) => command.kind === "cable.volume")).toEqual(
-    [{ kind: "cable.volume", value: 99 }],
+    [{ kind: "cable.volume", value: 99.99 }],
   );
   await page
     .getByRole("button", { name: "Desktop Control 열기", exact: true })

@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn percent_volume_round_trips_and_legacy_settings_load_without_presets() {
         let mut settings = Settings::default();
-        for percent in [100.0, 10.0, 1.0, 0.01, 0.0] {
+        for percent in [100.0, 10.0, 1.0, 0.5, 0.05, 0.01, 0.0] {
             settings.set_volume_percent(percent).unwrap();
             assert!((settings.volume_percent() - percent).abs() < 0.0001);
         }

@@ -1,12 +1,12 @@
 import {
   useEffect,
   useState,
-  useRef,
   useSyncExternalStore,
   type ReactNode,
   type SetStateAction,
 } from "react";
 import type { CommandResult } from "./workspace.ts";
+import { VolumeControl, readablePercent } from "./volume.tsx";
 import type {
   NativeCommand,
   NativeEndpoint,
@@ -489,19 +489,7 @@ export function NativeCablePanel({ data, invoke }: NativePanelProps) {
     cables.push(settings.cable);
   const volume = settings.muted
     ? 0
-    : Math.round(100 * 10 ** (settings.gain_db / 20));
-  const [localVolume, setLocalVolume] = useState(volume);
-  const submittedVolume = useRef(volume);
-  const commitVolume = (value: number) => {
-    if (value !== submittedVolume.current) {
-      submittedVolume.current = value;
-      void invoke({ kind: "cable.volume", value });
-    }
-  };
-  useEffect(() => {
-    setLocalVolume(volume);
-    submittedVolume.current = volume;
-  }, [volume]);
+    : readablePercent(100 * 10 ** (settings.gain_db / 20));
   const [manualName, setManualName] = useState("수동 케이블");
   const [playback, setPlayback] = useState("");
   const [capture, setCapture] = useState("");
@@ -611,24 +599,11 @@ export function NativeCablePanel({ data, invoke }: NativePanelProps) {
         choose={(id) => void invoke({ kind: "cable.output", id })}
       />
       <div className="volume-control">
-        <label htmlFor="native-volume">
-          모니터링 볼륨 <output>{localVolume}%</output>
-        </label>
-        <input
-          id="native-volume"
-          type="range"
-          min="0"
-          max="100"
-          value={localVolume}
-          onChange={(event) => {
-            const value = Number(event.target.value);
-            setLocalVolume(value);
+        <VolumeControl
+          value={volume}
+          commit={(value) => {
+            void invoke({ kind: "cable.volume", value });
           }}
-          onPointerUp={(event) =>
-            commitVolume(Number(event.currentTarget.value))
-          }
-          onKeyUp={(event) => commitVolume(Number(event.currentTarget.value))}
-          onBlur={(event) => commitVolume(Number(event.currentTarget.value))}
         />
         <label className="check-label">
           <input

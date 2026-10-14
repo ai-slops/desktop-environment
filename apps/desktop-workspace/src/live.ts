@@ -90,7 +90,7 @@ export function createLiveBackend(): WorkspaceBackend {
         output: native.cableSettings.output_id,
         volume: native.cableSettings.muted
           ? 0
-          : Math.round(100 * 10 ** (native.cableSettings.gain_db / 20)),
+          : 100 * 10 ** (native.cableSettings.gain_db / 20),
         muted: native.cableSettings.muted,
         phase: phase(native.jobs.cable.phase),
       },
