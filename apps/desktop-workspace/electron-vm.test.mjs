@@ -356,6 +356,117 @@ try {
   console.log(
     "VM step: one tab level, mixed launch-only cards and all preset selections auto-start passed",
   );
+
+  const connected = await command({ kind: "windows.connect" });
+  const monitor = connected.wm.monitors.monitors[0];
+  assert.ok(monitor);
+  const withView = await command({
+    kind: "windows.view.add",
+    name: "Bundle view",
+  });
+  const view = Object.values(withView.wm.configuration.views).find(
+    (item) => item.name === "Bundle view",
+  );
+  assert.ok(view);
+  const withSlot = await command({
+    kind: "windows.slot.add",
+    name: "Bundle area",
+    device: monitor.device,
+  });
+  const slot = Object.values(withSlot.wm.configuration.slots).find(
+    (item) => item.name === "Bundle area",
+  );
+  assert.ok(slot);
+  await page
+    .locator(".dv-tab")
+    .filter({ hasText: "통합 프리셋" })
+    .first()
+    .click();
+  const bundles = page.getByRole("group", { name: "통합 프리셋", exact: true });
+  await bundles
+    .getByRole("checkbox", { name: "Window Manager", exact: true })
+    .check();
+  await bundles.getByLabel("통합 프리셋 창 배치").selectOption(view.id);
+  await bundles.getByLabel("통합 프리셋 화면 영역").selectOption(slot.id);
+  await bundles.getByLabel("통합 프리셋 이름").fill("Combined");
+  await bundles
+    .getByRole("button", { name: "현재 설정 묶어서 저장", exact: true })
+    .click();
+  await command({ kind: "cable.volume", value: 0.5 });
+  await command({
+    kind: "bundle.preset.apply",
+    name: "Combined",
+    start: false,
+  });
+  assert.equal(
+    (await command({ kind: "snapshot" })).jobs.cable.phase,
+    "stopped",
+  );
+  await bundles.getByLabel("통합 프리셋 선택").selectOption("Combined");
+  await expect
+    .poll(
+      async () => {
+        const current = await command({ kind: "snapshot" });
+        return [
+          current.jobs.audio.phase,
+          current.jobs.cable.phase,
+          current.jobs.mirrors[0].phase,
+        ];
+      },
+      { timeout: 15000 },
+    )
+    .toEqual(["running", "running", "running"]);
+  const combined = await command({ kind: "snapshot" });
+  assert.ok(
+    Math.abs(100 * 10 ** (combined.cableSettings.gain_db / 20) - 0.05) <
+      0.00001,
+  );
+  assert.equal(combined.wm.bundleTarget.view, view.id);
+  assert.equal(combined.wm.bundleTarget.slot, slot.id);
+  assert.ok(combined.wm.bundleTarget.request);
+  const repeated = await command({
+    kind: "bundle.preset.apply",
+    name: "Combined",
+    start: true,
+  });
+  assert.equal(repeated.jobs.audio.pid, combined.jobs.audio.pid);
+  assert.equal(repeated.jobs.cable.pid, combined.jobs.cable.pid);
+  assert.equal(repeated.jobs.mirrors[0].pid, combined.jobs.mirrors[0].pid);
+  await command({
+    kind: "bundle.preset.save",
+    name: "Audio only",
+    components: ["audio"],
+  });
+  await command({ kind: "cable.volume", value: 0.5 });
+  await bundles.getByLabel("통합 프리셋 선택").selectOption("Audio only");
+  await expect(
+    bundles.getByRole("checkbox", { name: "Window Manager", exact: true }),
+  ).not.toBeChecked();
+  const partial = await command({ kind: "snapshot" });
+  assert.ok(
+    Math.abs(100 * 10 ** (partial.cableSettings.gain_db / 20) - 0.5) < 0.00001,
+  );
+  assert.equal(partial.jobs.cable.pid, combined.jobs.cable.pid);
+  assert.equal(partial.jobs.mirrors[0].pid, combined.jobs.mirrors[0].pid);
+  await bundles.getByLabel("통합 프리셋 선택").selectOption("Combined");
+  await expect(
+    bundles.getByRole("checkbox", { name: "Window Manager", exact: true }),
+  ).toBeChecked();
+  await expect(bundles.getByLabel("통합 프리셋 창 배치")).toHaveValue(view.id);
+  await expect(bundles.getByLabel("통합 프리셋 화면 영역")).toHaveValue(
+    slot.id,
+  );
+  await page.screenshot({ path: join(root, "bundle.png") });
+  await command({ kind: "mirror.stop", index: 0 });
+  await command({ kind: "audio.stop" });
+  await page
+    .locator(".dv-tab")
+    .filter({ hasText: "Audio Cable" })
+    .first()
+    .click();
+  console.log(
+    "VM step: persistent multi-feature bundle, four-component apply and subset isolation passed",
+  );
   // Install a distinct immutable version while UI and audio images are open.
   const update = join(root, "update-package");
   const nextVersion = "v" + randomUUID().replaceAll("-", "").slice(0, 24);
@@ -547,7 +658,7 @@ try {
     "running",
   );
   assert.deepEqual(faults, []);
-  for (const name of ["main", "popout"])
+  for (const name of ["main", "popout", "bundle"])
     console.log(
       `VM_WORKSPACE_IMAGE ${name} ${(await readFile(join(root, `${name}.png`))).toString("base64")}`,
     );

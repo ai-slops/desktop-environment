@@ -22,8 +22,9 @@ Double-click `start-desktop-workspace.cmd` for [Desktop Workspace](apps/desktop-
 the four components in an installed native window, with dockable tabs, splits,
 drag-out windows and real Rust-backed audio, cable, mirroring and manual window controls.
 Run `just desktop-workspace-install` to install/update outside build outputs;
-closing the UI leaves background jobs running. `just desktop-workspace-stop`
-explicitly stops the daemon and its jobs. Fractional listening volume accepts 0.5%,
+closing the UI leaves background jobs running. Use **설정 → 서비스 중지**
+to explicitly stop the daemon and its jobs. Integrated presets save chosen component
+settings together and apply/start them on selection. Fractional listening volume accepts 0.5%,
 0.05% and smaller values. See the linked guide for installation paths and VM testing.
 It reads existing settings and starts outputs only on explicit action. See
 [integration and test coverage](docs/desktop-workspace.md) for architecture and

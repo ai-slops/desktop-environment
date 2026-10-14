@@ -47,6 +47,7 @@ Existing settings are read without conversion:
 
 - `%LOCALAPPDATA%/DesktopEnvironment/presets.json`
 - `%LOCALAPPDATA%/DesktopEnvironment/audio-cable/settings.json`
+- `%LOCALAPPDATA%/DesktopEnvironment/workspace-presets.json` for integrated presets
 - `%LOCALAPPDATA%/DesktopEnvironment/window-manager.json` on explicit connection
 
 Startup does not start audio, open mirrors, connect the window manager or save
@@ -69,6 +70,28 @@ require an explicit screen-region choice; selecting a saved view previews and
 applies it through the existing authority checks. Full Window Manager editors
 retain their explicit preview/apply workflow. Opening the app starts no jobs.
 Existing v1/v2 layouts are imported into the single-level card layout.
+
+## Integrated presets
+
+In **통합 프리셋**, choose the components to include and save their current settings
+under one name. Audio Repeater routing, Audio Cable monitoring/gain/mute, Display
+Relay configurations and a Window Manager saved view/screen region can be combined.
+For Window Manager, connect first and choose an existing view and region; the preset
+stores their identifiers and applies the current saved layout when run.
+
+Selecting a saved preset applies and starts its included components. Components
+outside the preset keep their settings and jobs. Reapplying unchanged audio routes
+or mirror configurations preserves their workers. **설정만 적용 · 포함된 출력 중지**
+loads settings and stops included audio/mirror outputs; the selected window view/region
+is restored without moving windows. Applied window layout results remain available to
+the Window Manager undo flow.
+
+Add **통합 프리셋** to any tab as either **프리셋 · 시작** or **전체 설정** to place
+combined launch controls alongside other cards. Individual component presets stay
+separate. Saving rejects duplicate names unless explicitly overwritten, external
+file edits and malformed originals. All included device routes and window plans
+are checked before outputs change. Runtime failures report completed components;
+changes across devices and windows are not an atomic transaction.
 
 Drag tabs onto tab strips to combine, or onto panel edges to split. Drag separators
 to resize. In the native EXE, dragging a tab outside the windows detaches it without
@@ -98,6 +121,7 @@ the actual returned setting. Presets retain fractional gain rather than rounding
 | Audio Repeater | Real source/target output discovery and selection, start/stop, settings and preset CRUD, final worker logs |
 | Display Relay | Display/fullscreen/FPS, multiple mirror configurations, independent native launch/stop, component presets |
 | Audio Cable | Recognized/manual playback-capture pairs, output selection, monitoring start/stop, volume/mute, settings and presets, worker logs |
+| Integrated presets | Choose included components, save/overwrite/delete combined settings, apply/start together, settings-only output stop, selected window view/region |
 | Window Manager | Explicit connection, inventories, reference registration/rebinding, view and region creation, group strategies/name/gap/grid columns, window order and placement removal, region adjustment, capability opt-ins, saved editing, preview/apply, undo preview, pause/resume and hidden-window recovery |
 | Diagnostics | Command ID, time, outcome, full worker cause/logs, settings directory and connection errors |
 

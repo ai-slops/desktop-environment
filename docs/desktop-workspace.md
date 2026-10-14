@@ -55,6 +55,14 @@ Manager connection acquires the existing configuration lock. Saves check externa
 changes and protect malformed originals. Browser storage holds panel layout only;
 complete native configuration data stay in Rust/files.
 
+Integrated presets are stored separately in `workspace-presets.json`, under the
+settings root. They capture only chosen components, without copying the Audio Cable
+individual preset collection. Window entries refer to a saved view and screen region
+and use the existing preview/apply authority checks; successful requests are exposed
+for undo. Included routes, feedback combinations and window plans are validated before
+output transitions. Unselected components stay untouched. Later runtime failures can
+leave partial effects and report completed components rather than promising rollback.
+
 HTTP binds to 127.0.0.1, validates Host/Origin and requires a per-process random
 header token for commands. Requests are bounded to 1 MiB; window-session commands
 retain their 64 KiB limit. Request IDs are carried into diagnostic traces.
@@ -124,3 +132,15 @@ tab level, mixed launch-only cards, audio/cable/display preset selection startin
 real owned jobs, tab tear-off, and restored cards after reopening. Node's mise
 runtime declaration is tracked. Existing pure load commands remain available for
 editors; the UI's preset selectors use explicit load-and-run commands.
+
+Integrated preset acceptance verifies saving all four components, selecting a preset
+to apply/start them together, settings-only output shutdown, repeated application
+without replacing unchanged workers, and an audio-only preset preserving cable gain
+and mirror jobs. Selecting a saved preset restores its inclusion choices and window
+view/region for safe overwriting. Window application exposes its request for undo.
+Storage regressions cover round trips, duplicate names and external/malformed file
+protection. These execution checks run in the owned VM with isolated settings and
+an empty saved window layout; they do not move user windows.
+The final suite passed with 100% measured guest CPU and 0.021 ms input/output gaps.
+An earlier run of the unchanged CPU continuity gate failed with a 70.271 ms output
+gap; the full rerun passed. This intermittent VM result is retained in the logs.
