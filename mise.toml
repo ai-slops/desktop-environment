@@ -10,14 +10,6 @@ RUST_BACKTRACE = "1"
 description = "Install the workspace toolchain declared in mise.toml"
 run = "mise install"
 
-[tasks.desktop-control]
-description = "Build both tools and open the saved-settings GUI"
-run = "just desktop-control"
-
-[tasks.audio-cable]
-description = "Open the minimal virtual cable and quiet-monitoring GUI"
-run = "just audio-cable"
-
 [tasks.audio-cable-build]
 description = "Build the standalone cable GUI without starting audio"
 run = "cargo build --release -p audio-cable"

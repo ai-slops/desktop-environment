@@ -191,7 +191,7 @@ impl OwnedProcess {
         Ok(())
     }
     pub fn snapshot(&self) -> Value {
-        json!({"phase":self.phase,"error":self.error,"logs":self.logs})
+        json!({"phase":self.phase,"error":self.error,"logs":self.logs,"pid":self.child.as_ref().map(Child::id)})
     }
 }
 impl Drop for OwnedProcess {

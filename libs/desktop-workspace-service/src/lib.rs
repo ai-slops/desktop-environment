@@ -39,6 +39,8 @@ pub enum Command {
     },
     #[serde(rename = "preset.load")]
     PresetLoad { name: String },
+    #[serde(rename = "component.preset.load")]
+    ComponentPresetLoad { component: String, name: String },
     #[serde(rename = "preset.delete")]
     PresetDelete { name: String },
     #[serde(rename = "cable.select")]
@@ -396,6 +398,32 @@ impl Controller {
                 }
                 self.draft = settings;
             }
+            Command::ComponentPresetLoad { component, name } => {
+                let settings = self
+                    .store
+                    .presets
+                    .iter()
+                    .find(|preset| preset.name == name)
+                    .context("프리셋을 찾을 수 없습니다.")?
+                    .settings
+                    .clone();
+                match component.as_str() {
+                    "audio" => {
+                        if self.audio.as_ref().is_some_and(OwnedProcess::alive) {
+                            bail!("Audio Repeater를 중지한 뒤 프리셋을 불러오세요.");
+                        }
+                        self.draft.audio = settings.audio;
+                    }
+                    "display" => {
+                        if self.mirrors.values().any(OwnedProcess::alive) {
+                            bail!("Display Relay를 중지한 뒤 프리셋을 불러오세요.");
+                        }
+                        self.draft.display = settings.display;
+                        self.draft.additional_displays = settings.additional_displays;
+                    }
+                    _ => bail!("지원하지 않는 구성요소입니다."),
+                }
+            }
             Command::PresetDelete { name } => {
                 self.check_store_disk()?;
                 if let Some(error) = &self.storage_error {
@@ -491,7 +519,33 @@ impl Controller {
                     .find(|preset| preset.name == name)
                     .context("프리셋을 찾을 수 없습니다.")?
                     .settings();
-                self.stop_monitor()?;
+                let running = self.monitor.as_ref().is_some_and(OwnedProcess::alive);
+                let same_route = self
+                    .cable
+                    .cable
+                    .as_ref()
+                    .map(|cable| (&cable.playback_id, &cable.capture_id))
+                    == settings.cable.as_ref().map(|cable| (&cable.playback_id, &cable.capture_id))
+                    && self.cable.output_id == settings.output_id;
+                if running {
+                    self.refresh()?;
+                    settings.validate_route(&self.endpoints)?;
+                    if same_route {
+                        self.monitor
+                            .as_mut()
+                            .context("Monitor missing")?
+                            .write(&json!({"gain_db":settings.gain_db,"muted":settings.muted}))?;
+                    } else {
+                        self.stop_monitor()?;
+                        let cable = settings.cable.as_ref().context("케이블을 선택하세요.")?;
+                        self.monitor = Some(self.audio_worker(
+                            &cable.playback_id,
+                            &settings.output_id,
+                            settings.gain_db,
+                            settings.muted,
+                        )?);
+                    }
+                }
                 self.cable.cable = settings.cable;
                 self.cable.output_id = settings.output_id;
                 self.cable.gain_db = settings.gain_db;
@@ -893,6 +947,31 @@ mod tests {
                 .abs()
                 < 0.01
         );
+        Ok(())
+    }
+    #[test]
+    fn component_presets_leave_other_component_settings_unchanged() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let mut controller = controller(directory.path());
+        controller.draft.audio.source = "saved-source".into();
+        controller.draft.audio.target = "saved-target".into();
+        controller.draft.display.fps = 60;
+        controller.execute(Command::PresetSave { name: "saved".into(), overwrite: false })?;
+        controller.draft.audio.source = "changed-source".into();
+        controller.draft.display.fps = 30;
+        controller.execute(Command::ComponentPresetLoad {
+            component: "audio".into(),
+            name: "saved".into(),
+        })?;
+        assert_eq!(controller.draft.audio.source, "saved-source");
+        assert_eq!(controller.draft.display.fps, 30);
+        controller.draft.audio.source = "changed-source".into();
+        controller.execute(Command::ComponentPresetLoad {
+            component: "display".into(),
+            name: "saved".into(),
+        })?;
+        assert_eq!(controller.draft.audio.source, "changed-source");
+        assert_eq!(controller.draft.display.fps, 60);
         Ok(())
     }
 }

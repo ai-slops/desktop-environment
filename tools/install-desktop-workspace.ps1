@@ -1,6 +1,7 @@
-param([string]$InstallRoot,[string]$PackageRoot,[switch]$SkipBuild)
+param([string]$InstallRoot,[string]$PackageRoot,[switch]$SkipBuild,[switch]$BuildOnly)
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+$defaultInstall=!$InstallRoot
 if(!$InstallRoot){$InstallRoot=if($env:XDG_DATA_HOME){Join-Path $env:XDG_DATA_HOME 'desktop-workspace'}else{Join-Path $env:LOCALAPPDATA 'Programs\DesktopWorkspace'}}
 $InstallRoot=[IO.Path]::GetFullPath($InstallRoot)
 if(!$PackageRoot){$PackageRoot=Join-Path $repo 'target\desktop-workspace-package'}
@@ -22,6 +23,7 @@ if(!$SkipBuild){
         }finally{Pop-Location}
     }finally{Pop-Location}
 }
+if($BuildOnly){Write-Output "Prepared package: $PackageRoot";return}
 $package=Get-Content -LiteralPath (Join-Path $PackageRoot 'package.json') -Raw|ConvertFrom-Json
 if($package.version -notmatch '^v[a-f0-9]{24}$'){throw 'Invalid package version'}
 $destination=Join-Path $InstallRoot ('versions\'+$package.version)
@@ -38,4 +40,12 @@ Move-Item -LiteralPath $stagedLauncher -Destination $launcher -Force
 $manifest=Join-Path $InstallRoot ('current-'+[guid]::NewGuid().ToString('N')+'.json')
 [IO.File]::WriteAllText($manifest,(@{version=$package.version}|ConvertTo-Json),[Text.UTF8Encoding]::new($false))
 Move-Item -LiteralPath $manifest -Destination (Join-Path $InstallRoot 'current.json') -Force
+if($defaultInstall){
+    $shortcutPath=Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Desktop Workspace.lnk'
+    $shell=New-Object -ComObject WScript.Shell
+    $shortcut=$shell.CreateShortcut($shortcutPath)
+    $shortcut.TargetPath=$launcher
+    $shortcut.WorkingDirectory=$InstallRoot
+    $shortcut.Save()
+}
 Write-Output "Installed Desktop Workspace: $launcher"

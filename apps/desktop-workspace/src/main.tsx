@@ -14,9 +14,11 @@ import { VolumeControl } from "./volume.tsx";
 import { installTearOff } from "./shell.ts";
 import {
   NativeAudio,
+  NativeDisplay,
   NativeCablePanel,
   NativeWindows,
   NativeJobLog,
+  PaneStateScope,
 } from "./native-panels.tsx";
 import type { NativeCommand } from "./native-protocol.ts";
 import {
@@ -29,13 +31,14 @@ import {
 } from "./workspace.ts";
 
 const titles = {
-  audio: "Desktop Control",
+  audio: "Audio Repeater",
+  display: "Display Relay",
   cable: "Audio Cable",
   windows: "Window Manager",
   diagnostics: "진단 · 실행 기록",
 };
 type PanelId = keyof typeof titles;
-const layoutKey = "desktop-workspace.layout.v1";
+const layoutKey = "desktop-workspace.tabs.v2";
 const useWorkspace = () =>
   useSyncExternalStore(backend.subscribe, backend.getSnapshot);
 const send = (command: Command) => {
@@ -512,7 +515,7 @@ function NativePanel({
   type,
   dockProps,
 }: {
-  type: "audio" | "cable" | "windows";
+  type: "audio" | "display" | "cable" | "windows";
   dockProps: IDockviewPanelProps;
 }) {
   const state = useWorkspace();
@@ -520,61 +523,174 @@ function NativePanel({
     backend.dispatch({ kind: "native.command", command });
   const label = `${titles[type]} 패널`;
   return (
-    <section className="panel-body" aria-label={label}>
-      <PanelTools {...dockProps} />
-      {state.native ? (
-        <fieldset
-          className="native-content"
-          disabled={state.connection !== "connected" || !!state.pendingCommands}
-        >
-          {type === "audio" ? (
-            <NativeAudio data={state.native} invoke={invoke} />
-          ) : type === "cable" ? (
-            <NativeCablePanel data={state.native} invoke={invoke} />
-          ) : (
-            <NativeWindows data={state.native} invoke={invoke} />
-          )}
-        </fieldset>
-      ) : (
-        <div className="empty-state">
-          <h1>{titles[type]}</h1>
-          <p>실사용 장치 서비스에 연결하고 있습니다.</p>
-          <p>
-            연결이 끊긴 경우 Desktop Workspace 실행 스크립트로 앱을 시작하세요.
-          </p>
-        </div>
-      )}
-    </section>
+    <PaneStateScope.Provider value={dockProps.api.id}>
+      <section className="panel-body" aria-label={label}>
+        <PanelTools {...dockProps} />
+        {state.native ? (
+          <fieldset
+            className="native-content"
+            disabled={
+              state.connection !== "connected" || !!state.pendingCommands
+            }
+          >
+            {type === "audio" ? (
+              <NativeAudio data={state.native} invoke={invoke} />
+            ) : type === "display" ? (
+              <NativeDisplay data={state.native} invoke={invoke} />
+            ) : type === "cable" ? (
+              <NativeCablePanel data={state.native} invoke={invoke} />
+            ) : (
+              <NativeWindows data={state.native} invoke={invoke} />
+            )}
+          </fieldset>
+        ) : (
+          <div className="empty-state">
+            <h1>{titles[type]}</h1>
+            <p>실사용 장치 서비스에 연결하고 있습니다.</p>
+            <p>
+              연결이 끊긴 경우 Desktop Workspace 실행 스크립트로 앱을
+              시작하세요.
+            </p>
+          </div>
+        )}
+      </section>
+    </PaneStateScope.Provider>
   );
+}
+
+function DisplayPanel(props: IDockviewPanelProps) {
+  return <NativePanel type="display" dockProps={props} />;
 }
 const components = {
   audio: AudioPanel,
+  display: DisplayPanel,
   cable: CablePanel,
   windows: WindowsPanel,
   diagnostics: DiagnosticsPanel,
 };
+function validPaneLayout(data: unknown): data is SerializedDockview {
+  if (!data || typeof data !== "object") return false;
+  const candidate = data as SerializedDockview;
+  return (
+    !!candidate.grid &&
+    !!candidate.panels &&
+    !candidate.popoutGroups?.length &&
+    Object.values(candidate.panels).every(
+      (panel) =>
+        !!panel.contentComponent &&
+        Object.hasOwn(titles, panel.contentComponent),
+    )
+  );
+}
+function WorkspaceTab(
+  props: IDockviewPanelProps<{ seed?: PanelId; layout?: SerializedDockview }>,
+) {
+  const api = useRef<DockviewApi | null>(null);
+  const subscriptions = useRef<{ dispose(): void }[]>([]);
+  const [kind, setKind] = useState<PanelId>(props.params.seed ?? "audio");
+  const [tabName, setTabName] = useState(props.api.title ?? "새 탭");
+  const [issue, setIssue] = useState("");
+  useEffect(() => () => subscriptions.current.forEach((s) => s.dispose()), []);
+  const add = (type: PanelId) => {
+    const dock = api.current;
+    if (!dock) return;
+    const pane = dock.addPanel({
+      id: crypto.randomUUID(),
+      component: type,
+      title: titles[type],
+      ...(dock.activePanel
+        ? {
+            position: {
+              referencePanel: dock.activePanel.id,
+              direction: "right" as const,
+            },
+          }
+        : {}),
+    });
+    pane.api.setActive();
+  };
+  const ready = (event: DockviewReadyEvent) => {
+    const dock = event.api;
+    api.current = dock;
+    if (validPaneLayout(props.params.layout))
+      dock.fromJSON(props.params.layout);
+    else if (props.params.seed) add(props.params.seed);
+    let previous = JSON.stringify(dock.toJSON());
+    const save = () => {
+      if (dock.getPopouts().length) return;
+      const layout = dock.toJSON();
+      const serialized = JSON.stringify(layout);
+      if (serialized === previous) return;
+      previous = serialized;
+      props.api.updateParameters({ layout });
+    };
+    props.api.updateParameters({ layout: dock.toJSON() });
+    subscriptions.current = [
+      installTearOff(dock),
+      dock.onDidLayoutChange(save),
+      dock.onDidOpenPopoutWindowFail(() => setIssue("새 창을 열 수 없습니다.")),
+    ];
+  };
+  return (
+    <div className="workspace-tab">
+      <div className="pane-toolbar">
+        <input
+          aria-label="탭 이름"
+          className="tab-name-input"
+          value={tabName}
+          onChange={(event) => setTabName(event.target.value)}
+          onBlur={() => {
+            const name = tabName.trim() || props.api.title || "새 탭";
+            setTabName(name);
+            props.api.setTitle(name);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+        />
+        <select
+          aria-label="추가할 pane 구성요소"
+          value={kind}
+          onChange={(e) => setKind(e.target.value as PanelId)}
+        >
+          {Object.entries(titles).map(([id, title]) => (
+            <option key={id} value={id}>
+              {title}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => add(kind)}>pane 추가</button>
+        {issue && <span role="alert">{issue}</span>}
+      </div>
+      <div className="dock-area">
+        <DockviewReact
+          components={components}
+          onReady={ready}
+          theme={themeDark}
+        />
+      </div>
+    </div>
+  );
+}
+const tabComponents = { workspace: WorkspaceTab };
 function initialLayout(api: DockviewApi) {
   api.clear();
-  api.addPanel({ id: "audio", component: "audio", title: titles.audio });
-  api.addPanel({
-    id: "cable",
-    component: "cable",
-    title: titles.cable,
-    position: { referencePanel: "audio", direction: "within" },
-  });
-  api.addPanel({
-    id: "windows",
-    component: "windows",
-    title: titles.windows,
-    position: { referencePanel: "audio", direction: "right" },
-  });
-  api.addPanel({
-    id: "diagnostics",
-    component: "diagnostics",
-    title: titles.diagnostics,
-    initialHeight: 240,
-    position: { referencePanel: "windows", direction: "below" },
-  });
+  for (const seed of ["audio", "display", "cable", "windows"] as PanelId[]) {
+    api.addPanel({
+      id: seed,
+      component: "workspace",
+      title: titles[seed],
+      params: { seed },
+      ...(api.activePanel
+        ? {
+            position: {
+              referencePanel: api.activePanel.id,
+              direction: "within" as const,
+            },
+          }
+        : {}),
+    });
+  }
   api.getPanel("audio")?.api.setActive();
 }
 function validLayout(data: unknown): data is SerializedDockview {
@@ -583,291 +699,147 @@ function validLayout(data: unknown): data is SerializedDockview {
   return (
     !!candidate.grid &&
     !!candidate.panels &&
-    Object.entries(candidate.panels).every(
-      ([id, panel]) =>
-        Object.hasOwn(titles, id) && panel.contentComponent === id,
-    ) &&
-    !candidate.popoutGroups?.length
+    !candidate.popoutGroups?.length &&
+    Object.values(candidate.panels).every(
+      (panel) =>
+        panel.contentComponent === "workspace" &&
+        (!panel.params?.layout || validPaneLayout(panel.params.layout)),
+    )
   );
 }
 function Workspace() {
   const state = useWorkspace();
-  const apiRef = useRef<DockviewApi | null>(null);
+  const api = useRef<DockviewApi | null>(null);
   const subscriptions = useRef<{ dispose(): void }[]>([]);
-  const [active, setActive] = useState("audio");
-  const [notice, setNotice] = useState("배치가 이 브라우저에 자동 저장됩니다.");
-  useEffect(
-    () => () => {
-      subscriptions.current.forEach((subscription) => subscription.dispose());
-    },
-    [],
-  );
+  const [issue, setIssue] = useState("");
+  useEffect(() => () => subscriptions.current.forEach((s) => s.dispose()), []);
   const ready = (event: DockviewReadyEvent) => {
-    const api = event.api;
-    apiRef.current = api;
+    const dock = event.api;
+    api.current = dock;
     let restored = false;
     try {
-      const stored = localStorage.getItem(layoutKey);
-      if (stored) {
-        const data: unknown = JSON.parse(stored);
-        if (!validLayout(data)) throw new Error("Invalid layout");
-        api.fromJSON(data);
-        restored = true;
+      const raw = localStorage.getItem(layoutKey);
+      if (raw) {
+        const layout = JSON.parse(raw);
+        if (validLayout(layout)) {
+          dock.fromJSON(layout);
+          restored = true;
+        }
       }
-    } catch {
-      setNotice("저장된 배치를 읽지 못해 기본 배치로 열었습니다.");
-    }
-    if (!restored) initialLayout(api);
-    const requestedPanel = new URLSearchParams(window.location.search).get(
-      "panel",
-    );
-    if (requestedPanel && Object.hasOwn(titles, requestedPanel))
-      api.getPanel(requestedPanel)?.api.setActive();
+    } catch {}
+    if (!restored) initialLayout(dock);
+    const requested = new URLSearchParams(location.search).get("panel");
+    if (requested) dock.getPanel(requested)?.api.setActive();
     subscriptions.current = [
-      installTearOff(api),
-      api.onDidActivePanelChange((event) => setActive(event.panel?.id ?? "")),
-      api.onDidLayoutChange(() => {
-        // Persist the last complete grid; reopening a page must not spawn windows
-        // without a gesture or leave a detached panel missing from the workspace.
-        if (api.getPopouts().length) return;
+      installTearOff(dock),
+      dock.onDidLayoutChange(() => {
+        if (dock.getPopouts().length) return;
         try {
-          localStorage.setItem(layoutKey, JSON.stringify(api.toJSON()));
+          localStorage.setItem(layoutKey, JSON.stringify(dock.toJSON()));
         } catch {
-          setNotice(
-            "배치를 저장할 수 없습니다. 브라우저 저장 공간을 확인하세요.",
-          );
+          setIssue("탭 배치를 저장할 수 없습니다.");
         }
       }),
-      api.onDidOpenPopoutWindowFail(() =>
-        setNotice("새 창이 차단되었습니다. 이 사이트의 팝업을 허용해 주세요."),
-      ),
+      dock.onDidOpenPopoutWindowFail(() => setIssue("새 창을 열 수 없습니다.")),
     ];
-    setActive(api.activePanel?.id ?? "");
-  };
-  const openPanel = (id: PanelId) => {
-    const api = apiRef.current;
-    if (!api) return;
-    const panel =
-      api.getPanel(id) ??
-      api.addPanel({ id, component: id, title: titles[id] });
-    panel.api.setActive();
-    panel.api.getWindow().focus();
-  };
-  const split = (position: "right" | "bottom") => {
-    const api = apiRef.current;
-    const panel = api?.activePanel;
-    if (!api || !panel) return;
-    const reference = api.groups.find(
-      (group) =>
-        group !== panel.api.group && group.api.location.type === "grid",
-    );
-    panel.api.moveTo({ group: reference, position });
   };
   return (
-    <div className={`app-shell ${window.desktopShell ? "compact-shell" : ""}`}>
-      {window.desktopShell && (
-        <div className="compact-toolbar">
-          <details>
-            <summary>패널 · 설정</summary>
-            <div className="compact-menu">
-              {(Object.keys(titles) as PanelId[]).map((id) => (
-                <button key={id} onClick={() => openPanel(id)}>
-                  {titles[id]} 열기
-                </button>
-              ))}
-              <button onClick={() => split("right")}>좌우 분할</button>
-              <button onClick={() => split("bottom")}>상하 분할</button>
-              <button
-                onClick={() => {
-                  if (apiRef.current) initialLayout(apiRef.current);
-                }}
-              >
-                기본 배치
-              </button>
-              <button
-                onClick={() =>
-                  void backend.dispatch({
-                    kind: "native.command",
-                    command: { kind: "settings.reload" },
-                  })
-                }
-              >
-                설정 다시 읽기
-              </button>
-              <button
-                onClick={() =>
-                  void backend.dispatch({
-                    kind: "native.command",
-                    command: { kind: "stop_all" },
-                  })
-                }
-              >
-                모든 작업 중지
-              </button>
-              <button
-                onClick={() =>
-                  void backend.dispatch({
-                    kind: "native.command",
-                    command: { kind: "shutdown" },
-                  })
-                }
-              >
-                서비스 중지
-              </button>
-              <button onClick={() => window.desktopShell?.close()}>
-                UI 닫기 · 작업 유지
-              </button>
-            </div>
-          </details>
-          <span>
-            {state.pendingCommands
-              ? "처리 중…"
-              : state.connection === "connected"
-                ? "서비스 연결됨 · 창을 닫아도 작업 유지"
-                : "서비스 연결 중"}
-          </span>
-        </div>
-      )}
-      <header className="app-header">
-        <div className="brand">
-          <span className="brand-mark">▥</span>
-          <div>
-            <strong>Desktop Workspace</strong>
-            <span>데스크톱 도구 · 통합 작업 공간</span>
-          </div>
-        </div>
-        <span
-          className={`fixture-badge ${state.mode === "native" ? "native-badge" : ""}`}
+    <div className="app-shell compact-shell">
+      <div className="compact-toolbar">
+        <button
+          onClick={() => {
+            const dock = api.current;
+            if (!dock) return;
+            dock.addPanel({
+              id: crypto.randomUUID(),
+              component: "workspace",
+              title: "새 탭",
+              params: {},
+              ...(dock.activePanel
+                ? {
+                    position: {
+                      referencePanel: dock.activePanel.id,
+                      direction: "within",
+                    },
+                  }
+                : {}),
+            });
+          }}
         >
-          {state.mode === "fixture" ? "TEST WORKSPACE" : "DESKTOP WORKSPACE"}
-        </span>
-        <div className="workspace-actions">
-          {state.mode === "native" && (
-            <>
-              <button
-                disabled={state.connection !== "connected"}
-                onClick={() =>
-                  void backend.dispatch({
-                    kind: "native.command",
-                    command: { kind: "stop_all" },
-                  })
-                }
-              >
-                모든 작업 중지
+          탭 추가
+        </button>
+        <details>
+          <summary>설정</summary>
+          <div className="compact-menu">
+            <button
+              onClick={() => {
+                if (api.current) initialLayout(api.current);
+              }}
+            >
+              기본 탭 복원
+            </button>
+            <button
+              onClick={() =>
+                void backend.dispatch({
+                  kind: "native.command",
+                  command: { kind: "settings.reload" },
+                })
+              }
+            >
+              설정 다시 읽기
+            </button>
+            <button
+              onClick={() =>
+                void backend.dispatch({
+                  kind: "native.command",
+                  command: { kind: "stop_all" },
+                })
+              }
+            >
+              모든 작업 중지
+            </button>
+            <button
+              onClick={() =>
+                void backend.dispatch({
+                  kind: "native.command",
+                  command: { kind: "shutdown" },
+                })
+              }
+            >
+              서비스 중지
+            </button>
+            {window.desktopShell && (
+              <button onClick={() => window.desktopShell?.close()}>
+                창 닫기
               </button>
-              <button
-                disabled={state.connection !== "connected"}
-                onClick={() =>
-                  void backend.dispatch({
-                    kind: "native.command",
-                    command: { kind: "shutdown" },
-                  })
-                }
-              >
-                서비스 중지
-              </button>
-            </>
-          )}
-          <button onClick={() => split("right")}>좌우 분할</button>
-          <button onClick={() => split("bottom")}>상하 분할</button>
-          <button
-            onClick={() => {
-              if (apiRef.current) initialLayout(apiRef.current);
-            }}
-          >
-            기본 배치
-          </button>
-        </div>
-      </header>
-      <div className="mode-banner">
-        <span className="mode-dot" />
-        <strong>
-          {state.mode === "fixture" ? "테스트 모드" : "실사용 모드"}
-        </strong>
-        <span>
-          {state.mode === "fixture"
-            ? "가상 장치와 가상 창을 사용합니다. 실제 오디오·Windows 설정은 변경하지 않습니다."
-            : state.connection === "connected"
-              ? "실제 장치에 연결됐습니다. 시작·적용 버튼을 눌러야 작업이 실행됩니다. 탭을 닫아도 작업은 유지됩니다."
-              : "실사용 서비스에 연결 중이거나 연결이 끊겼습니다. 실제 작업의 시작 버튼은 비활성화됩니다."}
-        </span>
-        {state.mode === "native" && state.connection === "connected" && (
-          <button
-            onClick={() =>
-              void backend.dispatch({
-                kind: "native.command",
-                command: { kind: "settings.reload" },
-              })
-            }
-          >
-            설정 다시 읽기
-          </button>
-        )}
+            )}
+          </div>
+        </details>
       </div>
-      {!!state.pendingCommands && (
-        <p className="mode-banner" role="status">
-          명령 처리 중…
-        </p>
+      {issue && (
+        <div role="alert" className="service-error">
+          {issue}
+        </div>
       )}
       {state.serviceIssue && (
-        <div className="service-error" role="alert">
-          <strong>{state.serviceIssue.message}</strong>
-          <small>
-            {state.serviceIssue.code} · 요청 {state.serviceIssue.requestId}
-          </small>
+        <div role="alert" className="service-error">
+          {state.serviceIssue.message}
         </div>
       )}
       {!!state.native?.errors.length && (
-        <div className="service-error" role="alert">
+        <div role="alert" className="service-error">
           {state.native.errors.join(" · ")}
         </div>
       )}
       <div className="workspace-body">
-        <nav className="activity-bar" aria-label="제어 패널">
-          {(Object.keys(titles) as PanelId[]).map((id, index) => (
-            <button
-              className={active === id ? "active" : ""}
-              key={id}
-              aria-label={`${titles[id]} 열기`}
-              aria-pressed={active === id}
-              title={titles[id]}
-              onClick={() => openPanel(id)}
-            >
-              <span>{["DC", "AC", "WM", "LOG"][index]}</span>
-              <small>{["출력", "케이블", "창 배치", "진단"][index]}</small>
-            </button>
-          ))}
-        </nav>
         <main className="dock-area">
           <DockviewReact
-            components={components}
+            components={tabComponents}
             onReady={ready}
             theme={themeDark}
           />
         </main>
       </div>
-      <footer className="status-bar">
-        <span>
-          {state.mode === "fixture"
-            ? "● Fixture backend"
-            : state.connection === "connected"
-              ? "● 장치 서비스 연결됨"
-              : "● 서비스 연결 안 됨"}
-        </span>
-        <span>
-          오디오{" "}
-          {state.mode === "native" && state.audio.phase === "running"
-            ? "실행 중"
-            : phaseLabel[state.audio.phase]}{" "}
-          · 케이블{" "}
-          {state.mode === "native" && state.cable.phase === "running"
-            ? "실행 중"
-            : phaseLabel[state.cable.phase]}
-        </span>
-        <span className="layout-notice" role="status">
-          {notice}
-        </span>
-      </footer>
     </div>
   );
 }

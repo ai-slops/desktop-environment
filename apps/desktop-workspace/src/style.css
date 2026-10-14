@@ -6,6 +6,43 @@
   font-size: 14px;
   color-scheme: dark;
 }
+.workspace-tab {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.tab-name-input {
+  width: 100px;
+  min-width: 60px;
+  background: #152031;
+  color: inherit;
+  border: 1px solid #405573;
+  padding: 3px 6px;
+}
+.native-content > .preset-controls:first-child {
+  margin-top: 0;
+  padding-top: 4px;
+  border-top: 0;
+}
+.workspace-tab > .dock-area {
+  flex: 1;
+  min-height: 0;
+}
+.pane-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #181f2b;
+  border-bottom: 1px solid #354154;
+}
+.pane-toolbar select,
+.pane-toolbar button,
+.compact-toolbar > button {
+  font-size: 12px;
+  padding: 3px 8px;
+}
 .precise-volume {
   display: grid;
   gap: 8px;

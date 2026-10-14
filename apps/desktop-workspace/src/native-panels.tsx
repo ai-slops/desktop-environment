@@ -1,5 +1,8 @@
 import {
   useEffect,
+  useId,
+  createContext,
+  useContext,
   useState,
   useSyncExternalStore,
   type ReactNode,
@@ -24,11 +27,13 @@ export type NativePanelProps = {
 // Dockview may remount a panel while moving it between windows. Keep unsaved
 // selections and edits in the owning page, independently of the panel's DOM.
 const panelState = new Map<string, unknown>();
+export const PaneStateScope = createContext("");
 const panelListeners = new Set<() => void>();
 function usePanelState<T>(
   key: string,
   initial: T,
 ): [T, (value: SetStateAction<T>) => void] {
+  key = useContext(PaneStateScope) + ":" + key;
   if (!panelState.has(key)) panelState.set(key, initial);
   const value = useSyncExternalStore(
     (listener) => {
@@ -116,6 +121,7 @@ function Choices({
         ...outputs,
       ]
     : outputs;
+  const radioName = useId();
   const missing = selected && !items.some((output) => output.id === selected);
   return (
     <fieldset className="choices">
@@ -140,7 +146,7 @@ function Choices({
         >
           <input
             type="radio"
-            name={name}
+            name={radioName}
             checked={selected === output.id}
             onChange={() => choose(output.id)}
           />
@@ -246,6 +252,7 @@ export function NativeAudio({ data, invoke }: NativePanelProps) {
   const invalid = !source || !target || source === target;
   return (
     <>
+      <ComponentPresets data={data} invoke={invoke} component="audio" />
       <div className="section-heading">
         <div>
           <h1>오디오 출력 복제</h1>
@@ -317,16 +324,56 @@ export function NativeAudio({ data, invoke }: NativePanelProps) {
         출력 선택을 바꾸면 이 앱의 오디오 작업이 중지됩니다.
       </p>
       <NativeJobLog job={job} />
-      <Presets
-        names={data.settings.presets.map((preset) => preset.name)}
-        save={(name) => void invoke({ kind: "preset.save", name })}
-        overwrite={(name) =>
-          void invoke({ kind: "preset.save", name, overwrite: true })
-        }
-        load={(name) => void invoke({ kind: "preset.load", name })}
-        remove={(name) => void invoke({ kind: "preset.delete", name })}
-      />
+    </>
+  );
+}
+function ComponentPresets({
+  data,
+  invoke,
+  component,
+}: NativePanelProps & { component: "audio" | "display" }) {
+  const prefix = component + "/";
+  const presets = data.settings.presets.filter(
+    (preset) => !preset.name.includes("/") || preset.name.startsWith(prefix),
+  );
+  const resolve = (name: string) =>
+    presets.find((preset) => preset.name.replace(prefix, "") === name)?.name ??
+    prefix + name;
+  return (
+    <Presets
+      names={presets.map((preset) => preset.name.replace(prefix, ""))}
+      save={(name) => void invoke({ kind: "preset.save", name: prefix + name })}
+      overwrite={(name) =>
+        void invoke({
+          kind: "preset.save",
+          name: resolve(name),
+          overwrite: true,
+        })
+      }
+      load={(name) =>
+        void invoke({
+          kind: "component.preset.load",
+          component,
+          name: resolve(name),
+        })
+      }
+      remove={(name) =>
+        void invoke({ kind: "preset.delete", name: resolve(name) })
+      }
+    />
+  );
+}
+export function NativeDisplay({ data, invoke }: NativePanelProps) {
+  return (
+    <>
+      <ComponentPresets data={data} invoke={invoke} component="display" />
+      <div className="section-heading">
+        <h1>Display Relay</h1>
+      </div>
       <Mirrors data={data} invoke={invoke} />
+      <button onClick={() => void invoke({ kind: "settings.save" })}>
+        현재 설정 저장
+      </button>
     </>
   );
 }
@@ -473,6 +520,7 @@ function Mirrors({ data, invoke }: NativePanelProps) {
   );
 }
 export function NativeCablePanel({ data, invoke }: NativePanelProps) {
+  const cableRadioName = useId();
   const settings = data.cableSettings;
   const job = data.jobs.cable;
   const outputs = data.endpoints.filter(
@@ -499,6 +547,12 @@ export function NativeCablePanel({ data, invoke }: NativePanelProps) {
     settings.output_id === settings.cable.playback_id;
   return (
     <>
+      <Presets
+        names={settings.presets.map((preset) => preset.name)}
+        save={(name) => void invoke({ kind: "cable.preset.save", name })}
+        load={(name) => void invoke({ kind: "cable.preset.load", name })}
+        remove={(name) => void invoke({ kind: "cable.preset.delete", name })}
+      />
       <div className="section-heading">
         <div>
           <h1>가상 케이블 모니터링</h1>
@@ -517,7 +571,7 @@ export function NativeCablePanel({ data, invoke }: NativePanelProps) {
           >
             <input
               type="radio"
-              name="설치된 케이블"
+              name={cableRadioName}
               checked={settings.cable?.playback_id === cable.playback_id}
               onChange={() =>
                 void invoke({ kind: "cable.select", id: cable.playback_id })
@@ -648,12 +702,6 @@ export function NativeCablePanel({ data, invoke }: NativePanelProps) {
         </p>
       )}
       <NativeJobLog job={job} />
-      <Presets
-        names={settings.presets.map((preset) => preset.name)}
-        save={(name) => void invoke({ kind: "cable.preset.save", name })}
-        load={(name) => void invoke({ kind: "cable.preset.load", name })}
-        remove={(name) => void invoke({ kind: "cable.preset.delete", name })}
-      />
     </>
   );
 }
