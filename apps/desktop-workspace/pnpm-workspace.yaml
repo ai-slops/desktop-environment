@@ -2,3 +2,4 @@ minimumReleaseAgeExclude:
   - electron@44.7.2
 onlyBuiltDependencies:
   - electron
+confirmModulesPurge: false

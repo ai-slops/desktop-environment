@@ -16,7 +16,7 @@ if(!$SkipBuild){
     try{ & $cargo build -j 1 --target-dir target/desktop-workspace-build -p desktop-workspace -p desktop-workspace-host -p window-manager -p display-relay
         if($LASTEXITCODE){throw 'Native build failed'}
         Push-Location (Join-Path $repo 'apps\desktop-workspace')
-        try{ & $pnpm install --frozen-lockfile; if($LASTEXITCODE){throw 'Dependency install failed'}
+        try{ & $pnpm install --frozen-lockfile --prod=false; if($LASTEXITCODE){throw 'Dependency install failed'}
             & $node node_modules/electron/install.js; if($LASTEXITCODE){throw 'Electron download failed'}
             & $pnpm build; if($LASTEXITCODE){throw 'Web build failed'}
             & $node package-desktop.mjs $PackageRoot; if($LASTEXITCODE){throw 'Package build failed'}

@@ -13,6 +13,11 @@ outside all workspace windows and release to create another native window.
 Installation needs Rust, Node.js 22.12+ and pnpm; the installed app bundles its
 runtime and needs none of those build tools to run.
 
+The development toolchain pins pnpm 10.29.2 in mise and the web package. Normal
+installs reuse compatible `node_modules`; changing the package-manager/layout
+may require one automatic recreation. Dependency installation includes build
+tools explicitly and does not wait for a purge confirmation prompt.
+
 ```powershell
 just desktop-workspace-install  # safe while UI windows are open
 just build                     # prepare a development package without installing
