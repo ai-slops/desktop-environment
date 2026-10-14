@@ -624,49 +624,6 @@ function EditableTab(
     backend.dispatch({ kind: "native.command", command });
   return (
     <div className="workspace-tab">
-      <div className="pane-toolbar">
-        <input
-          aria-label="탭 이름"
-          className="tab-name-input"
-          value={tabName}
-          onChange={(event) => setTabName(event.target.value)}
-          onBlur={() => {
-            const name = tabName.trim() || props.api.title || "새 탭";
-            setTabName(name);
-            props.api.setTitle(name);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") event.currentTarget.blur();
-          }}
-        />
-        <select
-          aria-label="추가할 구성요소"
-          value={kind}
-          onChange={(event) => setKind(event.target.value as PanelId)}
-        >
-          {Object.entries(titles).map(([id, title]) => (
-            <option key={id} value={id}>
-              {title}
-            </option>
-          ))}
-        </select>
-        <select
-          aria-label="추가할 내용"
-          value={view}
-          onChange={(event) => setView(event.target.value as "full" | "launch")}
-        >
-          <option value="launch">프리셋 · 시작</option>
-          <option value="full">전체 설정</option>
-        </select>
-        <button
-          disabled={widgets.length >= 32}
-          onClick={() =>
-            update([...widgets, { id: crypto.randomUUID(), type: kind, view }])
-          }
-        >
-          내용 추가
-        </button>
-      </div>
       <div className="tab-content">
         {widgets.map((widget, index) => {
           const Component = components[widget.type];
@@ -758,6 +715,49 @@ function EditableTab(
             </article>
           );
         })}
+      </div>
+      <div className="pane-toolbar">
+        <input
+          aria-label="탭 이름"
+          className="tab-name-input"
+          value={tabName}
+          onChange={(event) => setTabName(event.target.value)}
+          onBlur={() => {
+            const name = tabName.trim() || props.api.title || "새 탭";
+            setTabName(name);
+            props.api.setTitle(name);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+          }}
+        />
+        <select
+          aria-label="추가할 구성요소"
+          value={kind}
+          onChange={(event) => setKind(event.target.value as PanelId)}
+        >
+          {Object.entries(titles).map(([id, title]) => (
+            <option key={id} value={id}>
+              {title}
+            </option>
+          ))}
+        </select>
+        <select
+          aria-label="추가할 내용"
+          value={view}
+          onChange={(event) => setView(event.target.value as "full" | "launch")}
+        >
+          <option value="launch">프리셋 · 시작</option>
+          <option value="full">전체 설정</option>
+        </select>
+        <button
+          disabled={widgets.length >= 32}
+          onClick={() =>
+            update([...widgets, { id: crypto.randomUUID(), type: kind, view }])
+          }
+        >
+          내용 추가
+        </button>
       </div>
     </div>
   );
