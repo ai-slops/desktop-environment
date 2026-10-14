@@ -1,8 +1,8 @@
 # Integrated Desktop Workspace
 
 Audio Repeater, Display Relay, Audio Cable and Window Manager have separate
-service-backed control panes. Each tab owns a pane list: components can be added,
-split and arranged inside the tab independently of creating or moving tabs. Tabs
+service-backed control panes. Each dockable tab contains configurable component cards with either full settings
+or only preset/start controls. No second tab level is created. Tabs
 can detach into native windows, and panes retain their own editor selections. Mirroring
 video stays in native display-relay windows. See [setup and available controls](../apps/desktop-workspace/README.md).
 
@@ -118,3 +118,9 @@ Audio Repeater/Display Relay preset loading, unchanged worker PID for VAC gain-o
 presets, automatic restart for changed VAC routes, and keeping stopped routes
 stopped. One CPU saturation run measured a 60.25 ms output gap and failed the
 unchanged continuity gate; the subsequent full run passed with 0.021 ms gaps.
+
+The card revision removes nested Dockview instances. Guest acceptance verifies one
+tab level, mixed launch-only cards, audio/cable/display preset selection starting
+real owned jobs, tab tear-off, and restored cards after reopening. Node's mise
+runtime declaration is tracked. Existing pure load commands remain available for
+editors; the UI's preset selectors use explicit load-and-run commands.

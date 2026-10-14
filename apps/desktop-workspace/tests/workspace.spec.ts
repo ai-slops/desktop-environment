@@ -38,8 +38,8 @@ test("exclusive error includes remedy and request ID in both panel and diagnosti
   await expect(issue).toContainText("0x8889000A");
   await expect(issue).toContainText("공유 모드");
   await expect(issue).toContainText("fixture-");
-  await page.getByLabel("추가할 pane 구성요소").selectOption("diagnostics");
-  await page.getByRole("button", { name: "pane 추가", exact: true }).click();
+  await page.getByLabel("추가할 구성요소").selectOption("diagnostics");
+  await page.getByRole("button", { name: "내용 추가", exact: true }).click();
   await expect(page.getByRole("log", { name: "명령 기록" })).toContainText(
     "AUDCLNT_E_DEVICE_IN_USE",
   );
@@ -110,7 +110,7 @@ test("tab dragging changes groups and the arrangement survives reload", async ({
     .poll(() =>
       page.evaluate(() => {
         const layout = JSON.parse(
-          localStorage.getItem("desktop-workspace.tabs.v2") ?? "{}",
+          localStorage.getItem("desktop-workspace.tabs.v3") ?? "{}",
         );
         const groups: string[][] = [];
         const walk = (node: { type: string; data: unknown }) => {
@@ -135,7 +135,7 @@ test("tab dragging changes groups and the arrangement survives reload", async ({
 });
 test("corrupt saved layout falls back without crashing", async ({ page }) => {
   await page.evaluate(() =>
-    localStorage.setItem("desktop-workspace.tabs.v2", "bad-json"),
+    localStorage.setItem("desktop-workspace.tabs.v3", "bad-json"),
   );
   await page.reload();
   await expect(audio(page)).toBeVisible();

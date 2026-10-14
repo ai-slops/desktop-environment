@@ -56,14 +56,19 @@ Stop owned outputs and use **설정 다시 읽기** before saving after an exter
 
 ## Tabs, panes and windows
 
-Each top-level tab owns its own pane list and layout. Add a tab independently,
-then choose a component and use **pane 추가** inside that tab. Multiple panes may
-show one component; they share its native settings/jobs while keeping window editor
-selections separate. Default tabs show each of the four components individually.
-Presets appear first in Audio Repeater, Display Relay and Audio Cable panes. VAC
-preset loads update gain/mute in the existing worker when the route matches; a
-changed route automatically replaces the running monitor after validation. A
-stopped monitor stays stopped when loading a preset.
+Each existing dockable tab can contain a custom list of component cards. There is
+one tab bar per dock group, with no nested workspace/tab layer. Choose a component
+and **프리셋 · 시작** or **전체 설정**, then use **내용 추가**. A tab can contain
+only quick launch cards for several components, or mix them with full settings.
+Cards can be reordered or removed without stopping their component's jobs.
+
+Selecting an audio/cable/display preset immediately applies it and starts that
+component. Selecting the same running route preserves its worker; changing a
+route replaces only that component's work. Compact Window Manager controls first
+require an explicit screen-region choice; selecting a saved view previews and
+applies it through the existing authority checks. Full Window Manager editors
+retain their explicit preview/apply workflow. Opening the app starts no jobs.
+Existing v1/v2 layouts are imported into the single-level card layout.
 
 Drag tabs onto tab strips to combine, or onto panel edges to split. Drag separators
 to resize. In the native EXE, dragging a tab outside the windows detaches it without
@@ -76,7 +81,7 @@ A crashed Rust host terminates its audio/mirror children
 through Windows Job Objects; window recovery uses the existing independent watchdog.
 The stop script can terminate a recorded broken server after checking PID/start time.
 
-The last complete grid is saved under `desktop-workspace.tabs.v2`. Reload restores
+The last complete grid is saved under `desktop-workspace.tabs.v3`. Reload restores
 that grid and reconnects to jobs, but does not automatically open popups. Unsaved
 editor drafts reset on full reload. Independently launched pages do not exchange
 panel DOM or drafts. Native settings remain in files.

@@ -18,6 +18,7 @@ import {
   NativeCablePanel,
   NativeWindows,
   NativeJobLog,
+  NativeLaunch,
   PaneStateScope,
 } from "./native-panels.tsx";
 import type { NativeCommand } from "./native-protocol.ts";
@@ -38,7 +39,7 @@ const titles = {
   diagnostics: "진단 · 실행 기록",
 };
 type PanelId = keyof typeof titles;
-const layoutKey = "desktop-workspace.tabs.v2";
+const layoutKey = "desktop-workspace.tabs.v3";
 const useWorkspace = () =>
   useSyncExternalStore(backend.subscribe, backend.getSnapshot);
 const send = (command: Command) => {
@@ -514,16 +515,18 @@ function DiagnosticsPanel(props: IDockviewPanelProps) {
 function NativePanel({
   type,
   dockProps,
+  scope,
 }: {
   type: "audio" | "display" | "cable" | "windows";
   dockProps: IDockviewPanelProps;
+  scope?: string;
 }) {
   const state = useWorkspace();
   const invoke = (command: NativeCommand) =>
     backend.dispatch({ kind: "native.command", command });
   const label = `${titles[type]} 패널`;
   return (
-    <PaneStateScope.Provider value={dockProps.api.id}>
+    <PaneStateScope.Provider value={scope ?? dockProps.api.id}>
       <section className="panel-body" aria-label={label}>
         <PanelTools {...dockProps} />
         {state.native ? (
@@ -568,69 +571,54 @@ const components = {
   windows: WindowsPanel,
   diagnostics: DiagnosticsPanel,
 };
-function validPaneLayout(data: unknown): data is SerializedDockview {
-  if (!data || typeof data !== "object") return false;
-  const candidate = data as SerializedDockview;
-  return (
-    !!candidate.grid &&
-    !!candidate.panels &&
-    !candidate.popoutGroups?.length &&
-    Object.values(candidate.panels).every(
-      (panel) =>
-        !!panel.contentComponent &&
-        Object.hasOwn(titles, panel.contentComponent),
-    )
-  );
+
+type Widget = { id: string; type: PanelId; view: "full" | "launch" };
+function seedWidgets(seed?: PanelId): Widget[] {
+  return seed ? [{ id: crypto.randomUUID(), type: seed, view: "full" }] : [];
 }
-function WorkspaceTab(
-  props: IDockviewPanelProps<{ seed?: PanelId; layout?: SerializedDockview }>,
+function widgetsFrom(params: {
+  widgets?: Widget[];
+  seed?: PanelId;
+  layout?: SerializedDockview;
+}): Widget[] {
+  if (params.widgets) return params.widgets;
+  if (params.layout)
+    return Object.values(params.layout.panels)
+      .filter(
+        (panel) =>
+          !!panel.contentComponent &&
+          Object.hasOwn(titles, panel.contentComponent),
+      )
+      .map((panel) => ({
+        id: crypto.randomUUID(),
+        type: panel.contentComponent as PanelId,
+        view: "full",
+      }));
+  return seedWidgets(params.seed);
+}
+function EditableTab(
+  props: IDockviewPanelProps<{
+    widgets?: Widget[];
+    seed?: PanelId;
+    layout?: SerializedDockview;
+  }>,
 ) {
-  const api = useRef<DockviewApi | null>(null);
-  const subscriptions = useRef<{ dispose(): void }[]>([]);
+  const state = useWorkspace();
+  const [widgets, setWidgets] = useState<Widget[]>(() =>
+    widgetsFrom(props.params),
+  );
   const [kind, setKind] = useState<PanelId>(props.params.seed ?? "audio");
+  const [view, setView] = useState<"full" | "launch">("launch");
   const [tabName, setTabName] = useState(props.api.title ?? "새 탭");
-  const [issue, setIssue] = useState("");
-  useEffect(() => () => subscriptions.current.forEach((s) => s.dispose()), []);
-  const add = (type: PanelId) => {
-    const dock = api.current;
-    if (!dock) return;
-    const pane = dock.addPanel({
-      id: crypto.randomUUID(),
-      component: type,
-      title: titles[type],
-      ...(dock.activePanel
-        ? {
-            position: {
-              referencePanel: dock.activePanel.id,
-              direction: "right" as const,
-            },
-          }
-        : {}),
-    });
-    pane.api.setActive();
+  const update = (next: Widget[]) => {
+    setWidgets(next);
+    props.api.updateParameters({ widgets: next });
   };
-  const ready = (event: DockviewReadyEvent) => {
-    const dock = event.api;
-    api.current = dock;
-    if (validPaneLayout(props.params.layout))
-      dock.fromJSON(props.params.layout);
-    else if (props.params.seed) add(props.params.seed);
-    let previous = JSON.stringify(dock.toJSON());
-    const save = () => {
-      if (dock.getPopouts().length) return;
-      const layout = dock.toJSON();
-      const serialized = JSON.stringify(layout);
-      if (serialized === previous) return;
-      previous = serialized;
-      props.api.updateParameters({ layout });
-    };
-    props.api.updateParameters({ layout: dock.toJSON() });
-    subscriptions.current = [
-      installTearOff(dock),
-      dock.onDidLayoutChange(save),
-      dock.onDidOpenPopoutWindowFail(() => setIssue("새 창을 열 수 없습니다.")),
-    ];
-  };
+  useEffect(() => {
+    props.api.updateParameters({ widgets });
+  }, []);
+  const invoke = (command: NativeCommand) =>
+    backend.dispatch({ kind: "native.command", command });
   return (
     <div className="workspace-tab">
       <div className="pane-toolbar">
@@ -649,9 +637,9 @@ function WorkspaceTab(
           }}
         />
         <select
-          aria-label="추가할 pane 구성요소"
+          aria-label="추가할 구성요소"
           value={kind}
-          onChange={(e) => setKind(e.target.value as PanelId)}
+          onChange={(event) => setKind(event.target.value as PanelId)}
         >
           {Object.entries(titles).map(([id, title]) => (
             <option key={id} value={id}>
@@ -659,26 +647,111 @@ function WorkspaceTab(
             </option>
           ))}
         </select>
-        <button onClick={() => add(kind)}>pane 추가</button>
-        {issue && <span role="alert">{issue}</span>}
+        <select
+          aria-label="추가할 내용"
+          value={view}
+          onChange={(event) => setView(event.target.value as "full" | "launch")}
+        >
+          <option value="launch">프리셋 · 시작</option>
+          <option value="full">전체 설정</option>
+        </select>
+        <button
+          disabled={widgets.length >= 32}
+          onClick={() =>
+            update([...widgets, { id: crypto.randomUUID(), type: kind, view }])
+          }
+        >
+          내용 추가
+        </button>
       </div>
-      <div className="dock-area">
-        <DockviewReact
-          components={components}
-          onReady={ready}
-          theme={themeDark}
-        />
+      <div className="tab-content">
+        {widgets.map((widget, index) => {
+          const Component = components[widget.type];
+          return (
+            <article className="tab-widget" key={widget.id}>
+              <header>
+                <strong>{titles[widget.type]}</strong>
+                <div>
+                  <button
+                    aria-label={titles[widget.type] + " 위로"}
+                    disabled={index === 0}
+                    onClick={() => {
+                      const next = [...widgets];
+                      [next[index - 1], next[index]] = [
+                        next[index],
+                        next[index - 1],
+                      ];
+                      update(next);
+                    }}
+                  >
+                    ↑
+                  </button>
+                  <button
+                    aria-label={titles[widget.type] + " 아래로"}
+                    disabled={index === widgets.length - 1}
+                    onClick={() => {
+                      const next = [...widgets];
+                      [next[index + 1], next[index]] = [
+                        next[index],
+                        next[index + 1],
+                      ];
+                      update(next);
+                    }}
+                  >
+                    ↓
+                  </button>
+                  <button
+                    aria-label={titles[widget.type] + " 내용 제거"}
+                    onClick={() =>
+                      update(widgets.filter((item) => item.id !== widget.id))
+                    }
+                  >
+                    ×
+                  </button>
+                </div>
+              </header>
+              {widget.type === "diagnostics" ? (
+                <DiagnosticsPanel {...props} />
+              ) : state.mode === "native" && state.native ? (
+                widget.view === "launch" ? (
+                  <fieldset
+                    className="native-content launch-content"
+                    aria-label={titles[widget.type] + " 프리셋 · 시작"}
+                    disabled={
+                      state.connection !== "connected" ||
+                      !!state.pendingCommands
+                    }
+                  >
+                    <NativeLaunch
+                      data={state.native}
+                      invoke={invoke}
+                      type={widget.type}
+                    />
+                  </fieldset>
+                ) : (
+                  <NativePanel
+                    type={widget.type}
+                    dockProps={props}
+                    scope={props.api.id + "/" + widget.id}
+                  />
+                )
+              ) : (
+                <Component {...props} />
+              )}
+            </article>
+          );
+        })}
       </div>
     </div>
   );
 }
-const tabComponents = { workspace: WorkspaceTab };
+const tabComponents = { tab: EditableTab };
 function initialLayout(api: DockviewApi) {
   api.clear();
   for (const seed of ["audio", "display", "cable", "windows"] as PanelId[]) {
     api.addPanel({
       id: seed,
-      component: "workspace",
+      component: "tab",
       title: titles[seed],
       params: { seed },
       ...(api.activePanel
@@ -702,8 +775,15 @@ function validLayout(data: unknown): data is SerializedDockview {
     !candidate.popoutGroups?.length &&
     Object.values(candidate.panels).every(
       (panel) =>
-        panel.contentComponent === "workspace" &&
-        (!panel.params?.layout || validPaneLayout(panel.params.layout)),
+        panel.contentComponent === "tab" &&
+        (!panel.params?.widgets ||
+          (Array.isArray(panel.params.widgets) &&
+            panel.params.widgets.length <= 32 &&
+            panel.params.widgets.every(
+              (widget: Widget) =>
+                Object.hasOwn(titles, widget.type) &&
+                ["full", "launch"].includes(widget.view),
+            ))),
     )
   );
 }
@@ -718,9 +798,37 @@ function Workspace() {
     api.current = dock;
     let restored = false;
     try {
-      const raw = localStorage.getItem(layoutKey);
+      const raw =
+        localStorage.getItem(layoutKey) ??
+        localStorage.getItem("desktop-workspace.tabs.v2") ??
+        localStorage.getItem("desktop-workspace.layout.v1");
       if (raw) {
         const layout = JSON.parse(raw);
+        for (const panel of Object.values(layout.panels ?? {}) as {
+          contentComponent: string;
+          params?: {
+            widgets?: Widget[];
+            seed?: PanelId;
+            layout?: SerializedDockview;
+          };
+        }[]) {
+          const old = panel.contentComponent;
+          if (
+            old === "workspace" ||
+            old === "tab" ||
+            Object.hasOwn(titles, old)
+          ) {
+            panel.contentComponent = "tab";
+            panel.params = {
+              widgets: widgetsFrom({
+                ...panel.params,
+                seed: Object.hasOwn(titles, old)
+                  ? (old as PanelId)
+                  : panel.params?.seed,
+              }),
+            };
+          }
+        }
         if (validLayout(layout)) {
           dock.fromJSON(layout);
           restored = true;
@@ -752,7 +860,7 @@ function Workspace() {
             if (!dock) return;
             dock.addPanel({
               id: crypto.randomUUID(),
-              component: "workspace",
+              component: "tab",
               title: "새 탭",
               params: {},
               ...(dock.activePanel

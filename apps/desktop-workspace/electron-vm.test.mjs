@@ -197,7 +197,7 @@ try {
       .phase,
     "stopped",
   );
-  await command({ kind: "cable.start" });
+  await cable.getByLabel("저장된 프리셋").selectOption("quiet");
   await expect
     .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase, {
       timeout: 15000,
@@ -244,10 +244,10 @@ try {
       .count(),
     0,
   );
-  await page.getByLabel("추가할 pane 구성요소").selectOption("display");
-  await page.getByRole("button", { name: "pane 추가", exact: true }).click();
+  await page.getByLabel("추가할 구성요소").selectOption("display");
+  await page.getByRole("button", { name: "내용 추가", exact: true }).click();
   await expect(
-    page.getByRole("region", { name: "Display Relay 패널" }),
+    page.getByRole("group", { name: "Display Relay 프리셋 · 시작" }),
   ).toBeVisible();
   await page
     .locator(".dv-tab")
@@ -258,7 +258,7 @@ try {
     page.getByRole("region", { name: "Audio Repeater 패널" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Display Relay 패널" }),
+    page.getByRole("group", { name: "Display Relay 프리셋 · 시작" }),
   ).toBeHidden();
   await page
     .locator(".dv-tab")
@@ -266,10 +266,95 @@ try {
     .first()
     .click();
   await expect(
-    page.getByRole("region", { name: "Display Relay 패널" }),
+    page.getByRole("group", { name: "Display Relay 프리셋 · 시작" }),
   ).toBeVisible();
   console.log(
     "VM step: live VAC preset and independent per-tab pane lists passed",
+  );
+
+  await page.getByRole("button", { name: "탭 추가", exact: true }).click();
+  await page.getByLabel("탭 이름").fill("빠른 실행");
+  await page.getByLabel("탭 이름").press("Enter");
+  for (const kind of ["audio", "cable", "display"]) {
+    await page.getByLabel("추가할 구성요소").selectOption(kind);
+    await page.getByLabel("추가할 내용").selectOption("launch");
+    await page.getByRole("button", { name: "내용 추가", exact: true }).click();
+  }
+  assert.equal(
+    await page.locator(".workspace-tab:visible .panel-body").count(),
+    0,
+    "A tab may contain launch controls only",
+  );
+  assert.equal(
+    await page.locator(".workspace-tab .dv-tabs-and-actions-container").count(),
+    0,
+    "No nested tab bar may be introduced",
+  );
+  const launchCable = page.getByRole("group", {
+    name: "Audio Cable 프리셋 · 시작",
+  });
+  await launchCable.getByRole("button", { name: "중지", exact: true }).click();
+  await expect
+    .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase)
+    .toBe("stopped");
+  await launchCable.getByLabel("실행할 프리셋").selectOption("alternate");
+  await expect
+    .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase, {
+      timeout: 15000,
+    })
+    .toBe("running");
+  await launchCable.getByLabel("실행할 프리셋").selectOption("quiet");
+  await expect
+    .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase, {
+      timeout: 15000,
+    })
+    .toBe("running");
+  await command({ kind: "audio.select", role: "source", id: pair.playback_id });
+  await command({ kind: "audio.select", role: "target", id: target.id });
+  await command({ kind: "preset.save", name: "audio/route" });
+  await page
+    .getByRole("group", { name: "Audio Repeater 프리셋 · 시작" })
+    .getByLabel("실행할 프리셋")
+    .selectOption("audio/route");
+  await expect
+    .poll(async () => (await command({ kind: "snapshot" })).jobs.audio.phase, {
+      timeout: 15000,
+    })
+    .toBe("running");
+  const display = state.displays[0];
+  assert.ok(display);
+  await command({
+    kind: "mirror.settings",
+    index: 0,
+    settings: {
+      enabled: true,
+      display: display.id,
+      display_label: display.name,
+      fullscreen: false,
+      fps: 30,
+      timeout_ms: 100,
+    },
+  });
+  await command({ kind: "preset.save", name: "display/screen" });
+  await page
+    .getByRole("group", { name: "Display Relay 프리셋 · 시작" })
+    .getByLabel("실행할 프리셋")
+    .selectOption("display/screen");
+  await expect
+    .poll(
+      async () => (await command({ kind: "snapshot" })).jobs.mirrors[0].phase,
+      { timeout: 15000 },
+    )
+    .toBe("running");
+  await command({ kind: "mirror.stop", index: 0 });
+  await command({ kind: "audio.stop" });
+  await page
+    .locator(".dv-tab")
+    .filter({ hasText: "Audio Cable" })
+    .first()
+    .click();
+  console.log(
+    "VM step: one tab level, mixed launch-only cards and all preset selections auto-start passed",
   );
   // Install a distinct immutable version while UI and audio images are open.
   const update = join(root, "update-package");
@@ -450,7 +535,7 @@ try {
   console.log("VM step: reopened UI");
   const reopened = await app.firstWindow();
   await expect(
-    reopened.getByRole("region", { name: "Display Relay 패널" }),
+    reopened.getByRole("group", { name: "Display Relay 프리셋 · 시작" }),
   ).toBeVisible();
   await expect(
     reopened

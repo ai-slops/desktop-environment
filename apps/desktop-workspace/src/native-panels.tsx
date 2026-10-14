@@ -206,7 +206,10 @@ function Presets({
         <select
           aria-label="저장된 프리셋"
           value={selected}
-          onChange={(event) => setSelected(event.target.value)}
+          onChange={(event) => {
+            setSelected(event.target.value);
+            if (event.target.value) load(event.target.value);
+          }}
         >
           <option value="">프리셋 선택</option>
           {names.map((name) => (
@@ -217,7 +220,7 @@ function Presets({
           disabled={!names.includes(selected)}
           onClick={() => load(selected)}
         >
-          불러오기
+          시작
         </button>
         {overwrite && (
           <button
@@ -352,7 +355,7 @@ function ComponentPresets({
       }
       load={(name) =>
         void invoke({
-          kind: "component.preset.load",
+          kind: "component.preset.run",
           component,
           name: resolve(name),
         })
@@ -361,6 +364,174 @@ function ComponentPresets({
         void invoke({ kind: "preset.delete", name: resolve(name) })
       }
     />
+  );
+}
+export function NativeLaunch({
+  data,
+  invoke,
+  type,
+}: NativePanelProps & { type: "audio" | "display" | "cable" | "windows" }) {
+  const [selected, setSelected] = useState("");
+  if (type === "windows") return <WindowLaunch data={data} invoke={invoke} />;
+  const prefix = type + "/";
+  const presets =
+    type === "cable"
+      ? data.cableSettings.presets.map((preset) => ({
+          id: preset.name,
+          name: preset.name,
+        }))
+      : data.settings.presets
+          .filter(
+            (preset) =>
+              !preset.name.includes("/") || preset.name.startsWith(prefix),
+          )
+          .map((preset) => ({
+            id: preset.name,
+            name: preset.name.replace(prefix, ""),
+          }));
+  const job =
+    type === "cable"
+      ? data.jobs.cable
+      : type === "audio"
+        ? data.jobs.audio
+        : (data.jobs.mirrors.find(active) ?? data.jobs.mirrors[0]);
+  const runPreset = (name: string) =>
+    void invoke(
+      type === "cable"
+        ? { kind: "cable.preset.run", name }
+        : { kind: "component.preset.run", component: type, name },
+    );
+  const start = () => {
+    if (selected) return runPreset(selected);
+    if (type === "display") {
+      data.jobs.mirrors.forEach((mirror, index) => {
+        if (
+          !active(mirror) &&
+          [
+            data.settings.last_used.display,
+            ...data.settings.last_used.additional_displays,
+          ][index].enabled
+        )
+          void invoke({ kind: "mirror.start", index });
+      });
+    } else
+      void invoke({ kind: type === "audio" ? "audio.start" : "cable.start" });
+  };
+  return (
+    <>
+      <NativeStatus job={job} />
+      <select
+        aria-label="실행할 프리셋"
+        value={selected}
+        onChange={(event) => {
+          setSelected(event.target.value);
+          if (event.target.value) runPreset(event.target.value);
+        }}
+      >
+        <option value="">현재 설정</option>
+        {presets.map((preset) => (
+          <option key={preset.id} value={preset.id}>
+            {preset.name}
+          </option>
+        ))}
+      </select>
+      <div className="action-row">
+        <button onClick={start}>시작</button>
+        <button
+          disabled={!active(job)}
+          onClick={() => {
+            if (type === "display")
+              data.jobs.mirrors.forEach((mirror, index) => {
+                if (active(mirror)) void invoke({ kind: "mirror.stop", index });
+              });
+            else
+              void invoke({
+                kind: type === "audio" ? "audio.stop" : "cable.stop",
+              });
+          }}
+        >
+          중지
+        </button>
+      </div>
+      {job.error && <p role="alert">{job.error}</p>}
+    </>
+  );
+}
+function WindowLaunch({ data, invoke }: NativePanelProps) {
+  const [slot, setSlot] = useState("");
+  const [view, setView] = useState("");
+  const config = data.wm.configuration;
+  const run = async (id: string) => {
+    if (!config || !slot || !id) return;
+    const preview = await invoke({
+      kind: "windows.session",
+      command: {
+        kind: "preview",
+        request: {
+          id: crypto.randomUUID(),
+          expected_revision: config.revision,
+          scope: [slot],
+          targets: [
+            {
+              view: id,
+              roots: Object.fromEntries(
+                Object.keys(config.views[id].roots).map((root) => [root, slot]),
+              ),
+            },
+          ],
+          mode: "open",
+          retain: [],
+          selected_tabs: {},
+          focus: null,
+        },
+      },
+    });
+    if (preview.ok)
+      await invoke({
+        kind: "windows.session",
+        command: { kind: "apply", plan: (preview.result as NativePlan).plan },
+      });
+  };
+  if (!data.wm.connected)
+    return (
+      <button onClick={() => void invoke({ kind: "windows.connect" })}>
+        창 관리자 연결
+      </button>
+    );
+  return (
+    <>
+      <select
+        aria-label="배치할 화면 영역"
+        value={slot}
+        onChange={(event) => setSlot(event.target.value)}
+      >
+        <option value="">화면 영역 선택</option>
+        {Object.values(config?.slots ?? {}).map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.name}
+          </option>
+        ))}
+      </select>
+      <select
+        aria-label="실행할 저장된 배치"
+        disabled={!slot}
+        value={view}
+        onChange={(event) => {
+          setView(event.target.value);
+          void run(event.target.value);
+        }}
+      >
+        <option value="">저장된 배치 선택</option>
+        {Object.values(config?.views ?? {}).map((item) => (
+          <option key={item.id} value={item.id}>
+            {item.name}
+          </option>
+        ))}
+      </select>
+      <button disabled={!slot || !view} onClick={() => void run(view)}>
+        시작
+      </button>
+    </>
   );
 }
 export function NativeDisplay({ data, invoke }: NativePanelProps) {
@@ -550,7 +721,7 @@ export function NativeCablePanel({ data, invoke }: NativePanelProps) {
       <Presets
         names={settings.presets.map((preset) => preset.name)}
         save={(name) => void invoke({ kind: "cable.preset.save", name })}
-        load={(name) => void invoke({ kind: "cable.preset.load", name })}
+        load={(name) => void invoke({ kind: "cable.preset.run", name })}
         remove={(name) => void invoke({ kind: "cable.preset.delete", name })}
       />
       <div className="section-heading">

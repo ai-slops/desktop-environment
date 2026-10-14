@@ -41,6 +41,8 @@ pub enum Command {
     PresetLoad { name: String },
     #[serde(rename = "component.preset.load")]
     ComponentPresetLoad { component: String, name: String },
+    #[serde(rename = "component.preset.run")]
+    ComponentPresetRun { component: String, name: String },
     #[serde(rename = "preset.delete")]
     PresetDelete { name: String },
     #[serde(rename = "cable.select")]
@@ -63,6 +65,8 @@ pub enum Command {
     CablePresetSave { name: String },
     #[serde(rename = "cable.preset.load")]
     CablePresetLoad { name: String },
+    #[serde(rename = "cable.preset.run")]
+    CablePresetRun { name: String },
     #[serde(rename = "cable.preset.delete")]
     CablePresetDelete { name: String },
     #[serde(rename = "mirror.settings")]
@@ -424,6 +428,70 @@ impl Controller {
                     _ => bail!("지원하지 않는 구성요소입니다."),
                 }
             }
+            Command::ComponentPresetRun { component, name } => {
+                let mut settings = self
+                    .store
+                    .presets
+                    .iter()
+                    .find(|preset| preset.name == name)
+                    .context("프리셋을 찾을 수 없습니다.")?
+                    .settings
+                    .clone();
+                self.refresh()?;
+                match component.as_str() {
+                    "audio" => {
+                        if self.playback(&settings.audio.source)?.id
+                            == self.playback(&settings.audio.target)?.id
+                        {
+                            bail!("원본과 대상이 같은 장치입니다.");
+                        }
+                        let same = self.draft.audio.source == settings.audio.source
+                            && self.draft.audio.target == settings.audio.target;
+                        if !same {
+                            self.stop_audio()?;
+                        }
+                        self.draft.audio = settings.audio;
+                        if !self.audio.as_ref().is_some_and(OwnedProcess::alive) {
+                            self.execute(Command::AudioStart {})?;
+                        }
+                    }
+                    "display" => {
+                        if !settings.displays().any(|display| display.enabled) {
+                            settings.display.enabled = true;
+                        }
+                        for display in settings.displays().filter(|display| display.enabled) {
+                            display.validate()?;
+                            if !self.displays.as_array().is_some_and(|displays| {
+                                displays.iter().any(|item| item["id"] == display.display)
+                            }) {
+                                bail!("프리셋 디스플레이가 연결되어 있지 않습니다.");
+                            }
+                        }
+                        if self.draft.display != settings.display
+                            || self.draft.additional_displays != settings.additional_displays
+                        {
+                            for worker in self.mirrors.values_mut() {
+                                worker.stop()?;
+                            }
+                            self.mirrors.clear();
+                        }
+                        self.draft.display = settings.display;
+                        self.draft.additional_displays = settings.additional_displays;
+                        let indexes: Vec<usize> = self
+                            .draft
+                            .displays()
+                            .enumerate()
+                            .filter_map(|(index, display)| display.enabled.then_some(index))
+                            .collect();
+                        for index in indexes {
+                            if !self.mirrors.get(&index).is_some_and(OwnedProcess::alive) {
+                                self.execute(Command::MirrorStart { index })?;
+                            }
+                        }
+                    }
+                    _ => bail!("지원하지 않는 구성요소입니다."),
+                }
+            }
             Command::PresetDelete { name } => {
                 self.check_store_disk()?;
                 if let Some(error) = &self.storage_error {
@@ -550,6 +618,20 @@ impl Controller {
                 self.cable.output_id = settings.output_id;
                 self.cable.gain_db = settings.gain_db;
                 self.cable.muted = settings.muted;
+            }
+            Command::CablePresetRun { name } => {
+                self.refresh()?;
+                self.cable
+                    .presets
+                    .iter()
+                    .find(|preset| preset.name == name)
+                    .context("프리셋을 찾을 수 없습니다.")?
+                    .settings()
+                    .validate_route(&self.endpoints)?;
+                self.execute(Command::CablePresetLoad { name })?;
+                if !self.monitor.as_ref().is_some_and(OwnedProcess::alive) {
+                    self.execute(Command::CableStart {})?;
+                }
             }
             Command::CablePresetDelete { name } => {
                 self.check_cable_disk()?;

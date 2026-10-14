@@ -12,6 +12,42 @@
   flex-direction: column;
   min-height: 0;
 }
+.tab-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr));
+  align-content: start;
+  gap: 10px;
+  padding: 10px;
+}
+.tab-widget {
+  min-width: 0;
+  background: #1c2533;
+  border: 1px solid #354154;
+  border-radius: 5px;
+  padding: 10px;
+}
+.tab-widget > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  gap: 8px;
+}
+.tab-widget > header button {
+  padding: 2px 8px;
+}
+.tab-widget .panel-body {
+  height: auto;
+  overflow: visible;
+  padding: 0;
+}
+.launch-content {
+  display: grid;
+  gap: 10px;
+}
 .tab-name-input {
   width: 100px;
   min-width: 60px;
