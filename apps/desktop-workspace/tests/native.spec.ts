@@ -136,7 +136,7 @@ test("native choices, worker failures and detached panels use the same service s
     });
   });
   await page.goto("/?mode=native");
-  const panel = page.getByRole("region", { name: "Desktop Control 패널" });
+  const panel = page.getByRole("region", { name: "Audio Repeater 패널" });
   await expect(
     panel.getByRole("button", { name: "오디오 시작", exact: true }),
   ).toBeEnabled();
@@ -167,7 +167,7 @@ test("native choices, worker failures and detached panels use the same service s
   const popupEvent = page.waitForEvent("popup");
   await panel.getByRole("button", { name: "새 창으로 이동" }).click();
   const popup = await popupEvent;
-  const detached = popup.getByRole("region", { name: "Desktop Control 패널" });
+  const detached = popup.getByRole("region", { name: "Audio Repeater 패널" });
   await expect(detached.getByText(/Initialize failed/)).toBeVisible();
   await detached.getByRole("button", { name: "주 창으로 합치기" }).click();
   await expect(panel.getByText(/Initialize failed/)).toBeVisible();
@@ -207,7 +207,7 @@ test("native apply requires a saved configuration and a fresh preview", async ({
     state.revision++;
     await route.fulfill({ json: { id, ok: true, data: { state, result } } });
   });
-  await page.goto("/?mode=native");
+  await page.goto("/?mode=native&panel=windows");
   const panel = page.getByRole("region", { name: "Window Manager 패널" });
   const apply = panel.getByRole("button", {
     name: "실제 창에 적용",
@@ -262,7 +262,7 @@ test("missing native service disables controls without falling back to mock devi
   });
   await page.goto("/?mode=native");
   const start = page
-    .getByRole("region", { name: "Desktop Control 패널" })
+    .getByRole("region", { name: "Audio Repeater 패널" })
     .getByRole("button", { name: "오디오 시작", exact: true });
   await expect(start).toBeEnabled();
   disconnected = true;
@@ -329,7 +329,7 @@ test("native edits preserve window resources, reorder ratios and commit cable vo
       json: { id, ok: true, data: { state, result: null } },
     });
   });
-  await page.goto("/?mode=native");
+  await page.goto("/?mode=native&panel=windows");
   const panel = page.getByRole("region", { name: "Window Manager 패널" });
   await panel.getByText("배치·그룹·화면 영역 편집", { exact: true }).click();
   await panel.getByRole("button", { name: "창 순서 위로" }).nth(1).click();
@@ -351,7 +351,9 @@ test("native edits preserve window resources, reorder ratios and commit cable vo
   expect(Object.keys(state.wm.configuration!.windows)).toHaveLength(2);
   expect(state.wm.configuration!.views.v.roots.main.children).toHaveLength(1);
   await page
-    .getByRole("button", { name: "Audio Cable 열기", exact: true })
+    .locator(".dv-tab")
+    .filter({ hasText: "Audio Cable" })
+    .first()
     .click();
   const cable = page.getByRole("region", { name: "Audio Cable 패널" });
   await cable.getByRole("slider", { name: /모니터링 볼륨/ }).press("ArrowLeft");
@@ -363,9 +365,11 @@ test("native edits preserve window resources, reorder ratios and commit cable vo
     [{ kind: "cable.volume", value: 99.99 }],
   );
   await page
-    .getByRole("button", { name: "Desktop Control 열기", exact: true })
+    .locator(".dv-tab")
+    .filter({ hasText: "Display Relay" })
+    .first()
     .click();
-  const audio = page.getByRole("region", { name: "Desktop Control 패널" });
+  const audio = page.getByRole("region", { name: "Display Relay 패널" });
   await audio.getByLabel("미러링 1 FPS", { exact: true }).selectOption("60");
   await expect(audio.getByLabel("미러링 1 FPS", { exact: true })).toHaveValue(
     "60",

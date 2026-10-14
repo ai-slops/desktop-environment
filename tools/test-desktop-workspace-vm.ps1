@@ -17,6 +17,7 @@ if(!(Test-Path -LiteralPath (Join-Path $package ('payload\'+$metadata.version)))
     $resources=Join-Path $newPayload 'resources\app'
     foreach($directory in @('shell','dist')){Get-ChildItem -LiteralPath (Join-Path $source ('apps\desktop-workspace\'+$directory)) | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $resources $directory) -Recurse -Force}}
     Copy-Item -LiteralPath (Join-Path $source 'apps\desktop-workspace\server.mjs') -Destination (Join-Path $resources 'server.mjs') -Force
+    Get-ChildItem -LiteralPath (Join-Path $source 'target\workspace-test-bin') | ForEach-Object {Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $resources 'bin') -Force}
 }
 $electron=Join-Path $package ('payload\'+$metadata.version+'\DesktopWorkspaceUI.exe')
 function Run-Tool([string]$file,[string[]]$arguments){

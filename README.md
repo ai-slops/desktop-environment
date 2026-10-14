@@ -19,7 +19,7 @@ Concrete utilities now included:
 ## Saved-settings GUI
 
 Double-click `start-desktop-workspace.cmd` for [Desktop Workspace](apps/desktop-workspace/README.md):
-the three control panels in an installed native window, with dockable tabs, splits,
+the four components in an installed native window, with dockable tabs, splits,
 drag-out windows and real Rust-backed audio, cable, mirroring and manual window controls.
 Run `just desktop-workspace-install` to install/update outside build outputs;
 closing the UI leaves background jobs running. `just desktop-workspace-stop`
@@ -29,7 +29,7 @@ It reads existing settings and starts outputs only on explicit action. See
 [integration and test coverage](docs/desktop-workspace.md) for architecture and
 the advanced features that remain in the native GUI/CLI.
 
-Run `just window-manager` or `cargo run -p window-manager` for window management.
+Run `cargo run -p window-manager` for window management.
 Create a monitor region under **화면 / 영역**, add existing windows under **창 목록**,
 and commit **전환 미리보기 → 계획 적용**. Startup and editing never auto-apply layouts.
 This is a Windows feasibility implementation with a usable manual interface; the
@@ -37,7 +37,7 @@ complete P1 acceptance/compatibility gate is still open. See the
 [window-manager guide and coverage](docs/window-manager.md) and the
 [provided specification](docs/window-management-system-specification.md).
 
-Run `just desktop-control-native` to build the legacy native tools and open
+Run `cargo run -p desktop-control` to build the legacy native tools and open
 the control panel. Choose audio outputs and a display, enable the tools you need,
 and save a named preset. You can load it later and start both tools with one click.
 The last saved settings are restored when the GUI opens; routing and mirroring

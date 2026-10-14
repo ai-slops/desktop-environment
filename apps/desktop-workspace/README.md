@@ -1,12 +1,12 @@
 # Desktop Workspace
 
-Installed desktop control panels for Desktop Control, Audio Cable, and Window Manager.
+Installed control panes for Audio Repeater, Display Relay, Audio Cable, and Window Manager.
 Production controls existing Windows adapters through a Rust host. Mirroring
 video remains in separate native display-relay windows.
 
 ## Start on Windows
 
-Run `just desktop-workspace-install`, then `just desktop-workspace`, or double-click
+Run `just desktop-workspace-install`, then open **Desktop Workspace** from Start, or double-click
 `start-desktop-workspace.cmd`. The native EXE has Windows' normal title bar and
 borders, with no browser tabs, address bar or application menu. Drag a panel tab
 outside all workspace windows and release to create another native window.
@@ -15,9 +15,9 @@ runtime and needs none of those build tools to run.
 
 ```powershell
 just desktop-workspace-install  # safe while UI windows are open
-just desktop-workspace
-just desktop-workspace-daemon   # start only the background service
-just desktop-workspace-stop     # explicitly stop service and its jobs
+just build                     # prepare a development package without installing
+just check
+just fmt
 ```
 
 Default installation is `%LOCALAPPDATA%/Programs/DesktopWorkspace`, or
@@ -49,12 +49,20 @@ settings. Stop the old Window Manager before connecting to the same locked file.
 Preset/cable saves reject external file changes and protect malformed originals.
 Stop owned outputs and use **설정 다시 읽기** before saving after an external change.
 
-## Panels and windows
+## Tabs, panes and windows
+
+Each top-level tab owns its own pane list and layout. Add a tab independently,
+then choose a component and use **pane 추가** inside that tab. Multiple panes may
+show one component; they share its native settings/jobs while keeping window editor
+selections separate. Default tabs show each of the four components individually.
+Presets appear first in Audio Repeater, Display Relay and Audio Cable panes. VAC
+preset loads update gain/mute in the existing worker when the route matches; a
+changed route automatically replaces the running monitor after validation. A
+stopped monitor stays stopped when loading a preset.
 
 Drag tabs onto tab strips to combine, or onto panel edges to split. Drag separators
 to resize. In the native EXE, dragging a tab outside the windows detaches it without
-a separate button. In the browser, **새 창으로 이동** detaches a panel. The
-activity bar reopens closed panels. Selections, unsaved window edits, previews and
+a separate button. In the browser, **새 창으로 이동** detaches a panel. **pane 추가** reopens closed component views. Selections, unsaved window edits, previews and
 jobs survive panel moves within one workspace instance.
 
 Closing panels or browser tabs preserves native jobs. Use **전체 작업 중지** or
@@ -63,7 +71,7 @@ A crashed Rust host terminates its audio/mirror children
 through Windows Job Objects; window recovery uses the existing independent watchdog.
 The stop script can terminate a recorded broken server after checking PID/start time.
 
-The last complete grid is saved under `desktop-workspace.layout.v1`. Reload restores
+The last complete grid is saved under `desktop-workspace.tabs.v2`. Reload restores
 that grid and reconnects to jobs, but does not automatically open popups. Unsaved
 editor drafts reset on full reload. Independently launched pages do not exchange
 panel DOM or drafts. Native settings remain in files.
@@ -77,7 +85,8 @@ the actual returned setting. Presets retain fractional gain rather than rounding
 
 | Panel | Controls |
 | --- | --- |
-| Desktop Control | Real source/target output discovery and selection, start/stop, settings and preset CRUD, multiple mirror rows, display/fullscreen/FPS, native mirror launch/stop, final worker logs |
+| Audio Repeater | Real source/target output discovery and selection, start/stop, settings and preset CRUD, final worker logs |
+| Display Relay | Display/fullscreen/FPS, multiple mirror configurations, independent native launch/stop, component presets |
 | Audio Cable | Recognized/manual playback-capture pairs, output selection, monitoring start/stop, volume/mute, settings and presets, worker logs |
 | Window Manager | Explicit connection, inventories, reference registration/rebinding, view and region creation, group strategies/name/gap/grid columns, window order and placement removal, region adjustment, capability opt-ins, saved editing, preview/apply, undo preview, pause/resume and hidden-window recovery |
 | Diagnostics | Command ID, time, outcome, full worker cause/logs, settings directory and connection errors |

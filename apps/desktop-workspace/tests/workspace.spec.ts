@@ -7,7 +7,6 @@ const windows = (page: Page) =>
 test.beforeEach(async ({ page }) => {
   await page.goto("/?mode=fixture");
   await expect(audio(page)).toBeVisible();
-  await expect(page.getByText("테스트 모드", { exact: true })).toBeVisible();
 });
 test("single selection is visible and default aliases cannot route into themselves", async ({
   page,
@@ -39,6 +38,8 @@ test("exclusive error includes remedy and request ID in both panel and diagnosti
   await expect(issue).toContainText("0x8889000A");
   await expect(issue).toContainText("공유 모드");
   await expect(issue).toContainText("fixture-");
+  await page.getByLabel("추가할 pane 구성요소").selectOption("diagnostics");
+  await page.getByRole("button", { name: "pane 추가", exact: true }).click();
   await expect(page.getByRole("log", { name: "명령 기록" })).toContainText(
     "AUDCLNT_E_DEVICE_IN_USE",
   );
@@ -46,6 +47,11 @@ test("exclusive error includes remedy and request ID in both panel and diagnosti
 test("window application requires a fresh preview and affects only selected mock windows", async ({
   page,
 }) => {
+  await page
+    .locator(".dv-tab")
+    .filter({ hasText: "Window Manager" })
+    .first()
+    .click();
   const panel = windows(page);
   await expect(
     panel.getByRole("button", { name: "가상 창에 적용" }),
@@ -74,7 +80,9 @@ test("popout and redocking preserve shared state and running mock jobs", async (
   await audio(popup)
     .getByRole("button", { name: "테스트 라우팅 시작" })
     .click();
-  await expect(page.locator("footer")).toContainText("오디오 테스트 실행 중");
+  await expect(
+    audio(popup).getByText("테스트 실행 중", { exact: true }),
+  ).toBeVisible();
   await audio(popup).getByRole("button", { name: "주 창으로 합치기" }).click();
   await expect(audio(page)).toBeVisible();
   await expect(
@@ -89,14 +97,20 @@ test("popout and redocking preserve shared state and running mock jobs", async (
 test("tab dragging changes groups and the arrangement survives reload", async ({
   page,
 }) => {
-  const source = page.locator(".dv-tab").filter({ hasText: "Desktop Control" });
-  const target = page.locator(".dv-tab").filter({ hasText: "Window Manager" });
+  const source = page
+    .locator(".dv-tab")
+    .filter({ hasText: "Audio Repeater" })
+    .first();
+  const target = page
+    .locator(".dv-tab")
+    .filter({ hasText: "Window Manager" })
+    .first();
   await source.dragTo(target);
   await expect
     .poll(() =>
       page.evaluate(() => {
         const layout = JSON.parse(
-          localStorage.getItem("desktop-workspace.layout.v1") ?? "{}",
+          localStorage.getItem("desktop-workspace.tabs.v2") ?? "{}",
         );
         const groups: string[][] = [];
         const walk = (node: { type: string; data: unknown }) => {
@@ -116,16 +130,18 @@ test("tab dragging changes groups and the arrangement survives reload", async ({
   await page.reload();
   await expect(audio(page)).toBeVisible();
   await expect(
-    page.locator(".dv-tab").filter({ hasText: "Audio Cable" }),
+    page.locator(".dv-tab").filter({ hasText: "Audio Cable" }).first(),
   ).toBeVisible();
 });
 test("corrupt saved layout falls back without crashing", async ({ page }) => {
   await page.evaluate(() =>
-    localStorage.setItem("desktop-workspace.layout.v1", "bad-json"),
+    localStorage.setItem("desktop-workspace.tabs.v2", "bad-json"),
   );
   await page.reload();
   await expect(audio(page)).toBeVisible();
-  await expect(page.locator("footer")).toContainText("기본 배치");
+  await expect(
+    page.getByRole("button", { name: "탭 추가", exact: true }),
+  ).toBeVisible();
 });
 test("workspace screenshot", async ({ page }) => {
   await page.screenshot({ path: "test-results/workspace.png", fullPage: true });

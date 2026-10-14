@@ -1,7 +1,9 @@
 # Integrated Desktop Workspace
 
-Desktop Control, Audio Cable and Window Manager now have native service-backed
-web control panels. Tabs split, resize and detach into browser windows. Mirroring
+Audio Repeater, Display Relay, Audio Cable and Window Manager have separate
+service-backed control panes. Each tab owns a pane list: components can be added,
+split and arranged inside the tab independently of creating or moving tabs. Tabs
+can detach into native windows, and panes retain their own editor selections. Mirroring
 video stays in native display-relay windows. See [setup and available controls](../apps/desktop-workspace/README.md).
 
 The installed default is a dedicated Electron EXE with normal Windows decorations
@@ -109,3 +111,10 @@ Recorded signal attenuation measured -46.020736 dB at 0.5% and -66.020088 dB at
 0.05%. Mute/unmute and owned monitor shutdown passed. The continuity acceptance
 also passed with measured guest CPU utilization at 100%. VM requests/results and
 native-window screenshots are retained under ignored `target/vm-session/`.
+
+The tab/pane revision additionally passed guest tests for pane lists isolated by
+tab, layout restoration after reopening, preset controls above devices, separate
+Audio Repeater/Display Relay preset loading, unchanged worker PID for VAC gain-only
+presets, automatic restart for changed VAC routes, and keeping stopped routes
+stopped. One CPU saturation run measured a 60.25 ms output gap and failed the
+unchanged continuity gate; the subsequent full run passed with 0.021 ms gaps.

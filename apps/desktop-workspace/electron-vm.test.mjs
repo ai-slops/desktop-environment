@@ -183,6 +183,20 @@ try {
   assert.ok(target, "VM Voicemeeter target required");
   await command({ kind: "cable.select", id: pair.playback_id });
   await command({ kind: "cable.output", id: target.id });
+  await command({ kind: "cable.preset.save", name: "quiet" });
+  const alternate = state.endpoints.find(
+    (endpoint) =>
+      endpoint.flow === "playback" &&
+      endpoint.name === "Voicemeeter Input (VB-Audio Voicemeeter VAIO)",
+  );
+  assert.ok(alternate);
+  await command({ kind: "cable.output", id: alternate.id });
+  await command({ kind: "cable.preset.save", name: "alternate" });
+  assert.equal(
+    (await command({ kind: "cable.preset.load", name: "quiet" })).jobs.cable
+      .phase,
+    "stopped",
+  );
   await command({ kind: "cable.start" });
   await expect
     .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase, {
@@ -190,6 +204,73 @@ try {
     })
     .toBe("running");
   console.log("VM step: real audio worker running");
+  const originalPid = (await command({ kind: "snapshot" })).jobs.cable.pid;
+  assert.ok(Number.isInteger(originalPid));
+  await command({ kind: "cable.preset.save", name: "quiet" });
+  await command({ kind: "cable.volume", value: 0.5 });
+  const loaded = await command({ kind: "cable.preset.load", name: "quiet" });
+  assert.equal(loaded.jobs.cable.phase, "running");
+  assert.equal(
+    loaded.jobs.cable.pid,
+    originalPid,
+    "Gain-only presets must retain the audio worker",
+  );
+  await expect(cable.locator("output")).toHaveText("0.05%");
+  const switched = await command({
+    kind: "cable.preset.load",
+    name: "alternate",
+  });
+  assert.notEqual(switched.jobs.cable.pid, originalPid);
+  await expect
+    .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase, {
+      timeout: 15000,
+    })
+    .toBe("running");
+  await command({ kind: "cable.preset.load", name: "quiet" });
+  await expect
+    .poll(async () => (await command({ kind: "snapshot" })).jobs.cable.phase, {
+      timeout: 15000,
+    })
+    .toBe("running");
+  const presets = cable.getByRole("group", { name: "프리셋" });
+  const presetBounds = await presets.boundingBox();
+  const deviceBounds = await cable
+    .getByRole("group", { name: "설치된 케이블 하나 선택" })
+    .boundingBox();
+  assert.ok(presetBounds && deviceBounds && presetBounds.y < deviceBounds.y);
+  assert.equal(
+    await page
+      .getByText("서비스 연결됨 · 창을 닫아도 작업 유지", { exact: true })
+      .count(),
+    0,
+  );
+  await page.getByLabel("추가할 pane 구성요소").selectOption("display");
+  await page.getByRole("button", { name: "pane 추가", exact: true }).click();
+  await expect(
+    page.getByRole("region", { name: "Display Relay 패널" }),
+  ).toBeVisible();
+  await page
+    .locator(".dv-tab")
+    .filter({ hasText: "Audio Repeater" })
+    .first()
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Audio Repeater 패널" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Display Relay 패널" }),
+  ).toBeHidden();
+  await page
+    .locator(".dv-tab")
+    .filter({ hasText: "Audio Cable" })
+    .first()
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Display Relay 패널" }),
+  ).toBeVisible();
+  console.log(
+    "VM step: live VAC preset and independent per-tab pane lists passed",
+  );
   // Install a distinct immutable version while UI and audio images are open.
   const update = join(root, "update-package");
   const nextVersion = "v" + randomUUID().replaceAll("-", "").slice(0, 24);
@@ -368,6 +449,9 @@ try {
   app = await launch();
   console.log("VM step: reopened UI");
   const reopened = await app.firstWindow();
+  await expect(
+    reopened.getByRole("region", { name: "Display Relay 패널" }),
+  ).toBeVisible();
   await expect(
     reopened
       .getByRole("region", { name: "Audio Cable 패널" })

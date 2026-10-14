@@ -18,6 +18,8 @@ try{
         Add-File (Join-Path $repo 'target\desktop-workspace-package\DesktopWorkspace.exe') 'target/workspace-test-package/DesktopWorkspace.exe'
         $entry=$zip.CreateEntry('target/workspace-vm-reuse.json');$writer=[IO.StreamWriter]::new($entry.Open());try{$writer.Write('{"source":"'+$ReuseGuestSource+'"}')}finally{$writer.Dispose()}
         Add-Tree (Join-Path $repo 'apps\desktop-workspace\dist') 'apps/desktop-workspace/dist'
+        $metadata=Get-Content -LiteralPath (Join-Path $repo 'target\desktop-workspace-package\package.json') -Raw|ConvertFrom-Json
+        Add-Tree (Join-Path $repo ('target\desktop-workspace-package\payload\'+$metadata.version+'\resources\app\bin')) 'target/workspace-test-bin'
     }else{Add-Tree (Join-Path $repo 'target\desktop-workspace-package') 'target/workspace-test-package'}
     $modules=Join-Path $repo 'apps\desktop-workspace\node_modules'
     foreach($name in @('@playwright/test','playwright','playwright-core')){
