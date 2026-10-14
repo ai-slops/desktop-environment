@@ -1,6 +1,7 @@
 [tools]
 rust = "stable"
 just = "latest"
+node = "latest"
 pnpm = "10.29.2"
 
 [env]
