@@ -23,9 +23,13 @@ $optionsPath = Join-Path $workspace 'target/vm-test-options.json'
 if (Test-Path -LiteralPath $optionsPath) {
     if ((Get-Item -LiteralPath $optionsPath).Length -gt 1024) { throw 'VM test options exceed budget.' }
     $options = Get-Content -LiteralPath $optionsPath -Raw | ConvertFrom-Json
-    if (@($options.PSObject.Properties.Name).Count -ne 1 -or $options.scope -notin @('window-manager', 'audio')) { throw 'Unknown VM test scope.' }
-    $WindowManagerOnly = $options.scope -eq 'window-manager'
-    $AudioOnly = $options.scope -eq 'audio'
+    if (@($options.PSObject.Properties.Name).Count -ne 1 -or $options.scope -notin @('window-manager', 'audio', 'workspace-shell')) { throw 'Unknown VM test scope.' }
+    if($options.scope -eq 'workspace-shell'){
+        if(!$AudioOnly -and !$WindowManagerOnly -and !$DesktopControlOnly){ & (Join-Path $PSScriptRoot 'test-desktop-workspace-vm.ps1'); return }
+    }else{
+        $WindowManagerOnly = $options.scope -eq 'window-manager'
+        $AudioOnly = $options.scope -eq 'audio'
+    }
 }
 if (([int]$WindowManagerOnly.IsPresent + [int]$DesktopControlOnly.IsPresent + [int]$AudioOnly.IsPresent) -gt 1) { throw 'Choose one VM test scope.' }
 $sessionId = (Get-Process -Id $PID).SessionId

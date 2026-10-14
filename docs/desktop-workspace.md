@@ -95,3 +95,17 @@ attenuation at 0.5%/0.05%. Host operations are limited to editing and building.
 Browser fixtures and idle inventory do not certify
 audible routing or hardware capture/rendering. External application compatibility
 still needs per-app verification before opting into DPI transfer, hiding or show-state.
+
+### Installed shell acceptance (2026-10-15 KST)
+
+Verified in the owned Hyper-V `DesktopEnvironment-AudioTest`, using guest-only
+settings and audio fixtures. The installed stable launcher, decimal entry/save,
+update while both UI and audio images are open, updated UI delivery without daemon
+restart, physical mouse tab tear-off, shared popout state, all-window close and UI
+reconnect passed. Ten Node transport/fixture tests and the Rust core/service/audio
+regressions passed, including preserving both STA and MTA COM initialization.
+
+Recorded signal attenuation measured -46.020736 dB at 0.5% and -66.020088 dB at
+0.05%. Mute/unmute and owned monitor shutdown passed. The continuity acceptance
+also passed with measured guest CPU utilization at 100%. VM requests/results and
+native-window screenshots are retained under ignored `target/vm-session/`.

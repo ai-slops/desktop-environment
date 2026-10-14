@@ -111,6 +111,26 @@ closes/reopens the UI around an active audio job, and runs native/DSP regression
 The scoped VM worker uses the checksum-verified source/package archive. Runtime
 cache reuse transfers source changes without recopying Electron on every run.
 
+The owned Hyper-V guest is `DesktopEnvironment-AudioTest`; its identity is stored
+in `target/vm-hyperv/owner.json`. Connect with `tools/connect-desktop-test-vm.ps1`
+from an elevated PowerShell, passing a DPAPI-protected credential exported with
+`Export-Clixml`. No passwords belong in source files. Log into the guest desktop
+before native mouse tests. The optional `prepare-workspace-vm-desktop.ps1` helper
+performs one guest-only autologon and restores its registry settings at logon.
+
+After preparing `target/desktop-workspace-package`, submit the fixed VM workflow:
+
+```powershell
+./tools/package-desktop-workspace-vm.ps1
+./tools/request-desktop-test-vm-session.ps1 -Action SyncSource
+# Wait for this request's successful response before submitting Test.
+./tools/request-desktop-test-vm-session.ps1 -Action Test
+```
+
+Requests return paths to results/logs under `target/vm-session/responses`.
+`-ReuseGuestSource source-<sha256>` can reuse an earlier complete guest package.
+`Shutdown` stops the VM without deleting its installed tools or ownership marker.
+
 Chrome tests use an isolated profile and mock native API effects. Native integration
 requires host/window-manager under `target/desktop-control/debug`: it queries real
 devices and uses temporary settings plus one disposable WinForms window to test
